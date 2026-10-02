@@ -12,17 +12,56 @@ pub enum Algorithm {
     Sha512,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Fields are private so `parse` is the only constructor and its invariants
+/// (non-empty secret, 6-8 digits, period above 0) always hold.
+#[derive(Clone, PartialEq, Eq)]
 pub struct Totp {
-    pub secret: Vec<u8>,
-    pub algorithm: Algorithm,
-    pub digits: u32,
-    pub period: u64,
-    pub issuer: Option<String>,
-    pub account: Option<String>,
+    secret: Vec<u8>,
+    algorithm: Algorithm,
+    digits: u32,
+    period: u64,
+    issuer: Option<String>,
+    account: Option<String>,
+}
+
+impl std::fmt::Debug for Totp {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Totp")
+            .field("algorithm", &self.algorithm)
+            .field("digits", &self.digits)
+            .field("period", &self.period)
+            .field("issuer", &self.issuer)
+            .field("account", &self.account)
+            .field("secret", &"<redacted>")
+            .finish()
+    }
 }
 
 impl Totp {
+    pub fn secret(&self) -> &[u8] {
+        &self.secret
+    }
+
+    pub fn algorithm(&self) -> Algorithm {
+        self.algorithm
+    }
+
+    pub fn digits(&self) -> u32 {
+        self.digits
+    }
+
+    pub fn period(&self) -> u64 {
+        self.period
+    }
+
+    pub fn issuer(&self) -> Option<&str> {
+        self.issuer.as_deref()
+    }
+
+    pub fn account(&self) -> Option<&str> {
+        self.account.as_deref()
+    }
+
     /// Accepts an `otpauth://totp/...` URI or a bare base32 secret.
     pub fn parse(input: &str) -> Result<Totp> {
         let s = input.trim();
@@ -98,6 +137,10 @@ fn decode_base32(s: &str) -> Result<Vec<u8>> {
         .map_err(|e| Error::Invalid(format!("TOTP secret is not base32: {e}")))
 }
 
+fn non_empty(s: &str) -> Option<String> {
+    (!s.is_empty()).then(|| s.to_owned())
+}
+
 fn parse_uri(s: &str) -> Result<Totp> {
     let invalid = |msg: &str| Error::Invalid(format!("otpauth URI: {msg}"));
     let url = url::Url::parse(s).map_err(|e| invalid(&e.to_string()))?;
@@ -108,7 +151,7 @@ fn parse_uri(s: &str) -> Result<Totp> {
         .decode_utf8_lossy()
         .into_owned();
     let (issuer, account) = match label.split_once(':') {
-        Some((i, a)) => (Some(i.trim().to_owned()), Some(a.trim().to_owned())),
+        Some((i, a)) => (non_empty(i.trim()), non_empty(a.trim())),
         None if label.is_empty() => (None, None),
         None => (None, Some(label)),
     };
@@ -249,5 +292,22 @@ mod tests {
                 "{bad:?} should fail"
             );
         }
+    }
+
+    #[test]
+    fn empty_label_parts_become_none() {
+        let t = Totp::parse("otpauth://totp/Example:?secret=JBSWY3DPEHPK3PXP").unwrap();
+        assert_eq!((t.issuer(), t.account()), (Some("Example"), None));
+        let t = Totp::parse("otpauth://totp/:alice?secret=JBSWY3DPEHPK3PXP").unwrap();
+        assert_eq!((t.issuer(), t.account()), (None, Some("alice")));
+    }
+
+    #[test]
+    fn debug_output_redacts_secret() {
+        let t = Totp::parse("otpauth://totp/Example:alice?secret=JBSWY3DPEHPK3PXP").unwrap();
+        let dbg = format!("{t:?}");
+        assert!(!dbg.contains(&format!("{:?}", t.secret())));
+        assert!(!dbg.contains("222"), "{dbg}");
+        assert!(dbg.contains("<redacted>") && dbg.contains("alice"));
     }
 }
