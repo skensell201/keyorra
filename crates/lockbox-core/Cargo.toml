@@ -5,7 +5,7 @@ edition = "2021"
 publish = false
 
 [dependencies]
-argon2 = "0.5"
+argon2 = { version = "0.5", features = ["zeroize"] }
 chacha20poly1305 = "0.10"
 csv = "1"
 data-encoding = "2"
@@ -24,6 +24,10 @@ uuid = { version = "1", features = ["v4", "serde"] }
 zeroize = "1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 zxcvbn = "3"
+
+[features]
+# Exposes cheap, insecure KDF parameters for tests of dependent crates.
+test-utils = []
 
 [dev-dependencies]
 mockito = "1"

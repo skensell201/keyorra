@@ -16,7 +16,7 @@ pub fn seal(key: &Key, plaintext: &[u8], aad: &[u8]) -> Vec<u8> {
     let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
     let ciphertext = cipher
         .encrypt(&nonce, Payload { msg: plaintext, aad })
-        .expect("XChaCha20-Poly1305 cannot fail on in-memory buffers");
+        .expect("plaintext exceeds the XChaCha20-Poly1305 length limit");
     let mut out = Vec::with_capacity(NONCE_LEN + ciphertext.len());
     out.extend_from_slice(&nonce);
     out.extend_from_slice(&ciphertext);

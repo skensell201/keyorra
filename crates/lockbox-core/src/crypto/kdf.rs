@@ -1,6 +1,6 @@
 use argon2::{Algorithm, Argon2, Params, Version};
 use serde::{Deserialize, Serialize};
-use zeroize::Zeroize;
+use zeroize::{Zeroize, Zeroizing};
 
 use super::Key;
 use crate::{Error, Result};
@@ -22,16 +22,40 @@ pub struct KdfParams {
 impl KdfParams {
     pub const DEFAULT: Self = Self { m_kib: 64 * 1024, t: 3, p: 1 };
     /// Cheap parameters for tests only. Never use for a real vault.
+    #[cfg(any(test, feature = "test-utils"))]
     pub const INSECURE_FAST: Self = Self { m_kib: 8, t: 1, p: 1 };
+
+    const MAX_M_KIB: u32 = 4 * 1024 * 1024;
+    const MAX_T: u32 = 20;
+    const MAX_P: u32 = 8;
+
+    /// Rejects values that would hang or abort the process (e.g. from a tampered header).
+    pub fn validate(&self) -> Result<()> {
+        if self.m_kib > Self::MAX_M_KIB
+            || self.t == 0
+            || self.t > Self::MAX_T
+            || self.p == 0
+            || self.p > Self::MAX_P
+        {
+            return Err(Error::Invalid("kdf params out of bounds".into()));
+        }
+        Ok(())
+    }
 }
 
 /// Derives the key-encryption key from the master password.
 pub fn derive_kek(password: &str, salt: &[u8; 16], params: KdfParams) -> Result<Key> {
+    params.validate()?;
     let argon_params = Params::new(params.m_kib, params.t, params.p, Some(32))
         .map_err(|e| Error::Invalid(format!("kdf params: {e}")))?;
+    // Own the memory blocks so they are wiped on drop; otherwise the Argon2 working
+    // memory (derived from the password) would linger on the heap after deallocation.
+    // No test can catch a regression here.
+    let mut blocks =
+        Zeroizing::new(vec![argon2::Block::default(); argon_params.block_count()]);
     let mut out = [0u8; 32];
     Argon2::new(ALGORITHM, VERSION, argon_params)
-        .hash_password_into(password.as_bytes(), salt, &mut out)
+        .hash_password_into_with_memory(password.as_bytes(), salt, &mut out, blocks.as_mut_slice())
         .map_err(|e| Error::Invalid(format!("kdf: {e}")))?;
     let key = Key::from_bytes(out);
     out.zeroize();
@@ -70,11 +94,37 @@ mod tests {
     }
 
     #[test]
+    fn rejects_out_of_bounds_params_quickly() {
+        let fast = KdfParams::INSECURE_FAST;
+        let bad = [
+            KdfParams { m_kib: u32::MAX, ..fast },
+            KdfParams { m_kib: 4 * 1024 * 1024 + 1, ..fast },
+            KdfParams { t: u32::MAX, ..fast },
+            KdfParams { t: 21, ..fast },
+            KdfParams { t: 0, ..fast },
+            KdfParams { p: 9, ..fast },
+            KdfParams { p: 0, ..fast },
+        ];
+        let start = std::time::Instant::now();
+        for params in bad {
+            assert!(matches!(params.validate(), Err(crate::Error::Invalid(_))), "{params:?}");
+            assert!(matches!(derive_kek("pw", &SALT, params), Err(crate::Error::Invalid(_))));
+        }
+        assert!(start.elapsed().as_secs() < 2);
+    }
+
+    #[test]
+    fn default_params_are_valid() {
+        assert!(KdfParams::DEFAULT.validate().is_ok());
+    }
+
+    #[test]
     fn default_params_match_spec() {
         assert_eq!(KdfParams::DEFAULT, KdfParams { m_kib: 65536, t: 3, p: 1 });
     }
 
     /// RFC 9106 §5.3 known-answer test: guards that the dependency is Argon2id v1.3.
+    /// It exercises the dependency via the shared ALGORITHM/VERSION constants, not `derive_kek`.
     #[test]
     fn rfc9106_argon2id_vector() {
         use argon2::{AssociatedData, ParamsBuilder};
