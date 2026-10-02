@@ -1,5 +1,6 @@
 //! 1Password `.1pux` export: a zip with `export.data` (JSON) and `files/<documentId>__<fileName>`.
 
+use std::collections::HashSet;
 use std::io::{Cursor, Read, Seek};
 
 use serde_json::Value;
@@ -162,11 +163,10 @@ fn convert_item(raw: &Value, now: i64) -> Item {
             _ => FieldValue::Text(value.to_owned()),
         };
         let name = str_of(&field["name"]);
-        let label = if name.is_empty() {
-            str_of(&field["id"])
-        } else {
-            name
-        };
+        let label = [name, str_of(&field["id"]), "field"]
+            .into_iter()
+            .find(|s| !s.is_empty())
+            .unwrap_or("field");
         extra_login_fields.push(Field {
             id: label.to_owned(),
             label: label.to_owned(),
@@ -207,6 +207,7 @@ fn convert_item(raw: &Value, now: i64) -> Item {
             fields: extra_login_fields,
         });
     }
+    ensure_unique_ids(&mut item);
     item.password_history = arr(&details["passwordHistory"])
         .iter()
         .filter_map(|h| {
@@ -219,6 +220,39 @@ fn convert_item(raw: &Value, now: i64) -> Item {
     item.password_history
         .sort_by_key(|h| std::cmp::Reverse(h.changed_at));
     item
+}
+
+/// Gives blank or duplicate section and field ids a fallback (`section-N`, `field-N`,
+/// then `-2`, `-3`... suffixes); field ids are unique across the whole item.
+fn ensure_unique_ids(item: &mut Item) {
+    fn unique(seen: &mut HashSet<String>, id: &mut String, fallback: String) {
+        let base = if id.is_empty() { fallback } else { id.clone() };
+        let mut candidate = base.clone();
+        let mut n = 2;
+        while !seen.insert(candidate.clone()) {
+            candidate = format!("{base}-{n}");
+            n += 1;
+        }
+        *id = candidate;
+    }
+    let mut seen_fields = HashSet::new();
+    let mut n = 0;
+    for field in item
+        .fields
+        .iter_mut()
+        .chain(item.sections.iter_mut().flat_map(|s| s.fields.iter_mut()))
+    {
+        n += 1;
+        unique(&mut seen_fields, &mut field.id, format!("field-{n}"));
+    }
+    let mut seen_sections = HashSet::new();
+    for (i, section) in item.sections.iter_mut().enumerate() {
+        unique(
+            &mut seen_sections,
+            &mut section.id,
+            format!("section-{}", i + 1),
+        );
+    }
 }
 
 /// Section field value is an object with exactly one key naming its type.
@@ -242,9 +276,14 @@ fn convert_field(field: &Value) -> Vec<Field> {
         } else {
             title
         };
-        if let Some(key) = text(&raw["privateKey"]) {
-            out.push(make(id, label, FieldValue::Concealed(key)));
-        }
+        let Some(key) = text(&raw["privateKey"]) else {
+            // Unexpected shape: keep the whole value rather than drop it.
+            return text(raw)
+                .map(|v| make(id, label, FieldValue::Concealed(v)))
+                .into_iter()
+                .collect();
+        };
+        out.push(make(id, label, FieldValue::Concealed(key)));
         for (json_key, label) in [("publicKey", "public key"), ("fingerprint", "fingerprint")] {
             if let Some(v) = text(&raw["metadata"][json_key]) {
                 out.push(make(
@@ -261,6 +300,7 @@ fn convert_field(field: &Value) -> Vec<Field> {
         "totp" => text(raw).map(FieldValue::Totp),
         "email" => raw["email_address"]
             .as_str()
+            .filter(|s| !s.is_empty())
             .map(str::to_owned)
             .or_else(|| text(raw))
             .map(FieldValue::Email),
@@ -315,7 +355,9 @@ fn file_refs(raw: &Value) -> Vec<(String, String)> {
     let mut refs = Vec::new();
     let mut push = |v: &Value| {
         if let (Some(id), Some(name)) = (v["documentId"].as_str(), v["fileName"].as_str()) {
-            refs.push((id.to_owned(), name.to_owned()));
+            if !refs.iter().any(|(seen, _)| seen == id) {
+                refs.push((id.to_owned(), name.to_owned()));
+            }
         }
     };
     push(&raw["details"]["documentAttributes"]);

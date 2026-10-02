@@ -150,6 +150,22 @@
               "overview": { "title": "Deploy key" }
             },
             {
+              "uuid": "notes1", "createdAt": 1700000000, "updatedAt": 1700000000,
+              "state": "active", "categoryUuid": "006",
+              "details": {
+                "documentAttributes": { "fileName": "notes.txt", "documentId": "DOC456", "decryptedSize": 5 },
+                "sections": [
+                  {
+                    "title": "Files", "name": "",
+                    "fields": [
+                      { "title": "attachment", "id": "file1", "value": { "file": { "fileName": "notes.txt", "documentId": "DOC456" } } }
+                    ]
+                  }
+                ]
+              },
+              "overview": { "title": "Notes file" }
+            },
+            {
               "uuid": "srv1", "createdAt": 1700000000, "updatedAt": 1700000000,
               "state": "archived", "categoryUuid": "110",
               "details": {

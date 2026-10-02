@@ -26,6 +26,7 @@ fn full_export() -> Vec<u8> {
         ("export.attributes", br#"{"version":3}"#),
         ("export.data", EXPORT_DATA.as_bytes()),
         ("files/DOC123__passport.pdf", b"%PDF-1.4"),
+        ("files/DOC456__notes.txt", b"hello"),
     ])
 }
 
@@ -56,7 +57,7 @@ fn imports_vaults_and_skips_trashed_items() {
         .iter()
         .map(|v| (v.name.as_str(), v.items.len()))
         .collect();
-    assert_eq!(vaults, [("Personal", 6), ("Datagile", 3)]);
+    assert_eq!(vaults, [("Personal", 6), ("Datagile", 4)]);
     assert_eq!(plan.skipped.len(), 1);
     assert_eq!(plan.skipped[0].title, "Old login");
     assert!(plan.skipped[0].reason.contains("trashed"));
@@ -310,7 +311,7 @@ fn corrupt_attachment_is_skipped_not_fatal() {
         "{}",
         skipped.reason
     );
-    assert_eq!(plan.item_count(), 9, "the other items are still imported");
+    assert_eq!(plan.item_count(), 10, "the other items are still imported");
 }
 
 #[test]
@@ -346,4 +347,95 @@ fn details_password_does_not_duplicate_a_login_password() {
     let item = &plan.vaults[0].items[0].item;
     assert_eq!(item.password(), Some("real"));
     assert_eq!(item.fields.len(), 1);
+}
+
+#[test]
+fn a_file_referenced_twice_is_attached_once() {
+    let plan = onepux::parse(&full_export(), NOW).unwrap();
+    let item = plan.vaults[1]
+        .items
+        .iter()
+        .find(|i| i.item.title == "Notes file")
+        .unwrap();
+    assert_eq!(
+        item.attachments,
+        vec![("notes.txt".to_string(), b"hello".to_vec())]
+    );
+}
+
+#[test]
+fn section_ids_are_non_empty_and_unique_per_item() {
+    let plan = onepux::parse(&full_export(), NOW).unwrap();
+    for item in plan
+        .vaults
+        .iter()
+        .flat_map(|v| v.items.iter())
+        .map(|i| &i.item)
+    {
+        let mut ids: Vec<_> = item.sections.iter().map(|s| s.id.as_str()).collect();
+        assert!(
+            ids.iter().all(|id| !id.is_empty()),
+            "{}: {ids:?}",
+            item.title
+        );
+        let n = ids.len();
+        ids.sort();
+        ids.dedup();
+        assert_eq!(ids.len(), n, "{}", item.title);
+    }
+}
+
+#[test]
+fn blank_and_duplicate_ids_get_fallbacks() {
+    let json = one_item_export(
+        r#"{"uuid":"s","state":"active","categoryUuid":"003","details":{"loginFields":[{"value":"x","fieldType":"T"}],"sections":[
+            {"title":"A","name":"","fields":[{"title":"one","id":"f","value":{"string":"1"}},{"title":"two","id":"f","value":{"string":"2"}},{"title":"three","id":"","value":{"string":"3"}}]},
+            {"title":"B","name":"","fields":[{"title":"four","id":"f","value":{"string":"4"}}]}]},"overview":{"title":"S"}}"#,
+    );
+    let plan = onepux::parse(&zip_of(&json, NO_FILES), NOW).unwrap();
+    let item = &plan.vaults[0].items[0].item;
+    let section_ids: Vec<_> = item.sections.iter().map(|s| s.id.as_str()).collect();
+    assert_eq!(section_ids, ["section-1", "section-2", "login-fields"]);
+    let mut field_ids: Vec<_> = item
+        .sections
+        .iter()
+        .flat_map(|s| s.fields.iter())
+        .map(|f| f.id.as_str())
+        .collect();
+    assert!(field_ids.iter().all(|id| !id.is_empty()));
+    let n = field_ids.len();
+    field_ids.sort();
+    field_ids.dedup();
+    assert_eq!(field_ids.len(), n, "field ids are unique");
+    let login = item.sections.last().unwrap();
+    assert_eq!(login.fields[0].label, "field");
+}
+
+#[test]
+fn ssh_key_values_without_a_private_key_are_not_dropped() {
+    let json = one_item_export(
+        r#"{"uuid":"k","state":"active","categoryUuid":"114","details":{"sections":[{"title":"","name":"s","fields":[
+            {"title":"plain","id":"a","value":{"sshKey":"just-a-string"}},
+            {"title":"meta only","id":"b","value":{"sshKey":{"metadata":{"publicKey":"ssh-rsa AAA"}}}}]}]},"overview":{"title":"K"}}"#,
+    );
+    let plan = onepux::parse(&zip_of(&json, NO_FILES), NOW).unwrap();
+    let key = &plan.vaults[0].items[0].item;
+    assert_eq!(
+        *section_value(key, "plain"),
+        FieldValue::Concealed("just-a-string".into())
+    );
+    let FieldValue::Concealed(meta) = section_value(key, "meta only") else {
+        panic!("expected a concealed field");
+    };
+    assert!(meta.contains("ssh-rsa AAA"));
+}
+
+#[test]
+fn empty_email_address_is_dropped() {
+    let json = one_item_export(
+        r#"{"uuid":"e","state":"active","categoryUuid":"004","details":{"sections":[{"title":"","name":"s","fields":[
+            {"title":"email","id":"e","value":{"email":{"email_address":"","provider":null}}}]}]},"overview":{"title":"E"}}"#,
+    );
+    let plan = onepux::parse(&zip_of(&json, NO_FILES), NOW).unwrap();
+    assert!(plan.vaults[0].items[0].item.sections.is_empty());
 }
