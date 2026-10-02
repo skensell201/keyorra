@@ -1,0 +1,154 @@
+{
+  "accounts": [
+    {
+      "attrs": { "accountName": "Ivan", "name": "Ivan Kostin", "email": "ivan@example.com", "uuid": "ACCOUNT1", "domain": "https://my.1password.com/" },
+      "vaults": [
+        {
+          "attrs": { "uuid": "VAULT1", "desc": "", "avatar": "", "name": "Personal", "type": "P" },
+          "items": [
+            {
+              "uuid": "login1", "favIndex": 1, "createdAt": 1700000000, "updatedAt": 1700000500,
+              "state": "active", "categoryUuid": "001",
+              "details": {
+                "loginFields": [
+                  { "value": "ivan", "id": "", "name": "username", "fieldType": "T", "designation": "username" },
+                  { "value": "s3cret-Pass!", "id": "", "name": "password", "fieldType": "P", "designation": "password" },
+                  { "value": "✓", "id": "", "name": "remember", "fieldType": "C" }
+                ],
+                "notesPlain": "work account",
+                "sections": [
+                  {
+                    "title": "", "name": "add more",
+                    "fields": [
+                      { "title": "one-time password", "id": "TOTP_1", "value": { "totp": "otpauth://totp/GitHub:ivan?secret=JBSWY3DPEHPK3PXP&issuer=GitHub" } },
+                      { "title": "recovery code", "id": "rc", "value": { "concealed": "abcd-efgh" } },
+                      { "title": "empty", "id": "e", "value": { "string": "" } }
+                    ]
+                  }
+                ],
+                "passwordHistory": [ { "value": "old-pass", "time": 1690000000 } ]
+              },
+              "overview": {
+                "subtitle": "ivan",
+                "urls": [ { "label": "website", "url": "https://github.com/login" } ],
+                "title": "GitHub", "url": "https://github.com/login", "tags": [ "dev", "work" ]
+              }
+            },
+            {
+              "uuid": "card1", "favIndex": 0, "createdAt": 1700000000, "updatedAt": 1700000000,
+              "state": "active", "categoryUuid": "002",
+              "details": {
+                "loginFields": [], "notesPlain": "",
+                "sections": [
+                  {
+                    "title": "", "name": "",
+                    "fields": [
+                      { "title": "cardholder name", "id": "cardholder", "value": { "string": "IVAN KOSTIN" } },
+                      { "title": "type", "id": "type", "value": { "creditCardType": "visa" } },
+                      { "title": "number", "id": "ccnum", "value": { "creditCardNumber": "4111111111111111" } },
+                      { "title": "verification number", "id": "cvv", "value": { "concealed": "123" } },
+                      { "title": "expiry date", "id": "expiry", "value": { "monthYear": 202712 } }
+                    ]
+                  }
+                ],
+                "passwordHistory": []
+              },
+              "overview": { "subtitle": "4111 ****", "title": "Visa", "url": "", "tags": [] }
+            },
+            {
+              "uuid": "note1", "createdAt": 1700000000, "updatedAt": 1700000000,
+              "state": "active", "categoryUuid": "003",
+              "details": { "notesPlain": "wifi: hunter2", "sections": [] },
+              "overview": { "title": "Home Wi-Fi" }
+            },
+            {
+              "uuid": "pw1", "createdAt": 1700000000, "updatedAt": 1700000000,
+              "state": "active", "categoryUuid": "005",
+              "details": { "password": "pw-only-123", "notesPlain": "" },
+              "overview": { "title": "Router admin" }
+            },
+            {
+              "uuid": "api1", "createdAt": 1700000000, "updatedAt": 1700000000,
+              "state": "active", "categoryUuid": "112",
+              "details": {
+                "sections": [
+                  {
+                    "title": "", "name": "",
+                    "fields": [
+                      { "title": "credential", "id": "credential", "value": { "concealed": "sk-live-123" } },
+                      { "title": "hostname", "id": "hostname", "value": { "string": "api.example.com" } }
+                    ]
+                  }
+                ]
+              },
+              "overview": { "title": "Stripe API" }
+            },
+            {
+              "uuid": "doc1", "createdAt": 1700000000, "updatedAt": 1700000000,
+              "state": "active", "categoryUuid": "006",
+              "details": { "documentAttributes": { "fileName": "passport.pdf", "documentId": "DOC123", "decryptedSize": 8 } },
+              "overview": { "title": "Passport scan" }
+            },
+            {
+              "uuid": "trash1", "createdAt": 1700000000, "updatedAt": 1700000000,
+              "state": "trashed", "categoryUuid": "001",
+              "details": {},
+              "overview": { "title": "Old login" }
+            }
+          ]
+        },
+        {
+          "attrs": { "uuid": "VAULT2", "desc": "", "avatar": "", "name": "Datagile", "type": "E" },
+          "items": [
+            {
+              "uuid": "id1", "createdAt": 1700000000, "updatedAt": 1700000000,
+              "state": "active", "categoryUuid": "004",
+              "details": {
+                "sections": [
+                  {
+                    "title": "Identification", "name": "name",
+                    "fields": [
+                      { "title": "first name", "id": "firstname", "value": { "string": "Ivan" } },
+                      { "title": "birth date", "id": "birthdate", "value": { "date": 631152000 } }
+                    ]
+                  },
+                  {
+                    "title": "Address", "name": "address",
+                    "fields": [
+                      { "title": "address", "id": "address", "value": { "address": { "street": "Main st 1", "city": "Hanoi", "country": "vn", "zip": "", "state": "" } } }
+                    ]
+                  },
+                  {
+                    "title": "Internet Details", "name": "internet",
+                    "fields": [
+                      { "title": "email", "id": "email", "value": { "email": { "email_address": "ivan@datagile.example", "provider": null } } },
+                      { "title": "phone", "id": "cell", "value": { "phone": "+84 123" } }
+                    ]
+                  }
+                ]
+              },
+              "overview": { "title": "Ivan at work" }
+            },
+            {
+              "uuid": "srv1", "createdAt": 1700000000, "updatedAt": 1700000000,
+              "state": "archived", "categoryUuid": "110",
+              "details": {
+                "loginFields": [],
+                "sections": [
+                  {
+                    "title": "", "name": "",
+                    "fields": [
+                      { "title": "URL", "id": "url", "value": { "url": "ssh://10.0.0.5" } },
+                      { "title": "admin password", "id": "pw", "value": { "concealed": "root-pw" } }
+                    ]
+                  }
+                ]
+              },
+              "overview": { "title": "Prod server" }
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
