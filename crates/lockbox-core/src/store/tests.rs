@@ -706,3 +706,94 @@ fn removing_an_attachment_whose_row_is_missing_still_drops_the_ref() {
     assert!(saved.attachments.is_empty());
     assert_eq!(saved.updated_at, 7_000);
 }
+
+use crate::import::{ImportPlan, ImportReport, ImportedItem, ImportedVault};
+
+fn sample_plan() -> ImportPlan {
+    let note = Item::new(Uuid::nil(), ItemKind::SecureNote, "Passport", 1);
+    ImportPlan {
+        vaults: vec![
+            ImportedVault {
+                name: "Personal".into(),
+                items: vec![
+                    ImportedItem {
+                        item: login(Uuid::nil(), "GitHub"),
+                        attachments: vec![],
+                    },
+                    ImportedItem {
+                        item: note,
+                        attachments: vec![("scan.pdf".into(), b"PDF".to_vec())],
+                    },
+                ],
+            },
+            ImportedVault {
+                name: "Datagile".into(),
+                items: vec![ImportedItem {
+                    item: login(Uuid::nil(), "Jira"),
+                    attachments: vec![],
+                }],
+            },
+        ],
+        skipped: vec![],
+    }
+}
+
+#[test]
+fn apply_import_creates_vaults_items_and_attachments() {
+    let (_dir, _path, mut store) = new_store();
+    let report = store.apply_import(&sample_plan()).unwrap();
+    assert_eq!(
+        report,
+        ImportReport {
+            vaults: 2,
+            items: 3,
+            attachments: 1
+        }
+    );
+
+    let vaults = store.vaults().unwrap();
+    let names: Vec<_> = vaults.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(names, ["Personal", "Datagile"]);
+    assert_eq!(
+        ok_titles(store.list_items(Some(vaults[0].id)).unwrap()),
+        ["GitHub", "Passport"]
+    );
+    assert_eq!(
+        ok_titles(store.list_items(Some(vaults[1].id)).unwrap()),
+        ["Jira"]
+    );
+
+    let passport = match &store.list_items(Some(vaults[0].id)).unwrap()[1] {
+        ItemEntry::Ok(item) => item.clone(),
+        other => panic!("{other:?}"),
+    };
+    assert_ne!(passport.id, Uuid::nil());
+    assert_eq!(passport.vault_id, vaults[0].id);
+    assert_eq!(
+        &*store.get_attachment(passport.attachments[0].id).unwrap(),
+        b"PDF"
+    );
+}
+
+#[test]
+fn apply_import_requires_unlock() {
+    let (_dir, _path, mut store) = new_store();
+    store.lock();
+    assert!(matches!(
+        store.apply_import(&sample_plan()),
+        Err(Error::Locked)
+    ));
+}
+
+#[test]
+fn failed_import_writes_nothing() {
+    let (_dir, _path, mut store) = new_store();
+    store.conn.execute_batch("DROP TABLE attachments").unwrap();
+    assert!(store.apply_import(&sample_plan()).is_err());
+    assert!(store.vaults().unwrap().is_empty());
+    let items: i64 = store
+        .conn
+        .query_row("SELECT count(*) FROM items", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(items, 0);
+}

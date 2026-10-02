@@ -9,6 +9,7 @@ use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::crypto::{self, Header, KdfParams, Key};
+use crate::import::{ImportPlan, ImportReport};
 use crate::model::{AttachmentRef, Item, VaultInfo, SCHEMA_VERSION};
 use crate::{Error, Result};
 
@@ -192,6 +193,45 @@ impl Store {
         insert_vault(&self.conn, account, &info, &key)?;
         self.vault_keys.insert(info.id, key);
         Ok(info)
+    }
+
+    /// Writes a previewed import: one new vault per imported vault, all in one transaction.
+    pub fn apply_import(&mut self, plan: &ImportPlan) -> Result<ImportReport> {
+        let account = self.account.as_ref().ok_or(Error::Locked)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let mut report = ImportReport::default();
+        let mut new_keys = Vec::new();
+        for vault in &plan.vaults {
+            let info = VaultInfo {
+                id: Uuid::new_v4(),
+                name: vault.name.clone(),
+            };
+            let key = Key::random();
+            insert_vault(&tx, account, &info, &key)?;
+            report.vaults += 1;
+            for imported in &vault.items {
+                let mut item = imported.item.clone();
+                item.id = Uuid::new_v4();
+                item.vault_id = info.id;
+                item.attachments.clear();
+                for (name, bytes) in &imported.attachments {
+                    let att = AttachmentRef {
+                        id: Uuid::new_v4(),
+                        name: name.clone(),
+                        size: bytes.len() as u64,
+                    };
+                    insert_attachment(&tx, &key, &item, &att, bytes)?;
+                    item.attachments.push(att);
+                    report.attachments += 1;
+                }
+                upsert_item(&tx, &key, &item)?;
+                report.items += 1;
+            }
+            new_keys.push((info.id, key));
+        }
+        tx.commit()?;
+        self.vault_keys.extend(new_keys);
+        Ok(report)
     }
 
     pub fn vaults(&self) -> Result<Vec<VaultInfo>> {
