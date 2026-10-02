@@ -183,3 +183,159 @@ fn negative_user_version_is_rejected_without_backup() {
     let files = std::fs::read_dir(dir.path()).unwrap().count();
     assert_eq!(files, 1, "no backup or other file should appear");
 }
+
+use crate::model::{Item, ItemKind};
+
+pub(super) fn login(vault: Uuid, title: &str) -> Item {
+    let mut item = Item::new(vault, ItemKind::Login, title, 1_000);
+    item.set_password("hunter2", 1_000);
+    item
+}
+
+fn revision(store: &Store, id: Uuid) -> i64 {
+    store
+        .conn
+        .query_row("SELECT revision FROM items WHERE id = ?1", [id.to_string()], |r| r.get(0))
+        .unwrap()
+}
+
+fn ok_titles(entries: Vec<ItemEntry>) -> Vec<String> {
+    entries
+        .into_iter()
+        .map(|e| match e {
+            ItemEntry::Ok(item) => item.title,
+            ItemEntry::Damaged { .. } => "<damaged>".into(),
+        })
+        .collect()
+}
+
+#[test]
+fn save_get_and_list_items() {
+    let (_dir, _path, mut store) = new_store();
+    let a = store.create_vault("A").unwrap();
+    let b = store.create_vault("B").unwrap();
+    let github = login(a.id, "GitHub");
+    store.save_item(&github).unwrap();
+    store.save_item(&login(b.id, "Bank")).unwrap();
+
+    assert_eq!(store.get_item(github.id).unwrap(), github);
+    assert_eq!(ok_titles(store.list_items(Some(a.id)).unwrap()), ["GitHub"]);
+    assert_eq!(ok_titles(store.list_items(None).unwrap()), ["GitHub", "Bank"]);
+}
+
+#[test]
+fn saving_again_bumps_revision() {
+    let (_dir, _path, mut store) = new_store();
+    let v = store.create_vault("A").unwrap();
+    let mut item = login(v.id, "GitHub");
+    store.save_item(&item).unwrap();
+    assert_eq!(revision(&store, item.id), 1);
+    item.set_password("new", 2_000);
+    store.save_item(&item).unwrap();
+    assert_eq!(revision(&store, item.id), 2);
+    assert_eq!(store.get_item(item.id).unwrap().password(), Some("new"));
+}
+
+#[test]
+fn save_requires_unlock_and_known_vault() {
+    let (_dir, _path, mut store) = new_store();
+    let v = store.create_vault("A").unwrap();
+    assert!(matches!(store.save_item(&login(Uuid::new_v4(), "x")), Err(Error::NotFound(_))));
+    store.lock();
+    assert!(matches!(store.save_item(&login(v.id, "x")), Err(Error::Locked)));
+}
+
+#[test]
+fn delete_restore_and_purge() {
+    let (_dir, _path, mut store) = new_store();
+    let v = store.create_vault("A").unwrap();
+    let item = login(v.id, "GitHub");
+    store.save_item(&item).unwrap();
+
+    store.delete_item(item.id, 10_000).unwrap();
+    assert!(matches!(store.get_item(item.id), Err(Error::NotFound(_))));
+    assert!(store.list_items(None).unwrap().is_empty());
+    assert_eq!(ok_titles(store.deleted_items().unwrap()), ["GitHub"]);
+
+    store.restore_item(item.id).unwrap();
+    assert_eq!(store.get_item(item.id).unwrap().title, "GitHub");
+
+    store.delete_item(item.id, 10_000).unwrap();
+    assert_eq!(store.purge_expired(10_000 + DELETED_RETENTION_SECS - 1).unwrap(), 0);
+    assert_eq!(store.purge_expired(10_000 + DELETED_RETENTION_SECS).unwrap(), 1);
+    assert!(store.deleted_items().unwrap().is_empty());
+    assert!(matches!(store.restore_item(item.id), Err(Error::NotFound(_))));
+    // The tombstone row stays for future sync.
+    let rows: i64 = store.conn.query_row("SELECT count(*) FROM items", [], |r| r.get(0)).unwrap();
+    assert_eq!(rows, 1);
+}
+
+#[test]
+fn delete_unknown_item_is_not_found() {
+    let (_dir, _path, mut store) = new_store();
+    assert!(matches!(store.delete_item(Uuid::new_v4(), 1), Err(Error::NotFound(_))));
+}
+
+#[test]
+fn corrupted_row_is_reported_damaged_without_hiding_others() {
+    let (_dir, _path, mut store) = new_store();
+    let v = store.create_vault("A").unwrap();
+    let good = login(v.id, "Good");
+    let bad = login(v.id, "Bad");
+    store.save_item(&good).unwrap();
+    store.save_item(&bad).unwrap();
+    store
+        .conn
+        .execute("UPDATE items SET data = X'00112233' WHERE id = ?1", [bad.id.to_string()])
+        .unwrap();
+
+    let entries = store.list_items(None).unwrap();
+    assert_eq!(entries[0], ItemEntry::Ok(good));
+    assert_eq!(entries[1], ItemEntry::Damaged { id: bad.id, vault_id: v.id });
+    assert!(matches!(store.get_item(bad.id), Err(Error::Decrypt)));
+}
+
+#[test]
+fn ciphertext_swapped_between_items_does_not_decrypt() {
+    let (_dir, _path, mut store) = new_store();
+    let v = store.create_vault("A").unwrap();
+    let a = login(v.id, "A");
+    let b = login(v.id, "B");
+    store.save_item(&a).unwrap();
+    store.save_item(&b).unwrap();
+    store
+        .conn
+        .execute(
+            "UPDATE items SET data = (SELECT data FROM items WHERE id = ?1) WHERE id = ?2",
+            [a.id.to_string(), b.id.to_string()],
+        )
+        .unwrap();
+    assert!(matches!(store.get_item(b.id), Err(Error::Decrypt)));
+}
+
+#[test]
+fn item_contents_are_not_stored_in_plaintext() {
+    let (_dir, path, mut store) = new_store();
+    let v = store.create_vault("A").unwrap();
+    store.save_item(&login(v.id, "VerySecretTitle")).unwrap();
+    drop(store);
+    let bytes = std::fs::read(&path).unwrap();
+    for needle in [&b"VerySecretTitle"[..], b"hunter2"] {
+        assert!(!bytes.windows(needle.len()).any(|w| w == needle));
+    }
+}
+
+#[test]
+fn stored_schema_feeds_the_item_aad() {
+    let (_dir, _path, mut store) = new_store();
+    let v = store.create_vault("A").unwrap();
+    let item = login(v.id, "GitHub");
+    store.save_item(&item).unwrap();
+    store
+        .conn
+        .execute("UPDATE items SET schema = 2 WHERE id = ?1", [item.id.to_string()])
+        .unwrap()
+    ;
+    assert!(matches!(store.get_item(item.id), Err(Error::Decrypt)));
+    assert!(matches!(store.list_items(None).unwrap()[0], ItemEntry::Damaged { .. }));
+}

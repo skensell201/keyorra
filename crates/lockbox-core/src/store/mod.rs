@@ -8,7 +8,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
 use crate::crypto::{self, Header, KdfParams, Key};
-use crate::model::VaultInfo;
+use crate::model::{Item, VaultInfo, SCHEMA_VERSION};
+use zeroize::Zeroizing;
 use crate::{Error, Result};
 
 #[cfg(test)]
@@ -17,6 +18,16 @@ mod tests;
 const DB_VERSION: i64 = MIGRATIONS.len() as i64;
 const CHECK_AAD: &[u8] = b"lockbox/check/v1";
 const VAULT_META_AAD: &[u8] = b"lockbox/vault-meta/v1";
+
+/// Deleted items stay restorable for 30 days, then their data is purged.
+pub const DELETED_RETENTION_SECS: i64 = 30 * 24 * 60 * 60;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ItemEntry {
+    Ok(Item),
+    /// The row exists but does not decrypt; the rest of the vault still loads.
+    Damaged { id: Uuid, vault_id: Uuid },
+}
 
 const SCHEMA_V1: &str = "
 CREATE TABLE meta (key TEXT PRIMARY KEY, value BLOB NOT NULL);
@@ -173,6 +184,122 @@ impl Store {
         Ok(out)
     }
 
+    /// Inserts or updates an item; a later save of a deleted item undeletes it.
+    pub fn save_item(&mut self, item: &Item) -> Result<()> {
+        let key = self.vault_key(item.vault_id)?;
+        upsert_item(&self.conn, key, item)
+    }
+
+    pub fn get_item(&self, id: Uuid) -> Result<Item> {
+        let row: Option<(String, Vec<u8>, i64)> = self
+            .conn
+            .query_row(
+                "SELECT vault_id, data, schema FROM items WHERE id = ?1 AND deleted_at IS NULL",
+                [id.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let (vault_id, data, schema) = row.ok_or_else(|| Error::NotFound(format!("item {id}")))?;
+        self.decrypt_item(id, parse_id(&vault_id)?, schema_u32(schema)?, &data)
+    }
+
+    /// Live items, in insertion order, optionally limited to one vault.
+    pub fn list_items(&self, vault: Option<Uuid>) -> Result<Vec<ItemEntry>> {
+        self.load_items(false, vault)
+    }
+
+    /// Items in "Recently Deleted" (deleted, not yet purged).
+    pub fn deleted_items(&self) -> Result<Vec<ItemEntry>> {
+        self.load_items(true, None)
+    }
+
+    pub fn delete_item(&mut self, id: Uuid, now: i64) -> Result<()> {
+        let n = self.conn.execute(
+            "UPDATE items SET deleted_at = ?2, revision = revision + 1
+             WHERE id = ?1 AND deleted_at IS NULL",
+            params![id.to_string(), now],
+        )?;
+        if n == 0 {
+            return Err(Error::NotFound(format!("item {id}")));
+        }
+        Ok(())
+    }
+
+    pub fn restore_item(&mut self, id: Uuid) -> Result<()> {
+        let n = self.conn.execute(
+            "UPDATE items SET deleted_at = NULL, revision = revision + 1
+             WHERE id = ?1 AND deleted_at IS NOT NULL AND length(data) > 0",
+            [id.to_string()],
+        )?;
+        if n == 0 {
+            return Err(Error::NotFound(format!("deleted item {id}")));
+        }
+        Ok(())
+    }
+
+    /// Wipes data of items deleted at least 30 days ago; rows stay as tombstones.
+    pub fn purge_expired(&mut self, now: i64) -> Result<usize> {
+        let cutoff = now - DELETED_RETENTION_SECS;
+        let tx = self.conn.unchecked_transaction()?;
+        tx.execute(
+            "UPDATE attachments SET data = X'', deleted = 1, revision = revision + 1
+             WHERE item_id IN (SELECT id FROM items
+                               WHERE deleted_at IS NOT NULL AND deleted_at <= ?1 AND length(data) > 0)",
+            [cutoff],
+        )?;
+        let n = tx.execute(
+            "UPDATE items SET data = X'', revision = revision + 1
+             WHERE deleted_at IS NOT NULL AND deleted_at <= ?1 AND length(data) > 0",
+            [cutoff],
+        )?;
+        tx.commit()?;
+        Ok(n)
+    }
+
+    fn load_items(&self, deleted: bool, vault: Option<Uuid>) -> Result<Vec<ItemEntry>> {
+        self.account_key()?;
+        let mut stmt = self.conn.prepare(
+            "SELECT id, vault_id, data, schema FROM items
+             WHERE ((?1 = 0 AND deleted_at IS NULL)
+                 OR (?1 = 1 AND deleted_at IS NOT NULL AND length(data) > 0))
+               AND (?2 IS NULL OR vault_id = ?2)
+             ORDER BY rowid",
+        )?;
+        let rows = stmt.query_map(params![deleted as i64, vault.map(|v| v.to_string())], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, Vec<u8>>(2)?,
+                r.get::<_, i64>(3)?,
+            ))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, vault_id, data, schema) = row?;
+            let (id, vault_id) = (parse_id(&id)?, parse_id(&vault_id)?);
+            let decrypted =
+                schema_u32(schema).and_then(|s| self.decrypt_item(id, vault_id, s, &data));
+            out.push(match decrypted {
+                Ok(item) => ItemEntry::Ok(item),
+                Err(_) => ItemEntry::Damaged { id, vault_id },
+            });
+        }
+        Ok(out)
+    }
+
+    fn decrypt_item(&self, id: Uuid, vault_id: Uuid, schema: u32, data: &[u8]) -> Result<Item> {
+        let key = self.vault_key(vault_id)?;
+        let plain = crypto::open(key, data, &crypto::item_aad(vault_id, id, schema))?;
+        Ok(serde_json::from_slice(&plain)?)
+    }
+
+    fn vault_key(&self, vault_id: Uuid) -> Result<&Key> {
+        if self.account.is_none() {
+            return Err(Error::Locked);
+        }
+        self.vault_keys.get(&vault_id).ok_or_else(|| Error::NotFound(format!("vault {vault_id}")))
+    }
+
     fn load_keys(&mut self, account: Key) -> Result<()> {
         let mut keys = HashMap::new();
         {
@@ -196,6 +323,30 @@ fn insert_vault(conn: &Connection, account: &Key, info: &VaultInfo, key: &Key) -
     conn.execute(
         "INSERT INTO vaults (id, wrapped_key, meta) VALUES (?1, ?2, ?3)",
         params![info.id.to_string(), crypto::wrap_vault_key(account, info.id, key), meta],
+    )?;
+    Ok(())
+}
+
+fn schema_u32(schema: i64) -> Result<u32> {
+    u32::try_from(schema).map_err(|_| Error::Invalid(format!("bad item schema {schema}")))
+}
+
+fn upsert_item(conn: &Connection, key: &Key, item: &Item) -> Result<()> {
+    let plain = Zeroizing::new(serde_json::to_vec(item)?);
+    let data = crypto::seal(key, &plain, &crypto::item_aad(item.vault_id, item.id, SCHEMA_VERSION));
+    conn.execute(
+        "INSERT INTO items (id, vault_id, data, updated_at, schema) VALUES (?1, ?2, ?3, ?4, ?5)
+         ON CONFLICT(id) DO UPDATE SET
+             vault_id = excluded.vault_id, data = excluded.data,
+             updated_at = excluded.updated_at, schema = excluded.schema,
+             revision = items.revision + 1, deleted_at = NULL",
+        params![
+            item.id.to_string(),
+            item.vault_id.to_string(),
+            data,
+            item.updated_at,
+            SCHEMA_VERSION
+        ],
     )?;
     Ok(())
 }
