@@ -8,7 +8,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
 use crate::crypto::{self, Header, KdfParams, Key};
-use crate::model::{Item, VaultInfo, SCHEMA_VERSION};
+use crate::model::{AttachmentRef, Item, VaultInfo, SCHEMA_VERSION};
 use zeroize::Zeroizing;
 use crate::{Error, Result};
 
@@ -22,6 +22,8 @@ const VAULT_META_AAD: &[u8] = b"lockbox/vault-meta/v1";
 /// Deleted items stay restorable for 30 days, then their data is purged.
 pub const DELETED_RETENTION_SECS: i64 = 30 * 24 * 60 * 60;
 
+// Boxing `Item` would change the public shape the plan's tests (and Task 13) rely on.
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ItemEntry {
     Ok(Item),
@@ -185,9 +187,58 @@ impl Store {
     }
 
     /// Inserts or updates an item; a later save of a deleted item undeletes it.
+    /// Moving an item to another vault re-encrypts its attachments with the new vault key.
     pub fn save_item(&mut self, item: &Item) -> Result<()> {
+        let new_key = self.vault_key(item.vault_id)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let old_vault: Option<String> = tx
+            .query_row("SELECT vault_id FROM items WHERE id = ?1", [item.id.to_string()], |r| r.get(0))
+            .optional()?;
+        if let Some(old_vault) = old_vault {
+            let old_vault = parse_id(&old_vault)?;
+            if old_vault != item.vault_id {
+                let old_key = self.vault_key(old_vault)?;
+                reencrypt_attachments(&tx, item.id, (old_vault, old_key), (item.vault_id, new_key))?;
+            }
+        }
+        upsert_item(&tx, new_key, item)?;
+        tx.commit()?;
+        Ok(())
+    }
+
+    pub fn add_attachment(
+        &mut self,
+        item_id: Uuid,
+        name: &str,
+        bytes: &[u8],
+        now: i64,
+    ) -> Result<AttachmentRef> {
+        let mut item = self.get_item(item_id)?;
         let key = self.vault_key(item.vault_id)?;
-        upsert_item(&self.conn, key, item)
+        let att = AttachmentRef { id: Uuid::new_v4(), name: name.to_owned(), size: bytes.len() as u64 };
+        let tx = self.conn.unchecked_transaction()?;
+        insert_attachment(&tx, key, &item, &att, bytes)?;
+        item.attachments.push(att.clone());
+        item.updated_at = now;
+        upsert_item(&tx, key, &item)?;
+        tx.commit()?;
+        Ok(att)
+    }
+
+    pub fn get_attachment(&self, id: Uuid) -> Result<Zeroizing<Vec<u8>>> {
+        let row: Option<(Vec<u8>, String, String)> = self
+            .conn
+            .query_row(
+                "SELECT a.data, a.item_id, i.vault_id FROM attachments a
+                 JOIN items i ON i.id = a.item_id
+                 WHERE a.id = ?1 AND a.deleted = 0",
+                [id.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let (data, item_id, vault_id) = row.ok_or_else(|| Error::NotFound(format!("attachment {id}")))?;
+        let (item_id, vault_id) = (parse_id(&item_id)?, parse_id(&vault_id)?);
+        crypto::open(self.vault_key(vault_id)?, &data, &crypto::attachment_aad(vault_id, item_id, id))
     }
 
     pub fn get_item(&self, id: Uuid) -> Result<Item> {
@@ -348,6 +399,46 @@ fn upsert_item(conn: &Connection, key: &Key, item: &Item) -> Result<()> {
             SCHEMA_VERSION
         ],
     )?;
+    Ok(())
+}
+
+fn insert_attachment(
+    conn: &Connection,
+    key: &Key,
+    item: &Item,
+    att: &AttachmentRef,
+    bytes: &[u8],
+) -> Result<()> {
+    let data = crypto::seal(key, bytes, &crypto::attachment_aad(item.vault_id, item.id, att.id));
+    conn.execute(
+        "INSERT INTO attachments (id, item_id, data, schema) VALUES (?1, ?2, ?3, ?4)",
+        params![att.id.to_string(), item.id.to_string(), data, SCHEMA_VERSION],
+    )?;
+    Ok(())
+}
+
+fn reencrypt_attachments(
+    conn: &Connection,
+    item_id: Uuid,
+    (old_vault, old_key): (Uuid, &Key),
+    (new_vault, new_key): (Uuid, &Key),
+) -> Result<()> {
+    let rows: Vec<(String, Vec<u8>)> = {
+        let mut stmt = conn.prepare(
+            "SELECT id, data FROM attachments WHERE item_id = ?1 AND deleted = 0",
+        )?;
+        let mapped = stmt.query_map([item_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?)))?;
+        mapped.collect::<rusqlite::Result<_>>()?
+    };
+    for (id, data) in rows {
+        let att_id = parse_id(&id)?;
+        let plain = crypto::open(old_key, &data, &crypto::attachment_aad(old_vault, item_id, att_id))?;
+        let sealed = crypto::seal(new_key, &plain, &crypto::attachment_aad(new_vault, item_id, att_id));
+        conn.execute(
+            "UPDATE attachments SET data = ?2, revision = revision + 1 WHERE id = ?1",
+            params![id, sealed],
+        )?;
+    }
     Ok(())
 }
 

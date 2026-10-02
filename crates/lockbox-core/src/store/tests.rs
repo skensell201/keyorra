@@ -339,3 +339,46 @@ fn stored_schema_feeds_the_item_aad() {
     assert!(matches!(store.get_item(item.id), Err(Error::Decrypt)));
     assert!(matches!(store.list_items(None).unwrap()[0], ItemEntry::Damaged { .. }));
 }
+
+#[test]
+fn attachments_round_trip_and_are_listed_on_the_item() {
+    let (_dir, path, mut store) = new_store();
+    let v = store.create_vault("A").unwrap();
+    let item = login(v.id, "Passport");
+    store.save_item(&item).unwrap();
+
+    let att = store.add_attachment(item.id, "scan.pdf", b"%PDF-SECRET", 5_000).unwrap();
+    assert_eq!(att.name, "scan.pdf");
+    assert_eq!(att.size, 11);
+    assert_eq!(&*store.get_attachment(att.id).unwrap(), b"%PDF-SECRET");
+    let saved = store.get_item(item.id).unwrap();
+    assert_eq!(saved.attachments, vec![att]);
+    assert_eq!(saved.updated_at, 5_000);
+    drop(store);
+
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(!bytes.windows(11).any(|w| w == b"%PDF-SECRET"));
+}
+
+#[test]
+fn unknown_attachment_is_not_found() {
+    let (_dir, _path, store) = new_store();
+    assert!(matches!(store.get_attachment(Uuid::new_v4()), Err(Error::NotFound(_))));
+}
+
+#[test]
+fn moving_an_item_to_another_vault_keeps_attachments_readable() {
+    let (_dir, _path, mut store) = new_store();
+    let a = store.create_vault("A").unwrap();
+    let b = store.create_vault("B").unwrap();
+    let item = login(a.id, "Passport");
+    store.save_item(&item).unwrap();
+    let att = store.add_attachment(item.id, "scan.pdf", b"bytes", 5_000).unwrap();
+
+    let mut moved = store.get_item(item.id).unwrap();
+    moved.vault_id = b.id;
+    store.save_item(&moved).unwrap();
+
+    assert_eq!(store.get_item(item.id).unwrap().vault_id, b.id);
+    assert_eq!(&*store.get_attachment(att.id).unwrap(), b"bytes");
+}
