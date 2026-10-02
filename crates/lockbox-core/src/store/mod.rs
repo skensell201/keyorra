@@ -14,7 +14,7 @@ use crate::{Error, Result};
 #[cfg(test)]
 mod tests;
 
-const DB_VERSION: i64 = 1;
+const DB_VERSION: i64 = MIGRATIONS.len() as i64;
 const CHECK_AAD: &[u8] = b"lockbox/check/v1";
 const VAULT_META_AAD: &[u8] = b"lockbox/vault-meta/v1";
 
@@ -33,16 +33,21 @@ CREATE TABLE items (
     data BLOB NOT NULL,
     revision INTEGER NOT NULL DEFAULT 1,
     updated_at INTEGER NOT NULL,
-    deleted_at INTEGER
+    deleted_at INTEGER,
+    schema INTEGER NOT NULL DEFAULT 1
 );
 CREATE TABLE attachments (
     id TEXT PRIMARY KEY,
     item_id TEXT NOT NULL,
     data BLOB NOT NULL,
     revision INTEGER NOT NULL DEFAULT 1,
-    deleted INTEGER NOT NULL DEFAULT 0
+    deleted INTEGER NOT NULL DEFAULT 0,
+    schema INTEGER NOT NULL DEFAULT 1
 );
 ";
+
+/// `MIGRATIONS[i]` upgrades database version `i` to `i + 1`.
+const MIGRATIONS: &[&str] = &[SCHEMA_V1];
 
 /// The encrypted vault database. Locked until `unlock`/`unlock_with_key`.
 pub struct Store {
@@ -64,14 +69,36 @@ impl Store {
         if path.exists() {
             return Err(Error::Invalid(format!("{} already exists", path.display())));
         }
-        let conn = Connection::open(path)?;
-        migrate(&conn, path)?;
+        // Argon2 can fail on bad params; do it before touching the filesystem.
         let (header, account) = crypto::create_header(password, kdf)?;
-        conn.execute(
+        match Self::init_file(path, &header, &account) {
+            Ok(conn) => {
+                Ok(Store { conn, header, account: Some(account), vault_keys: HashMap::new() })
+            }
+            Err(e) => {
+                let _ = std::fs::remove_file(path);
+                let _ = std::fs::remove_file(path.with_extension("db-journal"));
+                Err(e)
+            }
+        }
+    }
+
+    fn init_file(path: &Path, header: &Header, account: &Key) -> Result<Connection> {
+        let conn = Connection::open(path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+        }
+        configure(&conn)?;
+        let tx = conn.unchecked_transaction()?;
+        apply_migrations(&tx, 0)?;
+        tx.execute(
             "INSERT INTO meta (key, value) VALUES ('header', ?1), ('check', ?2)",
-            params![serde_json::to_vec(&header)?, crypto::seal(&account, b"lockbox", CHECK_AAD)],
+            params![serde_json::to_vec(header)?, crypto::seal(account, b"lockbox", CHECK_AAD)],
         )?;
-        Ok(Store { conn, header, account: Some(account), vault_keys: HashMap::new() })
+        tx.commit()?;
+        Ok(conn)
     }
 
     /// Opens an existing database, locked.
@@ -80,7 +107,8 @@ impl Store {
             return Err(Error::NotFound(path.display().to_string()));
         }
         let conn = Connection::open(path)?;
-        migrate(&conn, path)?;
+        configure(&conn)?;
+        upgrade(&conn, path)?;
         let raw: Vec<u8> = conn
             .query_row("SELECT value FROM meta WHERE key = 'header'", [], |r| r.get(0))
             .optional()?
@@ -96,8 +124,11 @@ impl Store {
 
     /// Unlocks with an account key kept elsewhere (macOS Keychain behind Touch ID).
     pub fn unlock_with_key(&mut self, account: Key) -> Result<()> {
-        let check: Vec<u8> =
-            self.conn.query_row("SELECT value FROM meta WHERE key = 'check'", [], |r| r.get(0))?;
+        let check: Vec<u8> = self
+            .conn
+            .query_row("SELECT value FROM meta WHERE key = 'check'", [], |r| r.get(0))
+            .optional()?
+            .ok_or_else(|| Error::Invalid("missing check value".into()))?;
         crypto::open(&account, &check, CHECK_AAD).map_err(|_| Error::WrongPassword)?;
         self.load_keys(account)
     }
@@ -186,21 +217,38 @@ fn parse_id(s: &str) -> Result<Uuid> {
     Uuid::parse_str(s).map_err(|e| Error::Invalid(format!("bad id {s}: {e}")))
 }
 
-fn migrate(conn: &Connection, path: &Path) -> Result<()> {
+fn configure(conn: &Connection) -> Result<()> {
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
+    conn.pragma_update(None, "secure_delete", "ON")?;
+    Ok(())
+}
+
+/// Runs `MIGRATIONS[from..]` and bumps `user_version`, atomically.
+fn apply_migrations(tx: &Connection, from: i64) -> Result<()> {
+    for sql in &MIGRATIONS[from as usize..] {
+        tx.execute_batch(sql)?;
+    }
+    tx.pragma_update(None, "user_version", DB_VERSION)?;
+    Ok(())
+}
+
+/// Brings an existing Lockbox database up to `DB_VERSION`; never initialises one.
+fn upgrade(conn: &Connection, path: &Path) -> Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if version == DB_VERSION {
-        return Ok(());
+    if version == 0 {
+        return Err(Error::Invalid("not a lockbox database".into()));
     }
     if version > DB_VERSION {
         return Err(Error::Invalid(format!(
             "database version {version} is newer than this app supports ({DB_VERSION})"
         )));
     }
-    if version > 0 {
+    if version < DB_VERSION {
         backup(path, version)?;
+        let tx = conn.unchecked_transaction()?;
+        apply_migrations(&tx, version)?;
+        tx.commit()?;
     }
-    conn.execute_batch(SCHEMA_V1)?;
-    conn.pragma_update(None, "user_version", DB_VERSION)?;
     Ok(())
 }
 

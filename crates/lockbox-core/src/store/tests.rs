@@ -100,3 +100,64 @@ fn backup_copies_the_file_next_to_itself() {
     assert_eq!(copy, path.with_extension("db.bak-v1"));
     assert_eq!(std::fs::read(&copy).unwrap(), std::fs::read(&path).unwrap());
 }
+
+#[test]
+fn open_rejects_empty_file_without_writing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("empty.db");
+    std::fs::write(&path, b"").unwrap();
+    assert!(matches!(Store::open(&path), Err(Error::Invalid(_))));
+    assert_eq!(std::fs::read(&path).unwrap(), b"");
+}
+
+#[test]
+fn open_rejects_foreign_sqlite_database_without_writing() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("foreign.db");
+    {
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        conn.execute_batch("CREATE TABLE other (x INTEGER);").unwrap();
+    }
+    let before = std::fs::read(&path).unwrap();
+    assert!(matches!(Store::open(&path), Err(Error::Invalid(_))));
+    assert_eq!(std::fs::read(&path).unwrap(), before);
+}
+
+#[test]
+fn create_with_invalid_kdf_params_leaves_no_file() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("lockbox.db");
+    let bad = KdfParams { m_kib: 8, t: 0, p: 1 };
+    assert!(matches!(Store::create(&path, PW, bad), Err(Error::Invalid(_))));
+    assert!(!path.exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn created_database_is_owner_only() {
+    use std::os::unix::fs::PermissionsExt;
+    let (_dir, path, _store) = new_store();
+    assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+}
+
+#[test]
+fn unlock_with_key_without_check_row_is_invalid() {
+    let (_dir, path, store) = new_store();
+    drop(store);
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute("DELETE FROM meta WHERE key = 'check'", [])
+        .unwrap();
+    let mut store = Store::open(&path).unwrap();
+    assert!(matches!(store.unlock_with_key(Key::random()), Err(Error::Invalid(_))));
+}
+
+#[test]
+fn item_and_attachment_rows_carry_a_schema_column() {
+    let (_dir, path, store) = new_store();
+    drop(store);
+    let conn = rusqlite::Connection::open(&path).unwrap();
+    for table in ["items", "attachments"] {
+        conn.prepare(&format!("SELECT schema FROM {table}")).unwrap();
+    }
+}
