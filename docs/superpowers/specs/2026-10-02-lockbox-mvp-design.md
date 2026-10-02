@@ -1,7 +1,7 @@
 # Lockbox MVP — Design
 
 Date: 2026-10-02
-Status: approved (brainstorming), pending spec review
+Status: approved 2026-10-02
 
 ## Goal
 
@@ -68,10 +68,10 @@ lockbox/
 - **Changing the master password** re-wraps the account key only; items are untouched.
 - **Verifying the password:** a wrong password fails to unwrap the account key
   (AEAD tag mismatch). No password hash is stored.
-- **Memory hygiene:** keys live in `secrecy::SecretBox`/`zeroize` types; plaintext
+- **Memory hygiene:** keys live in `zeroize::Zeroizing` buffers; plaintext
   items are dropped when the vault locks.
-- **Crates:** `argon2`, `chacha20poly1305`, `rand_core` (OsRng), `zeroize`,
-  `secrecy`. No hand-written primitives.
+- **Crates:** `argon2`, `chacha20poly1305`, `rand` (OsRng), `zeroize`.
+  No hand-written primitives.
 
 ## 2. Storage (`lockbox-core::store`)
 
@@ -128,7 +128,7 @@ Serialized as JSON before encryption, with a `schema_version`.
   - Import shows a preview (vaults, item counts, unsupported items) before writing.
 - **Watchtower:**
   - Weak: zxcvbn score < 3.
-  - Reused: same password in more than one item (compared via keyed hash in memory).
+  - Reused: same password in more than one item (compared in memory after unlock).
   - Breached: Have I Been Pwned range API with k-anonymity (only the first 5 hex
     characters of SHA-1 leave the machine). Off by default, user turns it on.
 
