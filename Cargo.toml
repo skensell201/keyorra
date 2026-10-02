@@ -1,0 +1,9 @@
+[workspace]
+members = ["crates/lockbox-core"]
+resolver = "2"
+
+# Argon2 with 64 MiB is painfully slow unoptimized; keep debug builds usable.
+[profile.dev.package.argon2]
+opt-level = 3
+[profile.dev.package.blake2]
+opt-level = 3
