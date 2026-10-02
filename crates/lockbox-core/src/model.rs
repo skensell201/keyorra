@@ -41,7 +41,11 @@ pub enum FieldValue {
 impl FieldValue {
     pub fn as_str(&self) -> Option<&str> {
         match self {
-            Self::Text(s) | Self::Concealed(s) | Self::Email(s) | Self::Url(s) | Self::Totp(s)
+            Self::Text(s)
+            | Self::Concealed(s)
+            | Self::Email(s)
+            | Self::Url(s)
+            | Self::Totp(s)
             | Self::Phone(s) => Some(s),
             Self::Date(_) | Self::MonthYear(_) => None,
         }
@@ -148,7 +152,11 @@ impl Item {
 
     /// Sets the password, pushing a changed non-empty old value into history.
     pub fn set_password(&mut self, new: &str, now: i64) {
-        match self.fields.iter_mut().find(|f| f.purpose == Some(Purpose::Password)) {
+        match self
+            .fields
+            .iter_mut()
+            .find(|f| f.purpose == Some(Purpose::Password))
+        {
             Some(field) => {
                 let old = field.value.as_str().unwrap_or_default().to_owned();
                 if old == new {
@@ -156,7 +164,13 @@ impl Item {
                 }
                 field.value = FieldValue::Concealed(new.to_owned());
                 if !old.is_empty() {
-                    self.password_history.insert(0, HistoryEntry { value: old, changed_at: now });
+                    self.password_history.insert(
+                        0,
+                        HistoryEntry {
+                            value: old,
+                            changed_at: now,
+                        },
+                    );
                 }
             }
             None => self.fields.push(Field {
@@ -184,7 +198,10 @@ impl Item {
     }
 
     fn purpose_value(&self, purpose: Purpose) -> Option<&str> {
-        self.fields.iter().find(|f| f.purpose == Some(purpose)).and_then(|f| f.value.as_str())
+        self.fields
+            .iter()
+            .find(|f| f.purpose == Some(purpose))
+            .and_then(|f| f.value.as_str())
     }
 }
 
@@ -255,7 +272,10 @@ mod tests {
         let item = login();
         assert_eq!(item.username(), Some("ivan"));
         assert_eq!(item.password(), Some("first"));
-        assert_eq!(item.totp(), Some("otpauth://totp/x?secret=JBSWY3DPEHPK3PXP"));
+        assert_eq!(
+            item.totp(),
+            Some("otpauth://totp/x?secret=JBSWY3DPEHPK3PXP")
+        );
     }
 
     #[test]
@@ -264,7 +284,11 @@ mod tests {
         item.set_password("second", 200);
         item.set_password("third", 300);
         assert_eq!(item.password(), Some("third"));
-        let history: Vec<_> = item.password_history.iter().map(|h| (h.value.as_str(), h.changed_at)).collect();
+        let history: Vec<_> = item
+            .password_history
+            .iter()
+            .map(|h| (h.value.as_str(), h.changed_at))
+            .collect();
         assert_eq!(history, vec![("second", 300), ("first", 200)]);
         assert_eq!(item.updated_at, 300);
     }

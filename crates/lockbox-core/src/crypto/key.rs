@@ -53,7 +53,10 @@ mod tests {
     #[test]
     fn from_slice_requires_32_bytes() {
         assert!(Key::from_slice(&[7u8; 32]).is_ok());
-        assert!(matches!(Key::from_slice(&[7u8; 31]), Err(crate::Error::Invalid(_))));
+        assert!(matches!(
+            Key::from_slice(&[7u8; 31]),
+            Err(crate::Error::Invalid(_))
+        ));
     }
 
     #[test]

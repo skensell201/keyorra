@@ -30,7 +30,10 @@ pub fn create_header(password: &str, kdf: KdfParams) -> Result<(Header, Key)> {
 /// Recovers the account key. A wrong password fails AEAD authentication.
 pub fn unlock(header: &Header, password: &str) -> Result<Key> {
     if header.format != FORMAT_VERSION {
-        return Err(Error::Invalid(format!("unsupported vault format {}", header.format)));
+        return Err(Error::Invalid(format!(
+            "unsupported vault format {}",
+            header.format
+        )));
     }
     let kek = derive_kek(password, &header.salt, header.kdf)?;
     let raw = open(&kek, &header.wrapped_account_key, ACCOUNT_KEY_AAD)
@@ -57,7 +60,11 @@ fn wrap_account_key(account: &Key, password: &str, kdf: KdfParams) -> Result<Hea
 }
 
 pub fn wrap_vault_key(account: &Key, vault_id: Uuid, vault_key: &Key) -> Vec<u8> {
-    seal(account, vault_key.as_bytes(), &with_ids(VAULT_KEY_LABEL, &[vault_id]))
+    seal(
+        account,
+        vault_key.as_bytes(),
+        &with_ids(VAULT_KEY_LABEL, &[vault_id]),
+    )
 }
 
 pub fn unwrap_vault_key(account: &Key, vault_id: Uuid, wrapped: &[u8]) -> Result<Key> {
@@ -105,7 +112,10 @@ mod tests {
     #[test]
     fn wrong_password_is_reported_as_such() {
         let (header, _) = create_header("correct horse", FAST).unwrap();
-        assert!(matches!(unlock(&header, "battery staple"), Err(Error::WrongPassword)));
+        assert!(matches!(
+            unlock(&header, "battery staple"),
+            Err(Error::WrongPassword)
+        ));
     }
 
     #[test]
@@ -114,13 +124,19 @@ mod tests {
         let changed = change_password(&header, "old", "new", FAST).unwrap();
         assert_ne!(changed.salt, header.salt);
         assert!(matches!(unlock(&changed, "old"), Err(Error::WrongPassword)));
-        assert_eq!(unlock(&changed, "new").unwrap().as_bytes(), account.as_bytes());
+        assert_eq!(
+            unlock(&changed, "new").unwrap().as_bytes(),
+            account.as_bytes()
+        );
     }
 
     #[test]
     fn change_password_requires_the_old_one() {
         let (header, _) = create_header("old", FAST).unwrap();
-        assert!(matches!(change_password(&header, "nope", "new", FAST), Err(Error::WrongPassword)));
+        assert!(matches!(
+            change_password(&header, "nope", "new", FAST),
+            Err(Error::WrongPassword)
+        ));
     }
 
     #[test]
@@ -129,8 +145,14 @@ mod tests {
         let vault_key = Key::random();
         let (a, b) = (Uuid::new_v4(), Uuid::new_v4());
         let wrapped = wrap_vault_key(&account, a, &vault_key);
-        assert_eq!(unwrap_vault_key(&account, a, &wrapped).unwrap().as_bytes(), vault_key.as_bytes());
-        assert!(matches!(unwrap_vault_key(&account, b, &wrapped), Err(Error::Decrypt)));
+        assert_eq!(
+            unwrap_vault_key(&account, a, &wrapped).unwrap().as_bytes(),
+            vault_key.as_bytes()
+        );
+        assert!(matches!(
+            unwrap_vault_key(&account, b, &wrapped),
+            Err(Error::Decrypt)
+        ));
     }
 
     #[test]
@@ -153,14 +175,20 @@ mod tests {
     fn unlock_rejects_unknown_format() {
         let (mut header, _) = create_header("pw", FAST).unwrap();
         header.format = FORMAT_VERSION + 1;
-        assert!(matches!(unlock(&header, "pw"), Err(Error::Invalid(m)) if m.contains("unsupported vault format")));
+        assert!(
+            matches!(unlock(&header, "pw"), Err(Error::Invalid(m)) if m.contains("unsupported vault format"))
+        );
     }
 
     #[test]
     fn unlock_checks_format_before_deriving_the_kek() {
         let (mut header, _) = create_header("pw", FAST).unwrap();
         header.format = 99;
-        header.kdf = KdfParams { m_kib: u32::MAX, t: u32::MAX, p: 1 };
+        header.kdf = KdfParams {
+            m_kib: u32::MAX,
+            t: u32::MAX,
+            p: 1,
+        };
         assert!(matches!(unlock(&header, "pw"), Err(Error::Invalid(m)) if m.contains("format")));
     }
 

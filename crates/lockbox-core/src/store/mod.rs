@@ -6,10 +6,10 @@ use std::{
 
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use crate::crypto::{self, Header, KdfParams, Key};
 use crate::model::{AttachmentRef, Item, VaultInfo, SCHEMA_VERSION};
-use zeroize::Zeroizing;
 use crate::{Error, Result};
 
 #[cfg(test)]
@@ -28,7 +28,10 @@ pub const DELETED_RETENTION_SECS: i64 = 30 * 24 * 60 * 60;
 pub enum ItemEntry {
     Ok(Item),
     /// The row exists but does not decrypt; the rest of the vault still loads.
-    Damaged { id: Uuid, vault_id: Uuid },
+    Damaged {
+        id: Uuid,
+        vault_id: Uuid,
+    },
 }
 
 const SCHEMA_V1: &str = "
@@ -72,7 +75,9 @@ pub struct Store {
 
 impl fmt::Debug for Store {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Store").field("unlocked", &self.is_unlocked()).finish()
+        f.debug_struct("Store")
+            .field("unlocked", &self.is_unlocked())
+            .finish()
     }
 }
 
@@ -83,9 +88,12 @@ impl Store {
         let (header, account) = crypto::create_header(password, kdf)?;
         claim_path(path)?;
         match Self::init_file(path, &header, &account) {
-            Ok(conn) => {
-                Ok(Store { conn, header, account: Some(account), vault_keys: HashMap::new() })
-            }
+            Ok(conn) => Ok(Store {
+                conn,
+                header,
+                account: Some(account),
+                vault_keys: HashMap::new(),
+            }),
             Err(e) => {
                 let _ = std::fs::remove_file(path);
                 let _ = std::fs::remove_file(sibling(path, "-journal"));
@@ -101,7 +109,10 @@ impl Store {
         apply_migrations(&tx, 0)?;
         tx.execute(
             "INSERT INTO meta (key, value) VALUES ('header', ?1), ('check', ?2)",
-            params![serde_json::to_vec(header)?, crypto::seal(account, b"lockbox", CHECK_AAD)],
+            params![
+                serde_json::to_vec(header)?,
+                crypto::seal(account, b"lockbox", CHECK_AAD)
+            ],
         )?;
         tx.commit()?;
         Ok(conn)
@@ -116,11 +127,18 @@ impl Store {
         configure(&conn)?;
         upgrade(&conn, path)?;
         let raw: Vec<u8> = conn
-            .query_row("SELECT value FROM meta WHERE key = 'header'", [], |r| r.get(0))
+            .query_row("SELECT value FROM meta WHERE key = 'header'", [], |r| {
+                r.get(0)
+            })
             .optional()?
             .ok_or_else(|| Error::Invalid("missing header".into()))?;
         let header = serde_json::from_slice(&raw)?;
-        Ok(Store { conn, header, account: None, vault_keys: HashMap::new() })
+        Ok(Store {
+            conn,
+            header,
+            account: None,
+            vault_keys: HashMap::new(),
+        })
     }
 
     pub fn unlock(&mut self, password: &str) -> Result<()> {
@@ -132,7 +150,9 @@ impl Store {
     pub fn unlock_with_key(&mut self, account: Key) -> Result<()> {
         let check: Vec<u8> = self
             .conn
-            .query_row("SELECT value FROM meta WHERE key = 'check'", [], |r| r.get(0))
+            .query_row("SELECT value FROM meta WHERE key = 'check'", [], |r| {
+                r.get(0)
+            })
             .optional()?
             .ok_or_else(|| Error::Invalid("missing check value".into()))?;
         crypto::open(&account, &check, CHECK_AAD).map_err(|_| Error::WrongPassword)?;
@@ -164,7 +184,10 @@ impl Store {
 
     pub fn create_vault(&mut self, name: &str) -> Result<VaultInfo> {
         let account = self.account.as_ref().ok_or(Error::Locked)?;
-        let info = VaultInfo { id: Uuid::new_v4(), name: name.to_owned() };
+        let info = VaultInfo {
+            id: Uuid::new_v4(),
+            name: name.to_owned(),
+        };
         let key = Key::random();
         insert_vault(&self.conn, account, &info, &key)?;
         self.vault_keys.insert(info.id, key);
@@ -173,9 +196,12 @@ impl Store {
 
     pub fn vaults(&self) -> Result<Vec<VaultInfo>> {
         let account = self.account_key()?;
-        let mut stmt =
-            self.conn.prepare("SELECT id, meta FROM vaults WHERE deleted = 0 ORDER BY rowid")?;
-        let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)))?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT id, meta FROM vaults WHERE deleted = 0 ORDER BY rowid")?;
+        let rows = stmt.query_map([], |r| {
+            Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+        })?;
         let mut out = Vec::new();
         for row in rows {
             let (id, meta) = row?;
@@ -187,21 +213,40 @@ impl Store {
     }
 
     /// Inserts or updates an item; a later save of a deleted item undeletes it.
-    /// Moving an item to another vault re-encrypts its attachments with the new vault key.
+    ///
+    /// The stored attachment list is authoritative: the caller's `attachments` are ignored
+    /// (use `add_attachment`/`remove_attachment`). Moving an item to another vault
+    /// re-encrypts its attachments with the new vault key. An existing row that does not
+    /// decrypt is never overwritten.
     pub fn save_item(&mut self, item: &Item) -> Result<()> {
         let new_key = self.vault_key(item.vault_id)?;
         let tx = self.conn.unchecked_transaction()?;
-        let old_vault: Option<String> = tx
-            .query_row("SELECT vault_id FROM items WHERE id = ?1", [item.id.to_string()], |r| r.get(0))
+        let existing: Option<(String, Vec<u8>, i64)> = tx
+            .query_row(
+                "SELECT vault_id, data, schema FROM items WHERE id = ?1",
+                [item.id.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
             .optional()?;
-        if let Some(old_vault) = old_vault {
-            let old_vault = parse_id(&old_vault)?;
-            if old_vault != item.vault_id {
-                let old_key = self.vault_key(old_vault)?;
-                reencrypt_attachments(&tx, item.id, (old_vault, old_key), (item.vault_id, new_key))?;
+        let mut item = item.clone();
+        match existing {
+            Some((old_vault, data, schema)) => {
+                let old_vault = parse_id(&old_vault)?;
+                let stored = self.decrypt_item(item.id, old_vault, schema_u32(schema)?, &data)?;
+                item.attachments = stored.attachments;
+                if old_vault != item.vault_id {
+                    let old_key = self.vault_key(old_vault)?;
+                    reencrypt_attachments(
+                        &tx,
+                        item.id,
+                        (old_vault, old_key),
+                        (item.vault_id, new_key),
+                    )?;
+                }
             }
+            None => item.attachments.clear(),
         }
-        upsert_item(&tx, new_key, item)?;
+        upsert_item(&tx, new_key, &item)?;
         tx.commit()?;
         Ok(())
     }
@@ -215,7 +260,11 @@ impl Store {
     ) -> Result<AttachmentRef> {
         let mut item = self.get_item(item_id)?;
         let key = self.vault_key(item.vault_id)?;
-        let att = AttachmentRef { id: Uuid::new_v4(), name: name.to_owned(), size: bytes.len() as u64 };
+        let att = AttachmentRef {
+            id: Uuid::new_v4(),
+            name: name.to_owned(),
+            size: bytes.len() as u64,
+        };
         let tx = self.conn.unchecked_transaction()?;
         insert_attachment(&tx, key, &item, &att, bytes)?;
         item.attachments.push(att.clone());
@@ -225,20 +274,56 @@ impl Store {
         Ok(att)
     }
 
+    /// Tombstones an attachment and drops its reference from the item.
+    pub fn remove_attachment(
+        &mut self,
+        item_id: Uuid,
+        attachment_id: Uuid,
+        now: i64,
+    ) -> Result<()> {
+        let mut item = self.get_item(item_id)?;
+        let key = self.vault_key(item.vault_id)?;
+        let pos = item
+            .attachments
+            .iter()
+            .position(|a| a.id == attachment_id)
+            .ok_or_else(|| Error::NotFound(format!("attachment {attachment_id}")))?;
+        item.attachments.remove(pos);
+        item.updated_at = now;
+        let tx = self.conn.unchecked_transaction()?;
+        let n = tx.execute(
+            "UPDATE attachments SET data = X'', deleted = 1, revision = revision + 1
+             WHERE id = ?1 AND item_id = ?2 AND deleted = 0",
+            params![attachment_id.to_string(), item_id.to_string()],
+        )?;
+        if n == 0 {
+            return Err(Error::NotFound(format!("attachment {attachment_id}")));
+        }
+        upsert_item(&tx, key, &item)?;
+        tx.commit()?;
+        Ok(())
+    }
+
     pub fn get_attachment(&self, id: Uuid) -> Result<Zeroizing<Vec<u8>>> {
+        self.account_key()?;
         let row: Option<(Vec<u8>, String, String)> = self
             .conn
             .query_row(
                 "SELECT a.data, a.item_id, i.vault_id FROM attachments a
                  JOIN items i ON i.id = a.item_id
-                 WHERE a.id = ?1 AND a.deleted = 0",
+                 WHERE a.id = ?1 AND a.deleted = 0 AND i.deleted_at IS NULL",
                 [id.to_string()],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
             )
             .optional()?;
-        let (data, item_id, vault_id) = row.ok_or_else(|| Error::NotFound(format!("attachment {id}")))?;
+        let (data, item_id, vault_id) =
+            row.ok_or_else(|| Error::NotFound(format!("attachment {id}")))?;
         let (item_id, vault_id) = (parse_id(&item_id)?, parse_id(&vault_id)?);
-        crypto::open(self.vault_key(vault_id)?, &data, &crypto::attachment_aad(vault_id, item_id, id))
+        crypto::open(
+            self.vault_key(vault_id)?,
+            &data,
+            &crypto::attachment_aad(vault_id, item_id, id),
+        )
     }
 
     pub fn get_item(&self, id: Uuid) -> Result<Item> {
@@ -348,15 +433,18 @@ impl Store {
         if self.account.is_none() {
             return Err(Error::Locked);
         }
-        self.vault_keys.get(&vault_id).ok_or_else(|| Error::NotFound(format!("vault {vault_id}")))
+        self.vault_keys
+            .get(&vault_id)
+            .ok_or_else(|| Error::NotFound(format!("vault {vault_id}")))
     }
 
     fn load_keys(&mut self, account: Key) -> Result<()> {
         let mut keys = HashMap::new();
         {
             let mut stmt = self.conn.prepare("SELECT id, wrapped_key FROM vaults")?;
-            let rows =
-                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?)))?;
+            let rows = stmt.query_map([], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, Vec<u8>>(1)?))
+            })?;
             for row in rows {
                 let (id, wrapped) = row?;
                 let id = parse_id(&id)?;
@@ -370,10 +458,18 @@ impl Store {
 }
 
 fn insert_vault(conn: &Connection, account: &Key, info: &VaultInfo, key: &Key) -> Result<()> {
-    let meta = crypto::seal(account, &serde_json::to_vec(info)?, &vault_meta_aad(info.id));
+    let meta = crypto::seal(
+        account,
+        &serde_json::to_vec(info)?,
+        &vault_meta_aad(info.id),
+    );
     conn.execute(
         "INSERT INTO vaults (id, wrapped_key, meta) VALUES (?1, ?2, ?3)",
-        params![info.id.to_string(), crypto::wrap_vault_key(account, info.id, key), meta],
+        params![
+            info.id.to_string(),
+            crypto::wrap_vault_key(account, info.id, key),
+            meta
+        ],
     )?;
     Ok(())
 }
@@ -382,9 +478,15 @@ fn schema_u32(schema: i64) -> Result<u32> {
     u32::try_from(schema).map_err(|_| Error::Invalid(format!("bad item schema {schema}")))
 }
 
+/// Does not re-encrypt attachments if the vault changes; callers that may change an item's
+/// vault must go through `Store::save_item` (Task 13 import always uses fresh ids).
 fn upsert_item(conn: &Connection, key: &Key, item: &Item) -> Result<()> {
     let plain = Zeroizing::new(serde_json::to_vec(item)?);
-    let data = crypto::seal(key, &plain, &crypto::item_aad(item.vault_id, item.id, SCHEMA_VERSION));
+    let data = crypto::seal(
+        key,
+        &plain,
+        &crypto::item_aad(item.vault_id, item.id, SCHEMA_VERSION),
+    );
     conn.execute(
         "INSERT INTO items (id, vault_id, data, updated_at, schema) VALUES (?1, ?2, ?3, ?4, ?5)
          ON CONFLICT(id) DO UPDATE SET
@@ -402,6 +504,7 @@ fn upsert_item(conn: &Connection, key: &Key, item: &Item) -> Result<()> {
     Ok(())
 }
 
+/// Does not re-encrypt attachments on a vault change; see `upsert_item`.
 fn insert_attachment(
     conn: &Connection,
     key: &Key,
@@ -409,10 +512,19 @@ fn insert_attachment(
     att: &AttachmentRef,
     bytes: &[u8],
 ) -> Result<()> {
-    let data = crypto::seal(key, bytes, &crypto::attachment_aad(item.vault_id, item.id, att.id));
+    let data = crypto::seal(
+        key,
+        bytes,
+        &crypto::attachment_aad(item.vault_id, item.id, att.id),
+    );
     conn.execute(
         "INSERT INTO attachments (id, item_id, data, schema) VALUES (?1, ?2, ?3, ?4)",
-        params![att.id.to_string(), item.id.to_string(), data, SCHEMA_VERSION],
+        params![
+            att.id.to_string(),
+            item.id.to_string(),
+            data,
+            SCHEMA_VERSION
+        ],
     )?;
     Ok(())
 }
@@ -424,16 +536,23 @@ fn reencrypt_attachments(
     (new_vault, new_key): (Uuid, &Key),
 ) -> Result<()> {
     let rows: Vec<(String, Vec<u8>)> = {
-        let mut stmt = conn.prepare(
-            "SELECT id, data FROM attachments WHERE item_id = ?1 AND deleted = 0",
-        )?;
+        let mut stmt =
+            conn.prepare("SELECT id, data FROM attachments WHERE item_id = ?1 AND deleted = 0")?;
         let mapped = stmt.query_map([item_id.to_string()], |r| Ok((r.get(0)?, r.get(1)?)))?;
         mapped.collect::<rusqlite::Result<_>>()?
     };
     for (id, data) in rows {
         let att_id = parse_id(&id)?;
-        let plain = crypto::open(old_key, &data, &crypto::attachment_aad(old_vault, item_id, att_id))?;
-        let sealed = crypto::seal(new_key, &plain, &crypto::attachment_aad(new_vault, item_id, att_id));
+        let plain = crypto::open(
+            old_key,
+            &data,
+            &crypto::attachment_aad(old_vault, item_id, att_id),
+        )?;
+        let sealed = crypto::seal(
+            new_key,
+            &plain,
+            &crypto::attachment_aad(new_vault, item_id, att_id),
+        );
         conn.execute(
             "UPDATE attachments SET data = ?2, revision = revision + 1 WHERE id = ?1",
             params![id, sealed],

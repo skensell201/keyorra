@@ -15,7 +15,13 @@ pub fn seal(key: &Key, plaintext: &[u8], aad: &[u8]) -> Vec<u8> {
     let cipher = XChaCha20Poly1305::new(CipherKey::from_slice(key.as_bytes()));
     let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
     let ciphertext = cipher
-        .encrypt(&nonce, Payload { msg: plaintext, aad })
+        .encrypt(
+            &nonce,
+            Payload {
+                msg: plaintext,
+                aad,
+            },
+        )
         .expect("plaintext exceeds the XChaCha20-Poly1305 length limit");
     let mut out = Vec::with_capacity(NONCE_LEN + ciphertext.len());
     out.extend_from_slice(&nonce);
@@ -31,7 +37,13 @@ pub fn open(key: &Key, sealed: &[u8], aad: &[u8]) -> Result<Zeroizing<Vec<u8>>> 
     let (nonce, ciphertext) = sealed.split_at(NONCE_LEN);
     let cipher = XChaCha20Poly1305::new(CipherKey::from_slice(key.as_bytes()));
     cipher
-        .decrypt(XNonce::from_slice(nonce), Payload { msg: ciphertext, aad })
+        .decrypt(
+            XNonce::from_slice(nonce),
+            Payload {
+                msg: ciphertext,
+                aad,
+            },
+        )
         .map(Zeroizing::new)
         .map_err(|_| Error::Decrypt)
 }
@@ -58,13 +70,19 @@ mod tests {
     fn wrong_aad_fails() {
         let key = Key::random();
         let sealed = seal(&key, b"hello", b"item-1");
-        assert!(matches!(open(&key, &sealed, b"item-2"), Err(Error::Decrypt)));
+        assert!(matches!(
+            open(&key, &sealed, b"item-2"),
+            Err(Error::Decrypt)
+        ));
     }
 
     #[test]
     fn wrong_key_fails() {
         let sealed = seal(&Key::random(), b"hello", b"");
-        assert!(matches!(open(&Key::random(), &sealed, b""), Err(Error::Decrypt)));
+        assert!(matches!(
+            open(&Key::random(), &sealed, b""),
+            Err(Error::Decrypt)
+        ));
     }
 
     #[test]
@@ -86,6 +104,9 @@ mod tests {
 
     #[test]
     fn truncated_input_fails() {
-        assert!(matches!(open(&Key::random(), &[0u8; 10], b""), Err(Error::Decrypt)));
+        assert!(matches!(
+            open(&Key::random(), &[0u8; 10], b""),
+            Err(Error::Decrypt)
+        ));
     }
 }

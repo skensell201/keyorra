@@ -21,20 +21,31 @@ fn reopened_store_is_locked_until_unlocked() {
     assert!(matches!(store.vaults(), Err(Error::Locked)));
     assert!(matches!(store.unlock("wrong"), Err(Error::WrongPassword)));
     store.unlock(PW).unwrap();
-    let names: Vec<_> = store.vaults().unwrap().into_iter().map(|v| v.name).collect();
+    let names: Vec<_> = store
+        .vaults()
+        .unwrap()
+        .into_iter()
+        .map(|v| v.name)
+        .collect();
     assert_eq!(names, ["Personal"]);
 }
 
 #[test]
 fn create_refuses_existing_file() {
     let (_dir, path, _store) = new_store();
-    assert!(matches!(Store::create(&path, PW, KdfParams::INSECURE_FAST), Err(Error::Invalid(_))));
+    assert!(matches!(
+        Store::create(&path, PW, KdfParams::INSECURE_FAST),
+        Err(Error::Invalid(_))
+    ));
 }
 
 #[test]
 fn open_missing_file_is_not_found() {
     let dir = tempfile::tempdir().unwrap();
-    assert!(matches!(Store::open(&dir.path().join("nope.db")), Err(Error::NotFound(_))));
+    assert!(matches!(
+        Store::open(&dir.path().join("nope.db")),
+        Err(Error::NotFound(_))
+    ));
 }
 
 #[test]
@@ -51,7 +62,10 @@ fn lock_forgets_keys() {
 fn change_password_persists() {
     let (_dir, path, mut store) = new_store();
     store.create_vault("Personal").unwrap();
-    assert!(matches!(store.change_password("wrong", "new pw"), Err(Error::WrongPassword)));
+    assert!(matches!(
+        store.change_password("wrong", "new pw"),
+        Err(Error::WrongPassword)
+    ));
     store.change_password(PW, "new pw").unwrap();
     drop(store);
 
@@ -70,7 +84,10 @@ fn unlock_with_account_key_for_touch_id() {
 
     let mut store = Store::open(&path).unwrap();
     assert!(matches!(store.account_key(), Err(Error::Locked)));
-    assert!(matches!(store.unlock_with_key(Key::random()), Err(Error::WrongPassword)));
+    assert!(matches!(
+        store.unlock_with_key(Key::random()),
+        Err(Error::WrongPassword)
+    ));
     store.unlock_with_key(account).unwrap();
     assert_eq!(store.vaults().unwrap().len(), 1);
 }
@@ -88,7 +105,10 @@ fn vault_names_are_not_stored_in_plaintext() {
 fn newer_database_version_is_rejected() {
     let (_dir, path, store) = new_store();
     drop(store);
-    rusqlite::Connection::open(&path).unwrap().pragma_update(None, "user_version", 99).unwrap();
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .pragma_update(None, "user_version", 99)
+        .unwrap();
     assert!(matches!(Store::open(&path), Err(Error::Invalid(_))));
 }
 
@@ -116,7 +136,8 @@ fn open_rejects_foreign_sqlite_database_without_writing() {
     let path = dir.path().join("foreign.db");
     {
         let conn = rusqlite::Connection::open(&path).unwrap();
-        conn.execute_batch("CREATE TABLE other (x INTEGER);").unwrap();
+        conn.execute_batch("CREATE TABLE other (x INTEGER);")
+            .unwrap();
     }
     let before = std::fs::read(&path).unwrap();
     assert!(matches!(Store::open(&path), Err(Error::Invalid(_))));
@@ -127,8 +148,15 @@ fn open_rejects_foreign_sqlite_database_without_writing() {
 fn create_with_invalid_kdf_params_leaves_no_file() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("lockbox.db");
-    let bad = KdfParams { m_kib: 8, t: 0, p: 1 };
-    assert!(matches!(Store::create(&path, PW, bad), Err(Error::Invalid(_))));
+    let bad = KdfParams {
+        m_kib: 8,
+        t: 0,
+        p: 1,
+    };
+    assert!(matches!(
+        Store::create(&path, PW, bad),
+        Err(Error::Invalid(_))
+    ));
     assert!(!path.exists());
 }
 
@@ -137,7 +165,10 @@ fn create_with_invalid_kdf_params_leaves_no_file() {
 fn created_database_is_owner_only() {
     use std::os::unix::fs::PermissionsExt;
     let (_dir, path, _store) = new_store();
-    assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o600);
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
 }
 
 #[test]
@@ -149,7 +180,10 @@ fn unlock_with_key_without_check_row_is_invalid() {
         .execute("DELETE FROM meta WHERE key = 'check'", [])
         .unwrap();
     let mut store = Store::open(&path).unwrap();
-    assert!(matches!(store.unlock_with_key(Key::random()), Err(Error::Invalid(_))));
+    assert!(matches!(
+        store.unlock_with_key(Key::random()),
+        Err(Error::Invalid(_))
+    ));
 }
 
 #[test]
@@ -158,7 +192,8 @@ fn item_and_attachment_rows_carry_a_schema_column() {
     drop(store);
     let conn = rusqlite::Connection::open(&path).unwrap();
     for table in ["items", "attachments"] {
-        conn.prepare(&format!("SELECT schema FROM {table}")).unwrap();
+        conn.prepare(&format!("SELECT schema FROM {table}"))
+            .unwrap();
     }
 }
 
@@ -178,7 +213,10 @@ fn backup_name_appends_to_the_full_file_name() {
 fn negative_user_version_is_rejected_without_backup() {
     let (dir, path, store) = new_store();
     drop(store);
-    rusqlite::Connection::open(&path).unwrap().pragma_update(None, "user_version", -1).unwrap();
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .pragma_update(None, "user_version", -1)
+        .unwrap();
     assert!(matches!(Store::open(&path), Err(Error::Invalid(_))));
     let files = std::fs::read_dir(dir.path()).unwrap().count();
     assert_eq!(files, 1, "no backup or other file should appear");
@@ -195,7 +233,27 @@ pub(super) fn login(vault: Uuid, title: &str) -> Item {
 fn revision(store: &Store, id: Uuid) -> i64 {
     store
         .conn
-        .query_row("SELECT revision FROM items WHERE id = ?1", [id.to_string()], |r| r.get(0))
+        .query_row(
+            "SELECT revision FROM items WHERE id = ?1",
+            [id.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap()
+}
+
+fn item_revision(store: &Store, id: Uuid) -> i64 {
+    revision(store, id)
+}
+
+/// (length of data, deleted, revision) of an attachment row.
+fn attachment_row(store: &Store, id: Uuid) -> (i64, i64, i64) {
+    store
+        .conn
+        .query_row(
+            "SELECT length(data), deleted, revision FROM attachments WHERE id = ?1",
+            [id.to_string()],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
         .unwrap()
 }
 
@@ -220,7 +278,10 @@ fn save_get_and_list_items() {
 
     assert_eq!(store.get_item(github.id).unwrap(), github);
     assert_eq!(ok_titles(store.list_items(Some(a.id)).unwrap()), ["GitHub"]);
-    assert_eq!(ok_titles(store.list_items(None).unwrap()), ["GitHub", "Bank"]);
+    assert_eq!(
+        ok_titles(store.list_items(None).unwrap()),
+        ["GitHub", "Bank"]
+    );
 }
 
 #[test]
@@ -240,9 +301,15 @@ fn saving_again_bumps_revision() {
 fn save_requires_unlock_and_known_vault() {
     let (_dir, _path, mut store) = new_store();
     let v = store.create_vault("A").unwrap();
-    assert!(matches!(store.save_item(&login(Uuid::new_v4(), "x")), Err(Error::NotFound(_))));
+    assert!(matches!(
+        store.save_item(&login(Uuid::new_v4(), "x")),
+        Err(Error::NotFound(_))
+    ));
     store.lock();
-    assert!(matches!(store.save_item(&login(v.id, "x")), Err(Error::Locked)));
+    assert!(matches!(
+        store.save_item(&login(v.id, "x")),
+        Err(Error::Locked)
+    ));
 }
 
 #[test]
@@ -260,20 +327,54 @@ fn delete_restore_and_purge() {
     store.restore_item(item.id).unwrap();
     assert_eq!(store.get_item(item.id).unwrap().title, "GitHub");
 
+    let att = store
+        .add_attachment(item.id, "scan.pdf", b"bytes", 5_000)
+        .unwrap();
+    assert_eq!(item_revision(&store, item.id), 4);
     store.delete_item(item.id, 10_000).unwrap();
-    assert_eq!(store.purge_expired(10_000 + DELETED_RETENTION_SECS - 1).unwrap(), 0);
-    assert_eq!(store.purge_expired(10_000 + DELETED_RETENTION_SECS).unwrap(), 1);
+    assert_eq!(item_revision(&store, item.id), 5);
+    store.restore_item(item.id).unwrap();
+    assert_eq!(item_revision(&store, item.id), 6);
+    store.delete_item(item.id, 10_000).unwrap();
+    assert_eq!(item_revision(&store, item.id), 7);
+    assert_eq!(
+        store
+            .purge_expired(10_000 + DELETED_RETENTION_SECS - 1)
+            .unwrap(),
+        0
+    );
+    assert_eq!(
+        store
+            .purge_expired(10_000 + DELETED_RETENTION_SECS)
+            .unwrap(),
+        1
+    );
+    assert_eq!(item_revision(&store, item.id), 8);
+    assert!(matches!(
+        store.get_attachment(att.id),
+        Err(Error::NotFound(_))
+    ));
+    assert_eq!(attachment_row(&store, att.id), (0, 1, 2));
     assert!(store.deleted_items().unwrap().is_empty());
-    assert!(matches!(store.restore_item(item.id), Err(Error::NotFound(_))));
+    assert!(matches!(
+        store.restore_item(item.id),
+        Err(Error::NotFound(_))
+    ));
     // The tombstone row stays for future sync.
-    let rows: i64 = store.conn.query_row("SELECT count(*) FROM items", [], |r| r.get(0)).unwrap();
+    let rows: i64 = store
+        .conn
+        .query_row("SELECT count(*) FROM items", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(rows, 1);
 }
 
 #[test]
 fn delete_unknown_item_is_not_found() {
     let (_dir, _path, mut store) = new_store();
-    assert!(matches!(store.delete_item(Uuid::new_v4(), 1), Err(Error::NotFound(_))));
+    assert!(matches!(
+        store.delete_item(Uuid::new_v4(), 1),
+        Err(Error::NotFound(_))
+    ));
 }
 
 #[test]
@@ -286,12 +387,21 @@ fn corrupted_row_is_reported_damaged_without_hiding_others() {
     store.save_item(&bad).unwrap();
     store
         .conn
-        .execute("UPDATE items SET data = X'00112233' WHERE id = ?1", [bad.id.to_string()])
+        .execute(
+            "UPDATE items SET data = X'00112233' WHERE id = ?1",
+            [bad.id.to_string()],
+        )
         .unwrap();
 
     let entries = store.list_items(None).unwrap();
     assert_eq!(entries[0], ItemEntry::Ok(good));
-    assert_eq!(entries[1], ItemEntry::Damaged { id: bad.id, vault_id: v.id });
+    assert_eq!(
+        entries[1],
+        ItemEntry::Damaged {
+            id: bad.id,
+            vault_id: v.id
+        }
+    );
     assert!(matches!(store.get_item(bad.id), Err(Error::Decrypt)));
 }
 
@@ -333,11 +443,16 @@ fn stored_schema_feeds_the_item_aad() {
     store.save_item(&item).unwrap();
     store
         .conn
-        .execute("UPDATE items SET schema = 2 WHERE id = ?1", [item.id.to_string()])
-        .unwrap()
-    ;
+        .execute(
+            "UPDATE items SET schema = 2 WHERE id = ?1",
+            [item.id.to_string()],
+        )
+        .unwrap();
     assert!(matches!(store.get_item(item.id), Err(Error::Decrypt)));
-    assert!(matches!(store.list_items(None).unwrap()[0], ItemEntry::Damaged { .. }));
+    assert!(matches!(
+        store.list_items(None).unwrap()[0],
+        ItemEntry::Damaged { .. }
+    ));
 }
 
 #[test]
@@ -347,7 +462,9 @@ fn attachments_round_trip_and_are_listed_on_the_item() {
     let item = login(v.id, "Passport");
     store.save_item(&item).unwrap();
 
-    let att = store.add_attachment(item.id, "scan.pdf", b"%PDF-SECRET", 5_000).unwrap();
+    let att = store
+        .add_attachment(item.id, "scan.pdf", b"%PDF-SECRET", 5_000)
+        .unwrap();
     assert_eq!(att.name, "scan.pdf");
     assert_eq!(att.size, 11);
     assert_eq!(&*store.get_attachment(att.id).unwrap(), b"%PDF-SECRET");
@@ -363,7 +480,10 @@ fn attachments_round_trip_and_are_listed_on_the_item() {
 #[test]
 fn unknown_attachment_is_not_found() {
     let (_dir, _path, store) = new_store();
-    assert!(matches!(store.get_attachment(Uuid::new_v4()), Err(Error::NotFound(_))));
+    assert!(matches!(
+        store.get_attachment(Uuid::new_v4()),
+        Err(Error::NotFound(_))
+    ));
 }
 
 #[test]
@@ -373,7 +493,9 @@ fn moving_an_item_to_another_vault_keeps_attachments_readable() {
     let b = store.create_vault("B").unwrap();
     let item = login(a.id, "Passport");
     store.save_item(&item).unwrap();
-    let att = store.add_attachment(item.id, "scan.pdf", b"bytes", 5_000).unwrap();
+    let att = store
+        .add_attachment(item.id, "scan.pdf", b"bytes", 5_000)
+        .unwrap();
 
     let mut moved = store.get_item(item.id).unwrap();
     moved.vault_id = b.id;
@@ -381,4 +503,164 @@ fn moving_an_item_to_another_vault_keeps_attachments_readable() {
 
     assert_eq!(store.get_item(item.id).unwrap().vault_id, b.id);
     assert_eq!(&*store.get_attachment(att.id).unwrap(), b"bytes");
+}
+
+#[test]
+fn attachment_of_a_deleted_item_is_not_served_until_restored() {
+    let (_dir, _path, mut store) = new_store();
+    let v = store.create_vault("A").unwrap();
+    let item = login(v.id, "Passport");
+    store.save_item(&item).unwrap();
+    let att = store
+        .add_attachment(item.id, "scan.pdf", b"bytes", 5_000)
+        .unwrap();
+    store.delete_item(item.id, 6_000).unwrap();
+    assert!(matches!(
+        store.get_attachment(att.id),
+        Err(Error::NotFound(_))
+    ));
+    store.restore_item(item.id).unwrap();
+    assert_eq!(&*store.get_attachment(att.id).unwrap(), b"bytes");
+}
+
+#[test]
+fn locked_store_reports_locked_for_attachments() {
+    let (_dir, _path, mut store) = new_store();
+    let v = store.create_vault("A").unwrap();
+    let item = login(v.id, "Passport");
+    store.save_item(&item).unwrap();
+    let att = store
+        .add_attachment(item.id, "scan.pdf", b"bytes", 5_000)
+        .unwrap();
+    store.lock();
+    assert!(matches!(store.get_attachment(att.id), Err(Error::Locked)));
+    assert!(matches!(
+        store.get_attachment(Uuid::new_v4()),
+        Err(Error::Locked)
+    ));
+}
+
+#[test]
+fn saving_a_stale_copy_keeps_stored_attachments() {
+    let (_dir, _path, mut store) = new_store();
+    let v = store.create_vault("A").unwrap();
+    let item = login(v.id, "Passport");
+    store.save_item(&item).unwrap();
+    let mut stale = store.get_item(item.id).unwrap();
+    let att = store
+        .add_attachment(item.id, "scan.pdf", b"bytes", 5_000)
+        .unwrap();
+    stale.title = "Renamed".into();
+    store.save_item(&stale).unwrap();
+    let saved = store.get_item(item.id).unwrap();
+    assert_eq!(saved.title, "Renamed");
+    assert_eq!(saved.attachments, vec![att.clone()]);
+    assert_eq!(&*store.get_attachment(att.id).unwrap(), b"bytes");
+}
+
+#[test]
+fn saving_fabricated_attachment_refs_does_not_store_them() {
+    let (_dir, _path, mut store) = new_store();
+    let v = store.create_vault("A").unwrap();
+    let fake = || crate::model::AttachmentRef {
+        id: Uuid::new_v4(),
+        name: "x".into(),
+        size: 1,
+    };
+    let mut fresh = login(v.id, "New");
+    fresh.attachments.push(fake());
+    store.save_item(&fresh).unwrap();
+    assert!(store.get_item(fresh.id).unwrap().attachments.is_empty());
+
+    let mut existing = store.get_item(fresh.id).unwrap();
+    existing.attachments.push(fake());
+    store.save_item(&existing).unwrap();
+    assert!(store.get_item(fresh.id).unwrap().attachments.is_empty());
+}
+
+#[test]
+fn saving_over_a_damaged_row_is_refused() {
+    let (_dir, _path, mut store) = new_store();
+    let v = store.create_vault("A").unwrap();
+    let item = login(v.id, "Bad");
+    store.save_item(&item).unwrap();
+    store
+        .conn
+        .execute(
+            "UPDATE items SET data = X'00112233' WHERE id = ?1",
+            [item.id.to_string()],
+        )
+        .unwrap();
+    assert!(matches!(store.save_item(&item), Err(Error::Decrypt)));
+}
+
+#[test]
+fn removed_attachment_is_tombstoned_and_unlisted() {
+    let (_dir, _path, mut store) = new_store();
+    let v = store.create_vault("A").unwrap();
+    let item = login(v.id, "Passport");
+    store.save_item(&item).unwrap();
+    let att = store
+        .add_attachment(item.id, "scan.pdf", b"bytes", 5_000)
+        .unwrap();
+    store.remove_attachment(item.id, att.id, 7_000).unwrap();
+    assert!(matches!(
+        store.get_attachment(att.id),
+        Err(Error::NotFound(_))
+    ));
+    let saved = store.get_item(item.id).unwrap();
+    assert!(saved.attachments.is_empty());
+    assert_eq!(saved.updated_at, 7_000);
+    assert_eq!(attachment_row(&store, att.id), (0, 1, 2));
+    assert!(matches!(
+        store.remove_attachment(item.id, att.id, 8_000),
+        Err(Error::NotFound(_))
+    ));
+    assert!(matches!(
+        store.remove_attachment(item.id, Uuid::new_v4(), 8_000),
+        Err(Error::NotFound(_))
+    ));
+}
+
+#[test]
+fn failed_vault_move_rolls_back_completely() {
+    let (_dir, _path, mut store) = new_store();
+    let a = store.create_vault("A").unwrap();
+    let b = store.create_vault("B").unwrap();
+    let item = login(a.id, "Passport");
+    store.save_item(&item).unwrap();
+    let first = store.add_attachment(item.id, "one", b"one", 5_000).unwrap();
+    let second = store.add_attachment(item.id, "two", b"two", 5_001).unwrap();
+    store
+        .conn
+        .execute(
+            "UPDATE attachments SET data = X'00112233' WHERE id = ?1",
+            [second.id.to_string()],
+        )
+        .unwrap();
+
+    let mut moved = store.get_item(item.id).unwrap();
+    moved.vault_id = b.id;
+    assert!(store.save_item(&moved).is_err());
+
+    assert_eq!(store.get_item(item.id).unwrap().vault_id, a.id);
+    assert_eq!(&*store.get_attachment(first.id).unwrap(), b"one");
+}
+
+#[test]
+fn vault_move_bumps_item_and_attachment_revisions() {
+    let (_dir, _path, mut store) = new_store();
+    let a = store.create_vault("A").unwrap();
+    let b = store.create_vault("B").unwrap();
+    let item = login(a.id, "Passport");
+    store.save_item(&item).unwrap();
+    let att = store
+        .add_attachment(item.id, "scan.pdf", b"bytes", 5_000)
+        .unwrap();
+    assert_eq!(attachment_row(&store, att.id).2, 1);
+    let mut moved = store.get_item(item.id).unwrap();
+    moved.vault_id = b.id;
+    store.save_item(&moved).unwrap();
+    assert_eq!(attachment_row(&store, att.id).2, 2);
+    assert_eq!(item_revision(&store, item.id), 3);
 }
