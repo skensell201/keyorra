@@ -97,7 +97,7 @@ fn backup_copies_the_file_next_to_itself() {
     let (_dir, path, store) = new_store();
     drop(store);
     let copy = backup(&path, 1).unwrap();
-    assert_eq!(copy, path.with_extension("db.bak-v1"));
+    assert_eq!(copy, dir_path_join(&path, "lockbox.db.bak-v1"));
     assert_eq!(std::fs::read(&copy).unwrap(), std::fs::read(&path).unwrap());
 }
 
@@ -160,4 +160,26 @@ fn item_and_attachment_rows_carry_a_schema_column() {
     for table in ["items", "attachments"] {
         conn.prepare(&format!("SELECT schema FROM {table}")).unwrap();
     }
+}
+
+fn dir_path_join(path: &Path, name: &str) -> PathBuf {
+    path.parent().unwrap().join(name)
+}
+
+#[test]
+fn backup_name_appends_to_the_full_file_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("vault");
+    std::fs::write(&path, b"x").unwrap();
+    assert_eq!(backup(&path, 2).unwrap(), dir.path().join("vault.bak-v2"));
+}
+
+#[test]
+fn negative_user_version_is_rejected_without_backup() {
+    let (dir, path, store) = new_store();
+    drop(store);
+    rusqlite::Connection::open(&path).unwrap().pragma_update(None, "user_version", -1).unwrap();
+    assert!(matches!(Store::open(&path), Err(Error::Invalid(_))));
+    let files = std::fs::read_dir(dir.path()).unwrap().count();
+    assert_eq!(files, 1, "no backup or other file should appear");
 }

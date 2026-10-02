@@ -66,18 +66,16 @@ impl fmt::Debug for Store {
 impl Store {
     /// Creates a new database at `path` and returns it unlocked.
     pub fn create(path: &Path, password: &str, kdf: KdfParams) -> Result<Store> {
-        if path.exists() {
-            return Err(Error::Invalid(format!("{} already exists", path.display())));
-        }
         // Argon2 can fail on bad params; do it before touching the filesystem.
         let (header, account) = crypto::create_header(password, kdf)?;
+        claim_path(path)?;
         match Self::init_file(path, &header, &account) {
             Ok(conn) => {
                 Ok(Store { conn, header, account: Some(account), vault_keys: HashMap::new() })
             }
             Err(e) => {
                 let _ = std::fs::remove_file(path);
-                let _ = std::fs::remove_file(path.with_extension("db-journal"));
+                let _ = std::fs::remove_file(sibling(path, "-journal"));
                 Err(e)
             }
         }
@@ -85,11 +83,6 @@ impl Store {
 
     fn init_file(path: &Path, header: &Header, account: &Key) -> Result<Connection> {
         let conn = Connection::open(path)?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-        }
         configure(&conn)?;
         let tx = conn.unchecked_transaction()?;
         apply_migrations(&tx, 0)?;
@@ -235,7 +228,7 @@ fn apply_migrations(tx: &Connection, from: i64) -> Result<()> {
 /// Brings an existing Lockbox database up to `DB_VERSION`; never initialises one.
 fn upgrade(conn: &Connection, path: &Path) -> Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
-    if version == 0 {
+    if version <= 0 {
         return Err(Error::Invalid("not a lockbox database".into()));
     }
     if version > DB_VERSION {
@@ -254,7 +247,32 @@ fn upgrade(conn: &Connection, path: &Path) -> Result<()> {
 
 /// Copies the database next to itself before a schema migration.
 pub fn backup(path: &Path, from_version: i64) -> Result<PathBuf> {
-    let copy = path.with_extension(format!("db.bak-v{from_version}"));
+    let copy = sibling(path, &format!(".bak-v{from_version}"));
     std::fs::copy(path, &copy)?;
     Ok(copy)
+}
+
+/// `path` with `suffix` appended to the full file name (how SQLite names `-journal`).
+fn sibling(path: &Path, suffix: &str) -> PathBuf {
+    let mut p = path.as_os_str().to_owned();
+    p.push(suffix);
+    PathBuf::from(p)
+}
+
+/// Atomically creates an empty, owner-only file at `path`; SQLite treats it as a new database.
+fn claim_path(path: &Path) -> Result<()> {
+    let mut opts = std::fs::OpenOptions::new();
+    opts.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        opts.mode(0o600);
+    }
+    match opts.open(path) {
+        Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            Err(Error::Invalid(format!("{} already exists", path.display())))
+        }
+        Err(e) => Err(e.into()),
+    }
 }
