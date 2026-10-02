@@ -241,10 +241,6 @@ fn revision(store: &Store, id: Uuid) -> i64 {
         .unwrap()
 }
 
-fn item_revision(store: &Store, id: Uuid) -> i64 {
-    revision(store, id)
-}
-
 /// (length of data, deleted, revision) of an attachment row.
 fn attachment_row(store: &Store, id: Uuid) -> (i64, i64, i64) {
     store
@@ -330,13 +326,13 @@ fn delete_restore_and_purge() {
     let att = store
         .add_attachment(item.id, "scan.pdf", b"bytes", 5_000)
         .unwrap();
-    assert_eq!(item_revision(&store, item.id), 4);
+    assert_eq!(revision(&store, item.id), 4);
     store.delete_item(item.id, 10_000).unwrap();
-    assert_eq!(item_revision(&store, item.id), 5);
+    assert_eq!(revision(&store, item.id), 5);
     store.restore_item(item.id).unwrap();
-    assert_eq!(item_revision(&store, item.id), 6);
+    assert_eq!(revision(&store, item.id), 6);
     store.delete_item(item.id, 10_000).unwrap();
-    assert_eq!(item_revision(&store, item.id), 7);
+    assert_eq!(revision(&store, item.id), 7);
     assert_eq!(
         store
             .purge_expired(10_000 + DELETED_RETENTION_SECS - 1)
@@ -349,7 +345,7 @@ fn delete_restore_and_purge() {
             .unwrap(),
         1
     );
-    assert_eq!(item_revision(&store, item.id), 8);
+    assert_eq!(revision(&store, item.id), 8);
     assert!(matches!(
         store.get_attachment(att.id),
         Err(Error::NotFound(_))
@@ -641,7 +637,7 @@ fn failed_vault_move_rolls_back_completely() {
 
     let mut moved = store.get_item(item.id).unwrap();
     moved.vault_id = b.id;
-    assert!(store.save_item(&moved).is_err());
+    assert!(matches!(store.save_item(&moved), Err(Error::Decrypt)));
 
     assert_eq!(store.get_item(item.id).unwrap().vault_id, a.id);
     assert_eq!(&*store.get_attachment(first.id).unwrap(), b"one");
@@ -662,5 +658,51 @@ fn vault_move_bumps_item_and_attachment_revisions() {
     moved.vault_id = b.id;
     store.save_item(&moved).unwrap();
     assert_eq!(attachment_row(&store, att.id).2, 2);
-    assert_eq!(item_revision(&store, item.id), 3);
+    assert_eq!(revision(&store, item.id), 3);
+}
+
+#[test]
+fn saving_over_a_purged_tombstone_is_not_found() {
+    let (_dir, _path, mut store) = new_store();
+    let v = store.create_vault("A").unwrap();
+    let item = login(v.id, "Gone");
+    store.save_item(&item).unwrap();
+    store.delete_item(item.id, 10_000).unwrap();
+    store
+        .purge_expired(10_000 + DELETED_RETENTION_SECS)
+        .unwrap();
+    let before = revision(&store, item.id);
+    assert!(matches!(store.save_item(&item), Err(Error::NotFound(_))));
+    assert_eq!(revision(&store, item.id), before);
+    let len: i64 = store
+        .conn
+        .query_row(
+            "SELECT length(data) FROM items WHERE id = ?1",
+            [item.id.to_string()],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(len, 0);
+}
+
+#[test]
+fn removing_an_attachment_whose_row_is_missing_still_drops_the_ref() {
+    let (_dir, _path, mut store) = new_store();
+    let v = store.create_vault("A").unwrap();
+    let item = login(v.id, "Passport");
+    store.save_item(&item).unwrap();
+    let att = store
+        .add_attachment(item.id, "scan.pdf", b"bytes", 5_000)
+        .unwrap();
+    store
+        .conn
+        .execute(
+            "DELETE FROM attachments WHERE id = ?1",
+            [att.id.to_string()],
+        )
+        .unwrap();
+    store.remove_attachment(item.id, att.id, 7_000).unwrap();
+    let saved = store.get_item(item.id).unwrap();
+    assert!(saved.attachments.is_empty());
+    assert_eq!(saved.updated_at, 7_000);
 }

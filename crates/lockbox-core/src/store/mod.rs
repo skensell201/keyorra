@@ -231,6 +231,10 @@ impl Store {
         let mut item = item.clone();
         match existing {
             Some((old_vault, data, schema)) => {
+                if data.is_empty() {
+                    // Purged tombstone: nothing left to save over.
+                    return Err(Error::NotFound(format!("item {}", item.id)));
+                }
                 let old_vault = parse_id(&old_vault)?;
                 let stored = self.decrypt_item(item.id, old_vault, schema_u32(schema)?, &data)?;
                 item.attachments = stored.attachments;
@@ -275,6 +279,7 @@ impl Store {
     }
 
     /// Tombstones an attachment and drops its reference from the item.
+    /// Removal is immediate and permanent (the UI must confirm).
     pub fn remove_attachment(
         &mut self,
         item_id: Uuid,
@@ -291,14 +296,12 @@ impl Store {
         item.attachments.remove(pos);
         item.updated_at = now;
         let tx = self.conn.unchecked_transaction()?;
-        let n = tx.execute(
+        // A missing or already-deleted row (n == 0) must not keep a dangling ref alive.
+        tx.execute(
             "UPDATE attachments SET data = X'', deleted = 1, revision = revision + 1
              WHERE id = ?1 AND item_id = ?2 AND deleted = 0",
             params![attachment_id.to_string(), item_id.to_string()],
         )?;
-        if n == 0 {
-            return Err(Error::NotFound(format!("attachment {attachment_id}")));
-        }
         upsert_item(&tx, key, &item)?;
         tx.commit()?;
         Ok(())
