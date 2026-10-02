@@ -13,7 +13,9 @@
                 "loginFields": [
                   { "value": "ivan", "id": "", "name": "username", "fieldType": "T", "designation": "username" },
                   { "value": "s3cret-Pass!", "id": "", "name": "password", "fieldType": "P", "designation": "password" },
-                  { "value": "✓", "id": "", "name": "remember", "fieldType": "C" }
+                  { "value": "✓", "id": "", "name": "remember", "fieldType": "C" },
+                  { "value": "12345678", "id": "", "name": "customer", "fieldType": "T" },
+                  { "value": "4321", "id": "", "name": "pin", "fieldType": "P" }
                 ],
                 "notesPlain": "work account",
                 "sections": [
@@ -26,7 +28,7 @@
                     ]
                   }
                 ],
-                "passwordHistory": [ { "value": "old-pass", "time": 1690000000 } ]
+                "passwordHistory": [ { "value": "older-pass", "time": 1680000000 }, { "value": "old-pass", "time": 1690000000 } ]
               },
               "overview": {
                 "subtitle": "ivan",
@@ -128,6 +130,24 @@
                 ]
               },
               "overview": { "title": "Ivan at work" }
+            },
+            {
+              "uuid": "ssh1", "createdAt": 1700000000, "updatedAt": 1700000000,
+              "state": "active", "categoryUuid": "114",
+              "details": {
+                "sections": [
+                  {
+                    "title": "", "name": "",
+                    "fields": [
+                      { "title": "private key", "id": "private_key", "value": { "sshKey": { "privateKey": "-----BEGIN OPENSSH PRIVATE KEY-----\nabc\n-----END OPENSSH PRIVATE KEY-----", "metadata": { "publicKey": "ssh-ed25519 AAAAC3", "fingerprint": "SHA256:abc", "keyType": "ed25519" } } } },
+                      { "title": "extra", "id": "x", "value": { "somethingNew": { "a": 1, "b": "x" } } },
+                      { "title": "when", "id": "w", "value": { "date": "soon" } },
+                      { "title": "month", "id": "m", "value": { "monthYear": "13/2027" } }
+                    ]
+                  }
+                ]
+              },
+              "overview": { "title": "Deploy key" }
             },
             {
               "uuid": "srv1", "createdAt": 1700000000, "updatedAt": 1700000000,

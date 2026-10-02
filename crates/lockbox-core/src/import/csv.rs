@@ -6,6 +6,10 @@ use super::{ImportPlan, ImportedItem, ImportedVault};
 use crate::model::{Field, FieldValue, Item, ItemKind, Purpose};
 use crate::{Error, Result};
 
+fn is_true(s: &str) -> bool {
+    matches!(s.to_lowercase().as_str(), "true" | "1" | "yes")
+}
+
 pub fn parse(text: &str, vault_name: &str, now: i64) -> Result<ImportPlan> {
     let csv_err = |e: ::csv::Error| Error::Invalid(format!("CSV: {e}"));
     let mut reader = ::csv::ReaderBuilder::new()
@@ -26,6 +30,7 @@ pub fn parse(text: &str, vault_name: &str, now: i64) -> Result<ImportPlan> {
     let c_notes = col(&["notes", "note"]);
     let c_tags = col(&["tags"]);
     let c_fav = col(&["favorite"]);
+    let c_archived = col(&["archived"]);
     if c_title.is_none() && c_url.is_none() && c_pass.is_none() {
         return Err(Error::Invalid(
             "unrecognized CSV: expected a header row with title/url/username/password columns"
@@ -39,8 +44,19 @@ pub fn parse(text: &str, vault_name: &str, now: i64) -> Result<ImportPlan> {
     };
     for record in reader.records() {
         let record = record.map_err(csv_err)?;
-        let get = |c: Option<usize>| c.and_then(|i| record.get(i)).map(str::trim).unwrap_or("");
-        let (url, user, pass) = (get(c_url), get(c_user), get(c_pass));
+        // Secrets and notes are taken verbatim: whitespace may be part of them.
+        let raw = |c: Option<usize>| c.and_then(|i| record.get(i)).unwrap_or("");
+        let get = |c: Option<usize>| raw(c).trim();
+        let (url, user, pass) = (get(c_url), raw(c_user), raw(c_pass));
+        if [c_title, c_url, c_tags]
+            .into_iter()
+            .all(|c| get(c).is_empty())
+            && [c_user, c_pass, c_otp, c_notes]
+                .into_iter()
+                .all(|c| raw(c).is_empty())
+        {
+            continue;
+        }
         let kind = if url.is_empty() && user.is_empty() && pass.is_empty() {
             ItemKind::SecureNote
         } else {
@@ -66,7 +82,7 @@ pub fn parse(text: &str, vault_name: &str, now: i64) -> Result<ImportPlan> {
         if !pass.is_empty() {
             item.set_password(pass, now);
         }
-        let otp = get(c_otp);
+        let otp = raw(c_otp);
         if !otp.is_empty() {
             item.fields.push(Field {
                 id: "one-time-password".into(),
@@ -75,14 +91,17 @@ pub fn parse(text: &str, vault_name: &str, now: i64) -> Result<ImportPlan> {
                 purpose: None,
             });
         }
-        item.notes = get(c_notes).to_owned();
+        item.notes = raw(c_notes).to_owned();
         item.tags = get(c_tags)
             .split([',', ';'])
             .map(str::trim)
             .filter(|t| !t.is_empty())
             .map(str::to_owned)
             .collect();
-        item.favorite = matches!(get(c_fav).to_lowercase().as_str(), "true" | "1" | "yes");
+        if is_true(get(c_archived)) && !item.tags.iter().any(|t| t == "archived") {
+            item.tags.push("archived".into());
+        }
+        item.favorite = is_true(get(c_fav));
         vault.items.push(ImportedItem {
             item,
             attachments: Vec::new(),
@@ -168,5 +187,35 @@ pass: hunter2\"
             .fields
             .iter()
             .any(|f| matches!(f.value, FieldValue::Totp(_))));
+    }
+
+    #[test]
+    fn archived_rows_get_a_tag() {
+        let plan = parse(
+            "Title,Password,Archived,Tags\nOld,pw,true,x\nNew,pw,false,\n",
+            "I",
+            0,
+        )
+        .unwrap();
+        let items = &plan.vaults[0].items;
+        assert_eq!(items[0].item.tags, ["x", "archived"]);
+        assert!(items[1].item.tags.is_empty());
+    }
+
+    #[test]
+    fn secrets_and_notes_are_taken_verbatim() {
+        let csv = "Title,Username,Password,OTPAuth,Notes\nA, bob ,  pw with spaces  , otpauth://x ,\" note \"\n";
+        let item = &parse(csv, "I", 0).unwrap().vaults[0].items[0].item;
+        assert_eq!(item.username(), Some(" bob "));
+        assert_eq!(item.password(), Some("  pw with spaces  "));
+        assert_eq!(item.totp(), Some(" otpauth://x "));
+        assert_eq!(item.notes, " note ");
+    }
+
+    #[test]
+    fn rows_with_every_column_empty_are_skipped() {
+        let csv = "Title,Url,Password,Favorite\nA,,pw,false\n,,,false\n,,,\n";
+        let plan = parse(csv, "I", 0).unwrap();
+        assert_eq!(plan.item_count(), 1);
     }
 }

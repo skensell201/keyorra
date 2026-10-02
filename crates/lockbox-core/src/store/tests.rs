@@ -797,3 +797,21 @@ fn failed_import_writes_nothing() {
         .unwrap();
     assert_eq!(items, 0);
 }
+
+#[test]
+fn apply_import_skips_vaults_without_items() {
+    let (_dir, _path, mut store) = new_store();
+    let mut plan = sample_plan();
+    plan.vaults.insert(
+        1,
+        ImportedVault {
+            name: "Empty".into(),
+            items: vec![],
+        },
+    );
+    let report = store.apply_import(&plan).unwrap();
+    assert_eq!(report.vaults, 2);
+    let vaults = store.vaults().unwrap();
+    let names: Vec<_> = vaults.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(names, ["Personal", "Datagile"]);
+}

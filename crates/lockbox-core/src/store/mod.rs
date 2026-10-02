@@ -201,7 +201,7 @@ impl Store {
         let tx = self.conn.unchecked_transaction()?;
         let mut report = ImportReport::default();
         let mut new_keys = Vec::new();
-        for vault in &plan.vaults {
+        for vault in plan.vaults.iter().filter(|v| !v.items.is_empty()) {
             let info = VaultInfo {
                 id: Uuid::new_v4(),
                 name: vault.name.clone(),
