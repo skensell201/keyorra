@@ -1,7 +1,9 @@
 pub mod crypto;
 pub mod error;
+pub mod generator;
 pub mod model;
 pub mod store;
 pub mod totp;
+mod wordlist;
 
 pub use error::{Error, Result};
