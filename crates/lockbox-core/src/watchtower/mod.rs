@@ -31,7 +31,7 @@ pub fn weak(items: &[Item]) -> Vec<Finding> {
         .filter_map(|item| {
             let password = item.password().filter(|p| !p.is_empty())?;
             let score = u8::from(zxcvbn::zxcvbn(password, &[]).score());
-            (score < 3).then(|| Finding {
+            (score < 3).then_some(Finding {
                 item_id: item.id,
                 kind: FindingKind::Weak { score },
             })
