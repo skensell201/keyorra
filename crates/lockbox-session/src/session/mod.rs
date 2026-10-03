@@ -4,10 +4,11 @@ use lockbox_core::crypto::KdfParams;
 use lockbox_core::model::{Field, FieldValue, HistoryEntry, Item, ItemKind, Purpose};
 use lockbox_core::store::ItemEntry;
 use lockbox_core::store::Store;
+use lockbox_core::totp::Totp;
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::dto::{ItemFilter, ItemSummary, VaultDto};
+use crate::dto::{ItemFilter, ItemSummary, TotpCode, VaultDto};
 
 use crate::autolock::AutoLock;
 use crate::clipboard::ClipboardGuard;
@@ -264,6 +265,48 @@ impl Session {
     fn store_mut(&mut self) -> CmdResult<&mut Store> {
         self.store.as_mut().ok_or_else(locked)
     }
+
+    /// Current code of the item's first TOTP field. Not activity: the UI polls it every second,
+    /// which must not keep the vault unlocked.
+    pub fn totp(&self, id: Uuid, now: u64) -> CmdResult<Option<TotpCode>> {
+        let item = self.store()?.get_item(id)?;
+        let Some(raw) = item.totp() else {
+            return Ok(None);
+        };
+        let totp = Totp::parse(raw)?;
+        Ok(Some(TotpCode {
+            code: totp.code_at(now),
+            seconds_left: totp.seconds_left(now),
+            period: totp.period(),
+        }))
+    }
+
+    /// Text to put on the clipboard for one field (`"totp"` = the current one-time code), and
+    /// arms clearing it after `ClipboardGuard::DEFAULT_CLEAR_SECS`.
+    pub fn copy_value(&mut self, id: Uuid, field_id: &str, now: u64) -> CmdResult<String> {
+        self.touch(now);
+        let item = self.store()?.get_item(id)?;
+        let text = if field_id == "totp" {
+            let raw = item.totp().ok_or_else(|| {
+                CmdError::new(ErrorKind::NotFound, "This item has no one-time password")
+            })?;
+            Totp::parse(raw)?.code_at(now)
+        } else {
+            let field = item
+                .fields
+                .iter()
+                .chain(item.sections.iter().flat_map(|s| s.fields.iter()))
+                .find(|f| f.id == field_id)
+                .ok_or_else(|| CmdError::new(ErrorKind::NotFound, format!("field {field_id}")))?;
+            copy_text(&field.value, now)?
+        };
+        if text.is_empty() {
+            return Err(CmdError::new(ErrorKind::Invalid, "Nothing to copy"));
+        }
+        self.clipboard
+            .copied(&text, now, ClipboardGuard::DEFAULT_CLEAR_SECS);
+        Ok(text)
+    }
 }
 
 fn locked() -> CmdError {
@@ -288,4 +331,27 @@ fn purpose_field(purpose: Purpose) -> Field {
         value,
         purpose: Some(purpose),
     }
+}
+
+fn copy_text(value: &FieldValue, now: u64) -> CmdResult<String> {
+    Ok(match value {
+        FieldValue::Totp(raw) => Totp::parse(raw)?.code_at(now),
+        FieldValue::Date(secs) => format_date(*secs),
+        FieldValue::MonthYear(ym) => format!("{:02}/{}", ym % 100, ym / 100),
+        other => other.as_str().unwrap_or_default().to_owned(),
+    })
+}
+
+/// Unix seconds → `YYYY-MM-DD` (UTC), Howard Hinnant's civil-from-days algorithm.
+fn format_date(secs: i64) -> String {
+    let z = secs.div_euclid(86_400) + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + i64::from(month <= 2);
+    format!("{year:04}-{month:02}-{day:02}")
 }

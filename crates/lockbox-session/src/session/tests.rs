@@ -282,3 +282,100 @@ fn a_locked_session_refuses_vault_access() {
         ErrorKind::Locked
     );
 }
+
+use lockbox_core::model::{Field, Section};
+
+/// base32 of "12345678901234567890" (RFC 6238 SHA-1 secret).
+const RFC_SECRET: &str = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
+
+fn with_totp_and_dates(s: &mut Session) -> Item {
+    let p = personal(s);
+    let mut item = s.new_item(p, ItemKind::Login, 1_000).unwrap();
+    item.title = "GitHub".into();
+    item.fields[1].value = FieldValue::Concealed("hunter2".into());
+    item.sections.push(Section {
+        id: "extra".into(),
+        title: "Extra".into(),
+        fields: vec![
+            Field {
+                id: "otp".into(),
+                label: "one-time password".into(),
+                value: FieldValue::Totp(RFC_SECRET.into()),
+                purpose: None,
+            },
+            Field {
+                id: "born".into(),
+                label: "birth date".into(),
+                value: FieldValue::Date(631_152_000),
+                purpose: None,
+            },
+            Field {
+                id: "exp".into(),
+                label: "expiry".into(),
+                value: FieldValue::MonthYear(202_712),
+                purpose: None,
+            },
+        ],
+    });
+    s.save_item(item, 1_000).unwrap()
+}
+
+#[test]
+fn totp_code_for_a_known_secret() {
+    let (_dir, mut s) = unlocked_session();
+    let item = with_totp_and_dates(&mut s);
+    let code = s.totp(item.id, 59).unwrap().unwrap();
+    assert_eq!(code.code, "287082");
+    assert_eq!((code.seconds_left, code.period), (1, 30));
+}
+
+#[test]
+fn totp_is_none_without_a_totp_field() {
+    let (_dir, mut s) = unlocked_session();
+    let p = personal(&mut s);
+    let item = save_login(&mut s, p, "Bank", "me", "pw");
+    assert_eq!(s.totp(item.id, 59).unwrap(), None);
+}
+
+#[test]
+fn polling_totp_does_not_keep_the_vault_unlocked() {
+    let (_dir, mut s) = unlocked_session();
+    let item = with_totp_and_dates(&mut s);
+    let timeout = AutoLock::DEFAULT_TIMEOUT_SECS;
+    s.totp(item.id, 1_000 + timeout - 1).unwrap();
+    assert!(s.tick(1_000 + timeout));
+}
+
+#[test]
+fn copy_returns_the_value_and_arms_clipboard_clearing() {
+    let (_dir, mut s) = unlocked_session();
+    let item = with_totp_and_dates(&mut s);
+    assert_eq!(s.copy_value(item.id, "password", 1_000).unwrap(), "hunter2");
+    assert!(s.clipboard_pending());
+    assert!(s.clipboard_should_clear(1_000 + ClipboardGuard::DEFAULT_CLEAR_SECS, Some("hunter2")));
+}
+
+#[test]
+fn copy_totp_dates_and_errors() {
+    let (_dir, mut s) = unlocked_session();
+    let item = with_totp_and_dates(&mut s);
+    assert_eq!(s.copy_value(item.id, "totp", 59).unwrap(), "287082");
+    assert_eq!(s.copy_value(item.id, "otp", 59).unwrap(), "287082");
+    assert_eq!(s.copy_value(item.id, "born", 1_000).unwrap(), "1990-01-01");
+    assert_eq!(s.copy_value(item.id, "exp", 1_000).unwrap(), "12/2027");
+    assert_eq!(
+        s.copy_value(item.id, "nope", 1_000).unwrap_err().kind,
+        ErrorKind::NotFound
+    );
+    assert_eq!(
+        s.copy_value(item.id, "username", 1_000).unwrap_err().kind,
+        ErrorKind::Invalid
+    );
+}
+
+#[test]
+fn formats_dates_as_iso() {
+    assert_eq!(format_date(0), "1970-01-01");
+    assert_eq!(format_date(951_782_400), "2000-02-29");
+    assert_eq!(format_date(-86_400), "1969-12-31");
+}

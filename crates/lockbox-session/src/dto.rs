@@ -1,10 +1,13 @@
 //! Data shapes the UI sends and receives (camelCase JSON). Items themselves travel as
 //! `lockbox_core::model::Item` (snake_case, as stored).
 
+use lockbox_core::generator::{self, PassphraseOptions, PasswordOptions};
 use lockbox_core::model::ItemKind;
 use lockbox_core::store::ItemEntry;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
+
+use crate::CmdResult;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -66,6 +69,79 @@ pub struct ItemFilter {
     pub favorites: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TotpCode {
+    pub code: String,
+    pub seconds_left: u64,
+    pub period: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum GeneratorKind {
+    Password,
+    Passphrase,
+}
+
+/// Generator settings from the UI; omitted fields take the core defaults.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "camelCase", default)]
+pub struct GeneratorRequest {
+    pub kind: GeneratorKind,
+    pub length: usize,
+    pub lowercase: bool,
+    pub uppercase: bool,
+    pub digits: bool,
+    pub symbols: bool,
+    pub avoid_ambiguous: bool,
+    pub words: usize,
+    pub separator: String,
+    pub capitalize: bool,
+    pub include_number: bool,
+}
+
+impl Default for GeneratorRequest {
+    fn default() -> Self {
+        let p = PasswordOptions::default();
+        let q = PassphraseOptions::default();
+        Self {
+            kind: GeneratorKind::Password,
+            length: p.length,
+            lowercase: p.lowercase,
+            uppercase: p.uppercase,
+            digits: p.digits,
+            symbols: p.symbols,
+            avoid_ambiguous: p.avoid_ambiguous,
+            words: q.words,
+            separator: q.separator,
+            capitalize: q.capitalize,
+            include_number: q.include_number,
+        }
+    }
+}
+
+impl GeneratorRequest {
+    pub fn generate(&self) -> CmdResult<String> {
+        Ok(match self.kind {
+            GeneratorKind::Password => generator::password(&PasswordOptions {
+                length: self.length,
+                lowercase: self.lowercase,
+                uppercase: self.uppercase,
+                digits: self.digits,
+                symbols: self.symbols,
+                avoid_ambiguous: self.avoid_ambiguous,
+            })?,
+            GeneratorKind::Passphrase => generator::passphrase(&PassphraseOptions {
+                words: self.words,
+                separator: self.separator.clone(),
+                capitalize: self.capitalize,
+                include_number: self.include_number,
+            })?,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -93,5 +169,25 @@ mod tests {
         let f: ItemFilter =
             serde_json::from_str(&format!(r#"{{"vaultId":"{id}","favorites":true}}"#)).unwrap();
         assert_eq!((f.vault_id, f.favorites), (Some(id), true));
+    }
+
+    #[test]
+    fn generator_defaults_and_partial_json() {
+        assert_eq!(
+            GeneratorRequest::default()
+                .generate()
+                .unwrap()
+                .chars()
+                .count(),
+            20
+        );
+        let req: GeneratorRequest =
+            serde_json::from_str(r#"{"kind":"passphrase","words":4,"separator":"."}"#).unwrap();
+        assert_eq!(req.generate().unwrap().split('.').count(), 4);
+        let bad = GeneratorRequest {
+            length: 7,
+            ..GeneratorRequest::default()
+        };
+        assert_eq!(bad.generate().unwrap_err().kind, crate::ErrorKind::Invalid);
     }
 }
