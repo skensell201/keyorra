@@ -97,3 +97,188 @@ fn clipboard_guard_is_exposed() {
     assert!(s.clipboard_pending());
     assert!(s.clipboard_should_clear(1_090, Some("x")));
 }
+
+use lockbox_core::model::{FieldValue, Item, ItemKind};
+use uuid::Uuid;
+
+use crate::dto::ItemFilter;
+
+pub(super) fn personal(s: &mut Session) -> Uuid {
+    s.vaults(1_000).unwrap()[0].id
+}
+
+pub(super) fn save_login(s: &mut Session, vault: Uuid, title: &str, user: &str, pw: &str) -> Item {
+    let mut item = s.new_item(vault, ItemKind::Login, 1_000).unwrap();
+    item.title = title.into();
+    item.fields[0].value = FieldValue::Text(user.into());
+    item.fields[1].value = FieldValue::Concealed(pw.into());
+    s.save_item(item, 1_000).unwrap()
+}
+
+fn titles(s: &mut Session, filter: ItemFilter) -> Vec<String> {
+    s.items(&filter, 1_000)
+        .unwrap()
+        .into_iter()
+        .map(|i| i.title)
+        .collect()
+}
+
+#[test]
+fn vaults_report_item_counts() {
+    let (_dir, mut s) = unlocked_session();
+    let p = personal(&mut s);
+    save_login(&mut s, p, "GitHub", "ivan", "pw");
+    save_login(&mut s, p, "Bank", "me", "pw");
+    s.create_vault("Work", 1_000).unwrap();
+    let vaults: Vec<_> = s
+        .vaults(1_000)
+        .unwrap()
+        .into_iter()
+        .map(|v| (v.name, v.item_count))
+        .collect();
+    assert_eq!(
+        vaults,
+        [("Personal".to_string(), 2), ("Work".to_string(), 0)]
+    );
+}
+
+#[test]
+fn create_vault_requires_a_name() {
+    let (_dir, mut s) = unlocked_session();
+    assert_eq!(
+        s.create_vault("   ", 1_000).unwrap_err().kind,
+        ErrorKind::Invalid
+    );
+    assert_eq!(s.create_vault("  Work ", 1_000).unwrap().name, "Work");
+}
+
+#[test]
+fn new_items_get_purpose_fields_and_need_a_known_vault() {
+    let (_dir, mut s) = unlocked_session();
+    let p = personal(&mut s);
+    let login = s.new_item(p, ItemKind::Login, 1_000).unwrap();
+    let ids: Vec<_> = login.fields.iter().map(|f| f.id.as_str()).collect();
+    assert_eq!(ids, ["username", "password"]);
+    assert_eq!(
+        s.new_item(p, ItemKind::Password, 1_000)
+            .unwrap()
+            .fields
+            .len(),
+        1
+    );
+    assert!(s
+        .new_item(p, ItemKind::SecureNote, 1_000)
+        .unwrap()
+        .fields
+        .is_empty());
+    let err = s
+        .new_item(Uuid::new_v4(), ItemKind::Login, 1_000)
+        .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::NotFound);
+}
+
+#[test]
+fn items_are_sorted_and_filtered() {
+    let (_dir, mut s) = unlocked_session();
+    let p = personal(&mut s);
+    let work = s.create_vault("Work", 1_000).unwrap().id;
+    save_login(&mut s, p, "zeta", "z", "pw");
+    save_login(&mut s, p, "Alpha", "a", "pw");
+    let mut beta = save_login(&mut s, p, "beta", "b", "pw");
+    beta.favorite = true;
+    s.save_item(beta, 1_000).unwrap();
+    save_login(&mut s, work, "Work item", "w", "pw");
+
+    assert_eq!(
+        titles(&mut s, ItemFilter::default()),
+        ["Alpha", "beta", "Work item", "zeta"]
+    );
+    assert_eq!(
+        titles(
+            &mut s,
+            ItemFilter {
+                vault_id: Some(work),
+                ..Default::default()
+            }
+        ),
+        ["Work item"]
+    );
+    assert_eq!(
+        titles(
+            &mut s,
+            ItemFilter {
+                query: "ALP".into(),
+                ..Default::default()
+            }
+        ),
+        ["Alpha"]
+    );
+    assert_eq!(
+        titles(
+            &mut s,
+            ItemFilter {
+                favorites: true,
+                ..Default::default()
+            }
+        ),
+        ["beta"]
+    );
+}
+
+#[test]
+fn save_requires_a_title_and_trims_it() {
+    let (_dir, mut s) = unlocked_session();
+    let p = personal(&mut s);
+    let item = s.new_item(p, ItemKind::SecureNote, 1_000).unwrap();
+    assert_eq!(
+        s.save_item(item.clone(), 1_000).unwrap_err().kind,
+        ErrorKind::Invalid
+    );
+    let mut item = item;
+    item.title = "  Wi-Fi  ".into();
+    assert_eq!(s.save_item(item, 1_000).unwrap().title, "Wi-Fi");
+}
+
+#[test]
+fn save_records_password_history_and_keeps_created_at() {
+    let (_dir, mut s) = unlocked_session();
+    let p = personal(&mut s);
+    let mut item = save_login(&mut s, p, "GitHub", "ivan", "first");
+    item.fields[1].value = FieldValue::Concealed("second".into());
+    let saved = s.save_item(item, 2_000).unwrap();
+    assert_eq!(saved.password(), Some("second"));
+    assert_eq!(saved.password_history[0].value, "first");
+    assert_eq!(saved.password_history[0].changed_at, 2_000);
+    assert_eq!((saved.created_at, saved.updated_at), (1_000, 2_000));
+    let again = s.save_item(saved, 3_000).unwrap();
+    assert_eq!(
+        again.password_history.len(),
+        1,
+        "unchanged password adds no history"
+    );
+}
+
+#[test]
+fn item_and_delete() {
+    let (_dir, mut s) = unlocked_session();
+    let p = personal(&mut s);
+    let item = save_login(&mut s, p, "GitHub", "ivan", "pw");
+    assert_eq!(s.item(item.id, 1_000).unwrap().title, "GitHub");
+    s.delete_item(item.id, 1_000).unwrap();
+    assert!(titles(&mut s, ItemFilter::default()).is_empty());
+    assert_eq!(
+        s.item(item.id, 1_000).unwrap_err().kind,
+        ErrorKind::NotFound
+    );
+}
+
+#[test]
+fn a_locked_session_refuses_vault_access() {
+    let (_dir, mut s) = unlocked_session();
+    s.lock();
+    assert_eq!(s.vaults(1_000).unwrap_err().kind, ErrorKind::Locked);
+    assert_eq!(
+        s.items(&ItemFilter::default(), 1_000).unwrap_err().kind,
+        ErrorKind::Locked
+    );
+}

@@ -2,6 +2,7 @@
 
 pub mod autolock;
 pub mod clipboard;
+pub mod dto;
 pub mod error;
 pub mod session;
 pub mod throttle;
