@@ -81,7 +81,9 @@ pub fn copy_field(
     id: Uuid,
     field: String,
 ) -> CmdResult<()> {
-    let text = lock_session(&state).copy_value(id, &field, now())?;
+    // Hold the lock across arming the guard and writing, so housekeeping can't see a half-done copy.
+    let mut session = lock_session(&state);
+    let text = session.copy_value(id, &field, now())?;
     app.clipboard()
         .write_text(text)
         .map_err(|e| CmdError::new(ErrorKind::Other, format!("Clipboard: {e}")))

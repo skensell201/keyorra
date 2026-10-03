@@ -68,18 +68,19 @@ fn housekeeping(app: AppHandle) {
         std::thread::sleep(Duration::from_secs(2));
         let state = app.state::<AppState>();
         let t = now();
-        let (locked, clipboard_pending) = {
-            let mut session = lock_session(&state);
-            (session.tick(t), session.clipboard_pending())
-        };
-        if locked {
-            let _ = app.emit("locked", ());
-        }
-        if clipboard_pending {
+        // The lock spans the clipboard calls on purpose: a copy command must not arm the guard
+        // and write between our read and our clear, or we would wipe the fresh copy.
+        let mut session = lock_session(&state);
+        let locked = session.tick(t);
+        if session.clipboard_pending() {
             let current = app.clipboard().read_text().ok();
-            if lock_session(&state).clipboard_should_clear(t, current.as_deref()) {
+            if session.clipboard_should_clear(t, current.as_deref()) {
                 let _ = app.clipboard().clear();
             }
+        }
+        drop(session);
+        if locked {
+            let _ = app.emit("locked", ());
         }
     }
 }
