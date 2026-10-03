@@ -393,6 +393,7 @@ impl Store {
     }
 
     pub fn delete_item(&mut self, id: Uuid, now: i64) -> Result<()> {
+        self.account_key()?;
         let n = self.conn.execute(
             "UPDATE items SET deleted_at = ?2, revision = revision + 1
              WHERE id = ?1 AND deleted_at IS NULL",
@@ -405,6 +406,7 @@ impl Store {
     }
 
     pub fn restore_item(&mut self, id: Uuid) -> Result<()> {
+        self.account_key()?;
         let n = self.conn.execute(
             "UPDATE items SET deleted_at = NULL, revision = revision + 1
              WHERE id = ?1 AND deleted_at IS NOT NULL AND length(data) > 0",

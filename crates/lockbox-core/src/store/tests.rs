@@ -815,3 +815,18 @@ fn apply_import_skips_vaults_without_items() {
     let names: Vec<_> = vaults.iter().map(|v| v.name.as_str()).collect();
     assert_eq!(names, ["Personal", "Datagile"]);
 }
+
+#[test]
+fn delete_and_restore_require_unlock() {
+    let (_dir, _path, mut store) = new_store();
+    let v = store.create_vault("A").unwrap();
+    let kept = login(v.id, "Kept");
+    let trashed = login(v.id, "Trashed");
+    store.save_item(&kept).unwrap();
+    store.save_item(&trashed).unwrap();
+    store.delete_item(trashed.id, 10).unwrap();
+    store.lock();
+
+    assert!(matches!(store.delete_item(kept.id, 20), Err(Error::Locked)));
+    assert!(matches!(store.restore_item(trashed.id), Err(Error::Locked)));
+}
