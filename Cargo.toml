@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/lockbox-core", "crates/lockbox-session"]
+members = ["crates/lockbox-core", "crates/lockbox-session", "app/src-tauri"]
 default-members = ["crates/lockbox-core", "crates/lockbox-session"]
 resolver = "2"
 
