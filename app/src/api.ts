@@ -1,6 +1,9 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
+/** Keep in sync with ClipboardGuard::DEFAULT_CLEAR_SECS (lockbox-session). */
+export const CLIPBOARD_CLEAR_SECS = 90;
+
 export type Status = "new" | "locked" | "unlocked";
 
 export type ErrorKind = "wrongPassword" | "locked" | "throttled" | "notFound" | "invalid" | "other";

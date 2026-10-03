@@ -12,3 +12,7 @@ test("one-time codes are grouped", () => {
   expect(formatCode("12345678")).toBe("1234 5678");
   expect(formatCode("1234567")).toBe("1234567");
 });
+
+test("an out-of-range date falls back to the raw number", () => {
+  expect(fieldText({ type: "date", value: 1e20 })).toBe("100000000000000000000");
+});

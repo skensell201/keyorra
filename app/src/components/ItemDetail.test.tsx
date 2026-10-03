@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 import { api } from "../api";
@@ -71,4 +71,37 @@ test("shows a load error", async () => {
   vi.mocked(api.item).mockRejectedValue({ kind: "notFound", message: "not found: item i1" });
   setup();
   expect(await screen.findByRole("alert")).toHaveTextContent("not found");
+});
+
+test("a failed copy shows a dismissible banner and keeps the item", async () => {
+  const user = userEvent.setup();
+  vi.mocked(api.copyField).mockRejectedValue({ kind: "other", message: "clipboard unavailable" });
+  setup();
+  await user.click(await screen.findByRole("button", { name: "Copy username" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent("clipboard unavailable");
+  expect(screen.getByRole("heading", { name: "GitHub" })).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Dismiss" }));
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+test("the copied toast disappears after a few seconds", async () => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    setup();
+    await user.click(await screen.findByRole("button", { name: "Copy username" }));
+    expect(screen.getByRole("status")).toHaveTextContent("90 seconds");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3100);
+    });
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+  } finally {
+    vi.useRealTimers();
+  }
+});
+
+test("a failing one-time code shows an error in its row", async () => {
+  vi.mocked(api.totp).mockRejectedValue({ kind: "invalid", message: "bad secret" });
+  setup();
+  expect(await screen.findByText("Invalid one-time password")).toBeInTheDocument();
 });

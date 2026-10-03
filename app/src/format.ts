@@ -14,7 +14,10 @@ export const NEW_KINDS: ItemKind[] = ["login", "secure_note", "password", "credi
 export function fieldText(value: FieldValue): string {
   switch (value.type) {
     case "date":
-      return new Date(value.value * 1000).toISOString().slice(0, 10);
+    {
+      const date = new Date(value.value * 1000);
+      return Number.isNaN(date.getTime()) ? String(value.value) : date.toISOString().slice(0, 10);
+    }
     case "month_year":
       return `${String(value.value % 100).padStart(2, "0")}/${Math.floor(value.value / 100)}`;
     default:

@@ -9,7 +9,10 @@ export function Unlock({ onUnlocked }: { onUnlocked: () => void }) {
 
   useEffect(() => {
     if (wait <= 0) return;
-    const timer = setTimeout(() => setWait((w) => w - 1), 1000);
+    const timer = setTimeout(() => {
+      setWait((w) => w - 1);
+      if (wait === 1) setError(null);
+    }, 1000);
     return () => clearTimeout(timer);
   }, [wait]);
 

@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, errorMessage, type Field, type Item, type TotpCode } from "../api";
+import { api, CLIPBOARD_CLEAR_SECS, errorMessage, type Field, type Item, type TotpCode } from "../api";
 import { fieldText, formatCode, KIND_LABEL } from "../format";
 
 interface Props {
@@ -8,9 +8,11 @@ interface Props {
   onDeleted: () => void;
 }
 
+/** Must be rendered with `key={itemId}`: state is per item, and field ids like "password" repeat across items. */
 export function ItemDetail({ itemId, onEdit, onDeleted }: Props) {
   const [item, setItem] = useState<Item | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [actionError, setActionError] = useState<string | null>(null);
   const [revealed, setRevealed] = useState<Set<string>>(new Set());
   const [copied, setCopied] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState(false);
@@ -26,6 +28,12 @@ export function ItemDetail({ itemId, onEdit, onDeleted }: Props) {
     };
   }, [itemId]);
 
+  useEffect(() => {
+    if (!copied) return;
+    const timer = setTimeout(() => setCopied(false), 3000);
+    return () => clearTimeout(timer);
+  }, [copied]);
+
   if (error) {
     return (
       <div className="banner error" role="alert">
@@ -40,7 +48,7 @@ export function ItemDetail({ itemId, onEdit, onDeleted }: Props) {
       await api.copyField(itemId, fieldId);
       setCopied(true);
     } catch (e) {
-      setError(errorMessage(e));
+      setActionError(errorMessage(e));
     }
   }
 
@@ -49,7 +57,7 @@ export function ItemDetail({ itemId, onEdit, onDeleted }: Props) {
       await api.deleteItem(itemId);
       onDeleted();
     } catch (e) {
-      setError(errorMessage(e));
+      setActionError(errorMessage(e));
     }
   }
 
@@ -66,6 +74,12 @@ export function ItemDetail({ itemId, onEdit, onDeleted }: Props) {
 
   return (
     <article className="item-detail">
+      {actionError && (
+        <div className="banner error" role="alert">
+          {actionError}
+          <button onClick={() => setActionError(null)}>Dismiss</button>
+        </div>
+      )}
       <header>
         <div>
           <span className="kind">{KIND_LABEL[item.kind]}</span>
@@ -125,7 +139,7 @@ export function ItemDetail({ itemId, onEdit, onDeleted }: Props) {
       )}
       {copied && (
         <div className="toast" role="status">
-          Copied. The clipboard clears in 90 seconds.
+          Copied. The clipboard clears in {CLIPBOARD_CLEAR_SECS} seconds.
         </div>
       )}
     </article>
@@ -157,6 +171,7 @@ function FieldRow(props: { field: Field; revealed: boolean; onToggle: () => void
 
 function TotpRow({ itemId, label, onCopy }: { itemId: string; label: string; onCopy: () => void }) {
   const [code, setCode] = useState<TotpCode | null>(null);
+  const [failed, setFailed] = useState(false);
   const name = label || "one-time password";
 
   useEffect(() => {
@@ -165,15 +180,27 @@ function TotpRow({ itemId, label, onCopy }: { itemId: string; label: string; onC
       api
         .totp(itemId)
         .then((c) => live && setCode(c))
-        .catch(() => live && setCode(null));
-    load();
+        .catch(() => {
+          if (!live) return;
+          setFailed(true);
+          clearInterval(timer);
+        });
     const timer = setInterval(load, 1000);
+    load();
     return () => {
       live = false;
       clearInterval(timer);
     };
   }, [itemId]);
 
+  if (failed) {
+    return (
+      <div className="field">
+        <span className="label">{name}</span>
+        <span className="value error">Invalid one-time password</span>
+      </div>
+    );
+  }
   if (!code) return null;
   return (
     <div className="field">
