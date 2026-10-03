@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, errorMessage, type GeneratorRequest } from "../api";
 
 const DEFAULTS: GeneratorRequest = {
@@ -22,14 +22,22 @@ export function Generator({ onUse }: { onUse: (value: string) => void }) {
   const [value, setValue] = useState("");
   const [error, setError] = useState<string | null>(null);
 
+  const latest = useRef(0);
+
   const regenerate = useCallback(() => {
+    const id = ++latest.current;
     api
       .generate(request)
       .then((v) => {
+        if (id !== latest.current) return;
         setValue(v);
         setError(null);
       })
-      .catch((e) => setError(errorMessage(e)));
+      .catch((e) => {
+        if (id !== latest.current) return;
+        setValue("");
+        setError(errorMessage(e));
+      });
   }, [request]);
 
   useEffect(regenerate, [regenerate]);

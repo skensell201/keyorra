@@ -36,3 +36,26 @@ test("use passes the generated value", async () => {
   await user.click(screen.getByRole("button", { name: "Use" }));
   expect(onUse).toHaveBeenCalledWith("Gen-123");
 });
+
+test("ignores out-of-order replies", async () => {
+  const replies: ((v: string) => void)[] = [];
+  vi.mocked(api.generate).mockReset().mockImplementation(() => new Promise<string>((r) => replies.push(r)));
+  render(<Generator onUse={vi.fn()} />);
+  fireEvent.change(screen.getByLabelText(/Length/), { target: { value: "32" } });
+  await waitFor(() => expect(replies).toHaveLength(2));
+  replies[1]("second");
+  expect(await screen.findByText("second")).toBeInTheDocument();
+  replies[0]("first");
+  await new Promise((r) => setTimeout(r, 20));
+  expect(screen.getByText("second")).toBeInTheDocument();
+  expect(screen.queryByText("first")).not.toBeInTheDocument();
+});
+
+test("a failed generation disables Use", async () => {
+  render(<Generator onUse={vi.fn()} />);
+  await screen.findByText("Gen-123");
+  vi.mocked(api.generate).mockRejectedValue({ kind: "other", message: "boom" });
+  await userEvent.setup().click(screen.getByRole("button", { name: "Regenerate" }));
+  expect(await screen.findByText("boom")).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Use" })).toBeDisabled();
+});

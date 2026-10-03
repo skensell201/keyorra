@@ -1,5 +1,5 @@
 import { open } from "@tauri-apps/plugin-dialog";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { api, errorMessage, type ImportPreview, type ImportResult } from "../api";
 
 type Step = { kind: "pick" } | { kind: "preview"; preview: ImportPreview } | { kind: "done"; result: ImportResult };
@@ -9,16 +9,24 @@ export function ImportDialog({ onClose, onImported }: { onClose: () => void; onI
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
+
   async function choose() {
     setError(null);
-    const path = await open({
-      multiple: false,
-      directory: false,
-      filters: [{ name: "1Password export", extensions: ["1pux", "csv"] }],
-    });
-    if (typeof path !== "string") return;
     setBusy(true);
     try {
+      const path = await open({
+        multiple: false,
+        directory: false,
+        filters: [{ name: "1Password export", extensions: ["1pux", "csv"] }],
+      });
+      if (typeof path !== "string") return;
       setStep({ kind: "preview", preview: await api.importPreview(path) });
     } catch (e) {
       setError(errorMessage(e));

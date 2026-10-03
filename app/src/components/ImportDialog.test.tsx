@@ -59,3 +59,10 @@ test("shows parse errors and can be cancelled", async () => {
   await user.click(screen.getByRole("button", { name: "Cancel" }));
   expect(onClose).toHaveBeenCalled();
 });
+
+test("Escape closes the dialog", async () => {
+  const onClose = vi.fn();
+  render(<ImportDialog onClose={onClose} onImported={vi.fn()} />);
+  await userEvent.setup().keyboard("{Escape}");
+  expect(onClose).toHaveBeenCalled();
+});

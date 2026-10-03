@@ -20,7 +20,7 @@ const saved = () => vi.mocked(api.saveItem).mock.lastCall![0];
 test("edits basic fields and keeps everything else", async () => {
   const user = userEvent.setup();
   const onSave = vi.fn();
-  render(<ItemEditor item={loginItem()} onSave={onSave} onCancel={vi.fn()} />);
+  render(<ItemEditor isNew={false} item={loginItem()} onSave={onSave} onCancel={vi.fn()} />);
 
   await user.clear(screen.getByLabelText("Title"));
   await user.type(screen.getByLabelText("Title"), "GitHub work");
@@ -46,14 +46,14 @@ test("edits basic fields and keeps everything else", async () => {
 test("shows a save error", async () => {
   const user = userEvent.setup();
   vi.mocked(api.saveItem).mockRejectedValue({ kind: "invalid", message: "Title is required" });
-  render(<ItemEditor item={loginItem({ title: "" })} onSave={vi.fn()} onCancel={vi.fn()} />);
+  render(<ItemEditor isNew={false} item={loginItem({ title: "" })} onSave={vi.fn()} onCancel={vi.fn()} />);
   await user.click(screen.getByRole("button", { name: "Save" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("Title is required");
 });
 
 test("the generator fills the password", async () => {
   const user = userEvent.setup();
-  render(<ItemEditor item={loginItem()} onSave={vi.fn()} onCancel={vi.fn()} />);
+  render(<ItemEditor isNew={false} item={loginItem()} onSave={vi.fn()} onCancel={vi.fn()} />);
   await user.click(screen.getByRole("button", { name: "Generate" }));
   await screen.findByText("Gen-123");
   await user.click(screen.getByRole("button", { name: "Use" }));
@@ -63,7 +63,7 @@ test("the generator fills the password", async () => {
 test("cancel", async () => {
   const user = userEvent.setup();
   const onCancel = vi.fn();
-  render(<ItemEditor item={loginItem()} onSave={vi.fn()} onCancel={onCancel} />);
+  render(<ItemEditor isNew={false} item={loginItem()} onSave={vi.fn()} onCancel={onCancel} />);
   await user.click(screen.getByRole("button", { name: "Cancel" }));
   expect(onCancel).toHaveBeenCalled();
 });

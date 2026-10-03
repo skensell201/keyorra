@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { api, errorMessage, type Item, type ItemKind, type ItemSummary, type Vault } from "../api";
 import { ImportDialog } from "./ImportDialog";
 import { ItemDetail } from "./ItemDetail";
@@ -6,7 +6,7 @@ import { ItemEditor } from "./ItemEditor";
 import { ItemList } from "./ItemList";
 import { Sidebar, type Selection } from "./Sidebar";
 
-type Pane = { mode: "empty" } | { mode: "view"; id: string } | { mode: "edit"; item: Item };
+type Pane = { mode: "empty" } | { mode: "view"; id: string } | { mode: "edit"; item: Item; isNew: boolean };
 
 export function Main({ onLock }: { onLock: () => void }) {
   const [vaults, setVaults] = useState<Vault[]>([]);
@@ -17,22 +17,39 @@ export function Main({ onLock }: { onLock: () => void }) {
   const [importing, setImporting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const loadVaults = useCallback(
-    () => api.vaults().then(setVaults).catch((e) => setError(errorMessage(e))),
-    [],
-  );
-  const loadItems = useCallback(
-    () =>
-      api
-        .items({
-          query,
-          vaultId: selection.kind === "vault" ? selection.id : null,
-          favorites: selection.kind === "favorites",
-        })
-        .then(setItems)
-        .catch((e) => setError(errorMessage(e))),
-    [query, selection],
-  );
+  const vaultsSeq = useRef(0);
+  const itemsSeq = useRef(0);
+
+  const loadVaults = useCallback(() => {
+    const seq = ++vaultsSeq.current;
+    return api
+      .vaults()
+      .then((v) => {
+        if (seq !== vaultsSeq.current) return;
+        setVaults(v);
+        setError(null);
+      })
+      .catch((e) => {
+        if (seq === vaultsSeq.current) setError(errorMessage(e));
+      });
+  }, []);
+  const loadItems = useCallback(() => {
+    const seq = ++itemsSeq.current;
+    return api
+      .items({
+        query,
+        vaultId: selection.kind === "vault" ? selection.id : null,
+        favorites: selection.kind === "favorites",
+      })
+      .then((list) => {
+        if (seq !== itemsSeq.current) return;
+        setItems(list);
+        setError(null);
+      })
+      .catch((e) => {
+        if (seq === itemsSeq.current) setError(errorMessage(e));
+      });
+  }, [query, selection]);
   const refresh = useCallback(() => Promise.all([loadVaults(), loadItems()]), [loadVaults, loadItems]);
 
   useEffect(() => {
@@ -47,7 +64,7 @@ export function Main({ onLock }: { onLock: () => void }) {
   async function newItem(kind: ItemKind) {
     if (!targetVault) return;
     try {
-      setPane({ mode: "edit", item: await api.newItem(targetVault, kind) });
+      setPane({ mode: "edit", item: await api.newItem(targetVault, kind), isNew: true });
     } catch (e) {
       setError(errorMessage(e));
     }
@@ -96,7 +113,7 @@ export function Main({ onLock }: { onLock: () => void }) {
           <ItemDetail
             key={pane.id}
             itemId={pane.id}
-            onEdit={(item) => setPane({ mode: "edit", item })}
+            onEdit={(item) => setPane({ mode: "edit", item, isNew: false })}
             onDeleted={async () => {
               setPane({ mode: "empty" });
               await refresh();
@@ -107,9 +124,8 @@ export function Main({ onLock }: { onLock: () => void }) {
           <ItemEditor
             key={pane.item.id}
             item={pane.item}
-            onCancel={() =>
-              setPane(items.some((i) => i.id === pane.item.id) ? { mode: "view", id: pane.item.id } : { mode: "empty" })
-            }
+            isNew={pane.isNew}
+            onCancel={() => setPane(pane.isNew ? { mode: "empty" } : { mode: "view", id: pane.item.id })}
             onSave={async (saved) => {
               setPane({ mode: "view", id: saved.id });
               await refresh();

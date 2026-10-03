@@ -5,12 +5,13 @@ import { Generator } from "./Generator";
 
 interface Props {
   item: Item;
+  isNew: boolean;
   onSave: (saved: Item) => void;
   onCancel: () => void;
 }
 
 /** Edits the common fields; other fields and sections are passed through unchanged. */
-export function ItemEditor({ item, onSave, onCancel }: Props) {
+export function ItemEditor({ item, isNew, onSave, onCancel }: Props) {
   const [draft, setDraft] = useState<Item>(item);
   const [urls, setUrls] = useState(item.urls.join("\n"));
   const [tags, setTags] = useState(item.tags.join(", "));
@@ -54,7 +55,7 @@ export function ItemEditor({ item, onSave, onCancel }: Props) {
       <header>
         <div>
           <span className="kind">{KIND_LABEL[draft.kind]}</span>
-          <h2>{item.title ? "Edit item" : "New item"}</h2>
+          <h2>{isNew ? "New item" : "Edit item"}</h2>
         </div>
         <div className="actions">
           <button type="button" onClick={onCancel}>

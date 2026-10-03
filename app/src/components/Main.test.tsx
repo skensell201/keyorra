@@ -93,3 +93,19 @@ test("import opens the dialog", async () => {
   await user.click(await screen.findByRole("button", { name: "Import from 1Password…" }));
   expect(screen.getByRole("dialog", { name: "Import from 1Password" })).toBeInTheDocument();
 });
+
+test("a stale items reply does not overwrite a newer one", async () => {
+  const user = userEvent.setup();
+  const replies: ((v: ItemSummary[]) => void)[] = [];
+  vi.mocked(api.items).mockReset().mockImplementation(() => new Promise((r) => replies.push(r)));
+  render(<Main onLock={vi.fn()} />);
+  await waitFor(() => expect(replies).toHaveLength(1));
+  await user.type(screen.getByLabelText("Search"), "g");
+  await waitFor(() => expect(replies).toHaveLength(2));
+  replies[1]([{ ...github, id: "i2", title: "Second" }]);
+  expect(await screen.findByText("Second")).toBeInTheDocument();
+  replies[0]([{ ...github, title: "First" }]);
+  await new Promise((r) => setTimeout(r, 20));
+  expect(screen.getByText("Second")).toBeInTheDocument();
+  expect(screen.queryByText("First")).not.toBeInTheDocument();
+});
