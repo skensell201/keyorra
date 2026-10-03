@@ -1,6 +1,7 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use lockbox_core::crypto::KdfParams;
+use lockbox_core::import::{self, onepux, ImportPlan};
 use lockbox_core::model::{Field, FieldValue, HistoryEntry, Item, ItemKind, Purpose};
 use lockbox_core::store::ItemEntry;
 use lockbox_core::store::Store;
@@ -8,7 +9,7 @@ use lockbox_core::totp::Totp;
 use serde::Serialize;
 use uuid::Uuid;
 
-use crate::dto::{ItemFilter, ItemSummary, TotpCode, VaultDto};
+use crate::dto::{ImportPreview, ImportResult, ItemFilter, ItemSummary, TotpCode, VaultDto};
 
 use crate::autolock::AutoLock;
 use crate::clipboard::ClipboardGuard;
@@ -38,6 +39,7 @@ pub struct Session {
     autolock: AutoLock,
     throttle: UnlockThrottle,
     clipboard: ClipboardGuard,
+    pending_import: Option<ImportPlan>,
 }
 
 impl Session {
@@ -50,6 +52,7 @@ impl Session {
             autolock: AutoLock::new(AutoLock::DEFAULT_TIMEOUT_SECS, now),
             throttle: UnlockThrottle::default(),
             clipboard: ClipboardGuard::default(),
+            pending_import: None,
         }
     }
 
@@ -112,6 +115,7 @@ impl Session {
     /// Drops the store; its keys are wiped on drop.
     pub fn lock(&mut self) {
         self.store = None;
+        self.pending_import = None;
     }
 
     /// Records user activity for the auto-lock timer.
@@ -306,6 +310,50 @@ impl Session {
         self.clipboard
             .copied(&text, now, ClipboardGuard::DEFAULT_CLEAR_SECS);
         Ok(text)
+    }
+
+    /// Parses a 1Password export (.1pux or .csv) and keeps the plan until `import_apply`.
+    pub fn import_preview(&mut self, path: &Path, now: u64) -> CmdResult<ImportPreview> {
+        self.touch(now);
+        self.store()?;
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase);
+        let bytes = std::fs::read(path).map_err(|e| {
+            CmdError::new(
+                ErrorKind::Other,
+                format!("Can't read {}: {e}", path.display()),
+            )
+        })?;
+        let plan = match ext.as_deref() {
+            Some("1pux") => onepux::parse(&bytes, now as i64)?,
+            Some("csv") => {
+                let text = String::from_utf8(bytes).map_err(|_| {
+                    CmdError::new(ErrorKind::Invalid, "The CSV file is not UTF-8 text")
+                })?;
+                import::csv::parse(&text, "Imported", now as i64)?
+            }
+            _ => {
+                return Err(CmdError::new(
+                    ErrorKind::Invalid,
+                    "Choose a .1pux or .csv export from 1Password",
+                ))
+            }
+        };
+        let preview = ImportPreview::of(&plan);
+        self.pending_import = Some(plan);
+        Ok(preview)
+    }
+
+    /// Writes the previewed import in one transaction.
+    pub fn import_apply(&mut self, now: u64) -> CmdResult<ImportResult> {
+        self.touch(now);
+        let plan = self
+            .pending_import
+            .take()
+            .ok_or_else(|| CmdError::new(ErrorKind::Invalid, "Choose an export file first"))?;
+        Ok(self.store_mut()?.apply_import(&plan)?.into())
     }
 }
 

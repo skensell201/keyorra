@@ -2,6 +2,7 @@
 //! `lockbox_core::model::Item` (snake_case, as stored).
 
 use lockbox_core::generator::{self, PassphraseOptions, PasswordOptions};
+use lockbox_core::import::{ImportPlan, ImportReport};
 use lockbox_core::model::ItemKind;
 use lockbox_core::store::ItemEntry;
 use serde::{Deserialize, Serialize};
@@ -139,6 +140,72 @@ impl GeneratorRequest {
                 include_number: self.include_number,
             })?,
         })
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportPreview {
+    pub vaults: Vec<ImportVaultPreview>,
+    pub skipped: Vec<SkippedDto>,
+    pub total_items: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportVaultPreview {
+    pub name: String,
+    pub items: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SkippedDto {
+    pub title: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImportResult {
+    pub vaults: usize,
+    pub items: usize,
+    pub attachments: usize,
+}
+
+impl ImportPreview {
+    /// Empty vaults are not created by `apply_import`, so they are not shown either.
+    pub fn of(plan: &ImportPlan) -> Self {
+        Self {
+            vaults: plan
+                .vaults
+                .iter()
+                .filter(|v| !v.items.is_empty())
+                .map(|v| ImportVaultPreview {
+                    name: v.name.clone(),
+                    items: v.items.len(),
+                })
+                .collect(),
+            skipped: plan
+                .skipped
+                .iter()
+                .map(|s| SkippedDto {
+                    title: s.title.clone(),
+                    reason: s.reason.clone(),
+                })
+                .collect(),
+            total_items: plan.item_count(),
+        }
+    }
+}
+
+impl From<ImportReport> for ImportResult {
+    fn from(r: ImportReport) -> Self {
+        Self {
+            vaults: r.vaults,
+            items: r.items,
+            attachments: r.attachments,
+        }
     }
 }
 

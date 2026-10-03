@@ -379,3 +379,70 @@ fn formats_dates_as_iso() {
     assert_eq!(format_date(951_782_400), "2000-02-29");
     assert_eq!(format_date(-86_400), "1969-12-31");
 }
+
+fn csv_export(dir: &TempDir) -> std::path::PathBuf {
+    let path = dir.path().join("export.csv");
+    std::fs::write(
+        &path,
+        "Title,Url,Username,Password\nGitHub,https://github.com,ivan,pw1\nBank,,me,pw2\n",
+    )
+    .unwrap();
+    path
+}
+
+#[test]
+fn import_preview_then_apply() {
+    let (dir, mut s) = unlocked_session();
+    let preview = s.import_preview(&csv_export(&dir), 1_000).unwrap();
+    assert_eq!(preview.total_items, 2);
+    assert_eq!(preview.vaults.len(), 1);
+    assert_eq!(
+        (preview.vaults[0].name.as_str(), preview.vaults[0].items),
+        ("Imported", 2)
+    );
+    assert!(preview.skipped.is_empty());
+
+    let result = s.import_apply(1_000).unwrap();
+    assert_eq!((result.vaults, result.items, result.attachments), (1, 2, 0));
+    let vaults: Vec<_> = s
+        .vaults(1_000)
+        .unwrap()
+        .into_iter()
+        .map(|v| (v.name, v.item_count))
+        .collect();
+    assert_eq!(
+        vaults,
+        [("Personal".to_string(), 0), ("Imported".to_string(), 2)]
+    );
+    assert_eq!(
+        s.import_apply(1_000).unwrap_err().kind,
+        ErrorKind::Invalid,
+        "plan is used once"
+    );
+}
+
+#[test]
+fn import_rejects_other_files_and_locked_sessions() {
+    let (dir, mut s) = unlocked_session();
+    let txt = dir.path().join("notes.txt");
+    std::fs::write(&txt, "hello").unwrap();
+    assert_eq!(
+        s.import_preview(&txt, 1_000).unwrap_err().kind,
+        ErrorKind::Invalid
+    );
+    let csv = csv_export(&dir);
+    s.lock();
+    assert_eq!(
+        s.import_preview(&csv, 1_000).unwrap_err().kind,
+        ErrorKind::Locked
+    );
+}
+
+#[test]
+fn locking_discards_a_pending_import() {
+    let (dir, mut s) = unlocked_session();
+    s.import_preview(&csv_export(&dir), 1_000).unwrap();
+    s.lock();
+    s.unlock(PW, 1_000).unwrap();
+    assert_eq!(s.import_apply(1_000).unwrap_err().kind, ErrorKind::Invalid);
+}
