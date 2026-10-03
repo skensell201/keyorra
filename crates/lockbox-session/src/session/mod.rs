@@ -20,6 +20,7 @@ use crate::throttle::UnlockThrottle;
 mod tests;
 
 pub const MIN_PASSWORD_LEN: usize = 10;
+const MAX_IMPORT_BYTES: u64 = 1 << 30;
 pub const DEFAULT_VAULT: &str = "Personal";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
@@ -85,7 +86,14 @@ impl Session {
                 .map_err(|e| CmdError::new(ErrorKind::Other, e.to_string()))?;
         }
         let mut store = Store::create(&self.path, password, self.kdf)?;
-        store.create_vault(DEFAULT_VAULT)?;
+        if let Err(e) = store.create_vault(DEFAULT_VAULT) {
+            drop(store);
+            let _ = std::fs::remove_file(&self.path);
+            let mut journal = self.path.clone().into_os_string();
+            journal.push("-journal");
+            let _ = std::fs::remove_file(journal);
+            return Err(e.into());
+        }
         self.store = Some(store);
         self.autolock.touch(now);
         Ok(())
@@ -247,6 +255,13 @@ impl Session {
                 }
             }
             Err(lockbox_core::Error::NotFound(_)) => {
+                let is_deleted = store.deleted_items()?.iter().any(|e| match e {
+                    ItemEntry::Ok(i) => i.id == item.id,
+                    ItemEntry::Damaged { id, .. } => *id == item.id,
+                });
+                if is_deleted {
+                    return Err(CmdError::new(ErrorKind::NotFound, "This item was deleted"));
+                }
                 item.created_at = now;
                 item.password_history.clear();
             }
@@ -320,6 +335,13 @@ impl Session {
             .extension()
             .and_then(|e| e.to_str())
             .map(str::to_ascii_lowercase);
+        let too_large = std::fs::metadata(path).is_ok_and(|m| m.len() > MAX_IMPORT_BYTES);
+        if too_large {
+            return Err(CmdError::new(
+                ErrorKind::Invalid,
+                "The export file is too large (over 1 GiB)",
+            ));
+        }
         let bytes = std::fs::read(path).map_err(|e| {
             CmdError::new(
                 ErrorKind::Other,

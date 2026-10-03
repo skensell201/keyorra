@@ -446,3 +446,54 @@ fn locking_discards_a_pending_import() {
     s.unlock(PW, 1_000).unwrap();
     assert_eq!(s.import_apply(1_000).unwrap_err().kind, ErrorKind::Invalid);
 }
+
+#[test]
+fn saving_a_deleted_item_is_refused_and_does_not_undelete_it() {
+    let (_dir, mut s) = unlocked_session();
+    let p = personal(&mut s);
+    let item = save_login(&mut s, p, "GitHub", "ivan", "pw");
+    s.delete_item(item.id, 1_000).unwrap();
+    assert_eq!(
+        s.save_item(item.clone(), 2_000).unwrap_err().kind,
+        ErrorKind::NotFound
+    );
+    assert!(titles(&mut s, ItemFilter::default()).is_empty());
+    let deleted = s.store.as_ref().unwrap().deleted_items().unwrap();
+    assert_eq!(deleted.len(), 1);
+    assert!(matches!(&deleted[0], lockbox_core::store::ItemEntry::Ok(i) if i.id == item.id));
+}
+
+#[test]
+fn moving_an_item_to_another_vault_keeps_its_password_history() {
+    let (_dir, mut s) = unlocked_session();
+    let p = personal(&mut s);
+    let work = s.create_vault("Work", 1_000).unwrap().id;
+    let mut item = save_login(&mut s, p, "GitHub", "ivan", "first");
+    item.fields[1].value = FieldValue::Concealed("second".into());
+    let mut item = s.save_item(item, 2_000).unwrap();
+    item.vault_id = work;
+    let moved = s.save_item(item, 3_000).unwrap();
+    assert_eq!(moved.vault_id, work);
+    assert_eq!(moved.password_history.len(), 1);
+    assert_eq!(moved.password_history[0].value, "first");
+}
+
+#[test]
+fn clearing_the_password_records_the_old_one() {
+    let (_dir, mut s) = unlocked_session();
+    let p = personal(&mut s);
+    let mut item = save_login(&mut s, p, "GitHub", "ivan", "secret");
+    item.fields[1].value = FieldValue::Concealed(String::new());
+    let saved = s.save_item(item, 2_000).unwrap();
+    assert_eq!(saved.password_history[0].value, "secret");
+}
+
+#[test]
+fn unlock_with_a_missing_database_is_not_a_wrong_password() {
+    let (_dir, mut s) = unlocked_session();
+    s.lock();
+    std::fs::remove_file(&s.path).unwrap();
+    let err = s.unlock(PW, 1_001).unwrap_err();
+    assert_ne!(err.kind, ErrorKind::WrongPassword);
+    assert_eq!(s.throttle.failures(), 0);
+}
