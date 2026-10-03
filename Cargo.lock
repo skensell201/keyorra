@@ -950,6 +950,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "lockbox-session"
+version = "0.1.0"
+dependencies = [
+ "lockbox-core",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
 name = "log"
 version = "0.4.34"
 source = "registry+https://github.com/rust-lang/crates.io-index"

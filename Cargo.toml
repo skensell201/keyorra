@@ -1,5 +1,6 @@
 [workspace]
-members = ["crates/lockbox-core"]
+members = ["crates/lockbox-core", "crates/lockbox-session"]
+default-members = ["crates/lockbox-core", "crates/lockbox-session"]
 resolver = "2"
 
 # Argon2 with 64 MiB is painfully slow unoptimized; keep debug builds usable.
