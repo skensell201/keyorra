@@ -2206,10 +2206,15 @@ dependencies = [
 name = "lockbox-app"
 version = "0.1.0"
 dependencies = [
+ "lockbox-core",
+ "lockbox-session",
+ "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "tauri-plugin-clipboard-manager",
  "tauri-plugin-dialog",
+ "uuid",
 ]
 
 [[package]]
