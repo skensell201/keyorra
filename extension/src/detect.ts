@@ -72,6 +72,28 @@ function allFields(root: Document | HTMLElement): Field[] {
   return Array.from(root.querySelectorAll<Field>("input, select")).filter(usable);
 }
 
+const MIN_SIDE = 8;
+const MIN_OPACITY = 0.1;
+
+/** For fields that receive card and address data: big enough to be seen, on the page and not faded out.
+ * Layout checks apply only where there is layout at all (not in jsdom). */
+export function plausible(el: Field): boolean {
+  for (let n: Element | null = el; n; n = n.parentElement) {
+    if (parseFloat(getComputedStyle(n).opacity) < MIN_OPACITY) return false;
+  }
+  if (document.documentElement.getBoundingClientRect().width > 0) {
+    const r = el.getBoundingClientRect();
+    if (r.width < MIN_SIDE || r.height < MIN_SIDE) return false;
+    // Parked off the top or left of the document, where no one can scroll to it.
+    if (r.right + window.scrollX <= 0 || r.bottom + window.scrollY <= 0) return false;
+  }
+  return true;
+}
+
+function visibleFields(root: Document | HTMLElement): Field[] {
+  return allFields(root).filter(plausible);
+}
+
 function isInput(el: Field): el is HTMLInputElement {
   return el.tagName === "INPUT";
 }
@@ -93,6 +115,8 @@ function ac(el: Field): string {
   return tokens[tokens.length - 1] ?? "";
 }
 
+const OLD_PASSWORD = /current|old|existing/i;
+
 export function findNewPasswordFields(root: Document | HTMLElement): HTMLInputElement[] {
   const pws = allFields(root).filter((i): i is HTMLInputElement => isInput(i) && i.type === "password");
   const groups = new Map<HTMLFormElement | null, HTMLInputElement[]>();
@@ -101,7 +125,12 @@ export function findNewPasswordFields(root: Document | HTMLElement): HTMLInputEl
   for (const list of groups.values()) {
     const marked = list.filter((p) => ac(p) === "new-password");
     if (marked.length) out.push(...marked);
-    else if (list.length >= 2 && list.length <= 3) out.push(...list.slice(1));
+    else if (list.length === 2) {
+      // Sign-up with a confirmation, unless the first one asks for the current password.
+      const [first, second] = list;
+      const old = [first.name, first.id, first.getAttribute("autocomplete") ?? "", first.placeholder].some((h) => OLD_PASSWORD.test(h));
+      out.push(...(old ? [second] : list));
+    } else if (list.length === 3) out.push(...list.slice(1)); // current, new, confirm
   }
   return out;
 }
@@ -123,7 +152,7 @@ const CARD_YEAR = /exp.*year|cc.?year|\byy(yy)?\b/i;
 const CARD_CVC = /cvc|cvv|csc|security.?code/i;
 
 export function findCardFields(root: Document | HTMLElement): CardFields {
-  const fields = allFields(root);
+  const fields = visibleFields(root);
   const taken = new Set<Field>();
   const pick = (token: string, re: RegExp, accept: (el: Field) => boolean): Field | null => {
     const free = fields.filter((f) => !taken.has(f) && accept(f));
@@ -132,6 +161,8 @@ export function findCardFields(root: Document | HTMLElement): CardFields {
     return found;
   };
   const text = (el: Field) => isInput(el) && TEXTISH.has(el.type);
+  // A CVC is often masked; no other card field is ever a password input.
+  const secret = (el: Field) => isInput(el) && (TEXTISH.has(el.type) || el.type === "password");
   const any = (el: Field) => isInput(el) ? TEXTISH.has(el.type) : true;
   const none: CardFields = { number: null, name: null, exp: null, expMonth: null, expYear: null, cvc: null };
   const number = pick("cc-number", CARD_NUMBER, text);
@@ -140,7 +171,7 @@ export function findCardFields(root: Document | HTMLElement): CardFields {
   return {
     number,
     name: pick("cc-name", CARD_NAME, text),
-    cvc: pick("cc-csc", CARD_CVC, text),
+    cvc: pick("cc-csc", CARD_CVC, secret),
     exp,
     expMonth: pick("cc-exp-month", CARD_MONTH, any),
     expYear: pick("cc-exp-year", CARD_YEAR, any),
@@ -169,9 +200,11 @@ const ADDR_CITY = /city|town|locality|город/i;
 const ADDR_POSTAL = /zip|postal|post.?code|индекс/i;
 const ADDR_COUNTRY = /country|страна/i;
 
+const CARD_HINT = new RegExp(`${CARD_NUMBER.source}|${CARD_NAME.source}|${CARD_CVC.source}`, "i");
+
 export function findAddressFields(root: Document | HTMLElement): AddressFields {
-  const fields = allFields(root).filter(
-    (f) => !(isInput(f) && f.type === "password") && !ac(f).startsWith("cc-") && !hintMatch(f, new RegExp(`${CARD_NUMBER.source}|${CARD_NAME.source}|${CARD_CVC.source}`, "i")),
+  const fields = visibleFields(root).filter(
+    (f) => !(isInput(f) && f.type === "password") && !ac(f).startsWith("cc-") && !hintMatch(f, CARD_HINT),
   );
   const taken = new Set<Field>();
   const pick = (tokens: string[], re: RegExp, accept: (el: Field) => boolean = (el) => isInput(el) && TEXTISH.has(el.type)): Field | null => {

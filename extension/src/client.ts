@@ -151,8 +151,8 @@ export class Client {
   }
 
   /** Returns the id of the saved item; the app never sends secrets back. */
-  async save(url: string, username: string, password: string, itemId: string | null): Promise<string> {
-    return (await this.request({ op: "save", url, username, password, itemId })).saved;
+  async save(url: string, username: string, password: string, itemId: string | null, draft = false): Promise<string> {
+    return (await this.request({ op: "save", url, username, password, itemId, ...(draft ? { draft: true } : {}) })).saved;
   }
 
   async generate(): Promise<string> {

@@ -925,6 +925,51 @@ fn save_refuses_other_sites_items_insecure_downgrades_and_empty_passwords() {
 }
 
 #[test]
+fn draft_save_never_updates_a_login_by_username_match() {
+    let (_dir, mut s) = unlocked_session();
+    let p = personal(&mut s);
+    let mut shop = save_login(&mut s, p, "Shop", "me@x.com", "keep-me");
+    shop.urls = vec!["https://shop.example.com".into()];
+    let shop = s.save_item(shop, 1_000).unwrap();
+    let ext = paired(&mut s);
+    let draft = call(
+        &mut s,
+        &ext,
+        json!({"op": "save", "url": "https://shop.example.com/signup", "username": "me@x.com", "password": "generated", "itemId": null, "draft": true}),
+        2_000,
+    );
+    let id: uuid::Uuid = serde_json::from_value(draft["saved"].clone()).unwrap();
+    assert_ne!(id, shop.id);
+    assert_eq!(s.item(shop.id, 2_000).unwrap().password(), Some("keep-me"));
+    let created = s.item(id, 2_000).unwrap();
+    assert_eq!(created.title, "shop.example.com (new)");
+    assert_eq!(created.password(), Some("generated"));
+    // Updating the draft by its id still works.
+    let again = call(
+        &mut s,
+        &ext,
+        json!({"op": "save", "url": "https://shop.example.com/signup", "username": "me@x.com", "password": "final", "itemId": id, "draft": true}),
+        3_000,
+    );
+    assert_eq!(again["saved"], json!(id));
+    assert_eq!(s.item(id, 3_000).unwrap().password(), Some("final"));
+}
+
+#[test]
+fn draft_save_without_a_matching_login_is_titled_as_usual() {
+    let (_dir, mut s) = unlocked_session();
+    let ext = paired(&mut s);
+    let r = call(
+        &mut s,
+        &ext,
+        json!({"op": "save", "url": "https://new.example.com", "username": "", "password": "g", "itemId": null, "draft": true}),
+        2_000,
+    );
+    let id: uuid::Uuid = serde_json::from_value(r["saved"].clone()).unwrap();
+    assert_eq!(s.item(id, 2_000).unwrap().title, "new.example.com");
+}
+
+#[test]
 fn generate_returns_a_strong_password() {
     let (_dir, mut s) = unlocked_session();
     let ext = paired(&mut s);

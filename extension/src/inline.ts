@@ -9,11 +9,11 @@ export interface MenuActions {
   fill(itemId: string): Promise<void>;
   unlock(): Promise<void>;
   generate(): Promise<{ state: State; value: string }>;
-  useGenerated(value: string): Promise<void>;
+  useGenerated(value: string, field: HTMLInputElement): Promise<void>;
   cards(): Promise<{ state: State; items: CardSummary[] }>;
-  fillCard(itemId: string): Promise<void>;
+  fillCard(itemId: string, field: HTMLInputElement): Promise<void>;
   identities(): Promise<{ state: State; items: IdentitySummary[] }>;
-  fillIdentity(itemId: string): Promise<void>;
+  fillIdentity(itemId: string, field: HTMLInputElement): Promise<void>;
 }
 
 const KEYHOLE = `<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><circle cx="12" cy="9" r="4" fill="currentColor"/><path d="M10.2 11.5h3.6l1.2 8h-6z" fill="currentColor"/></svg>`;
@@ -48,9 +48,27 @@ export interface MenuOptions {
   /** Whether an event comes from the user. Defaults to `isTrusted`. */
   trusted?: (e: Event) => boolean;
   /** Whether the menu is really visible to the user (anti-clickjacking). */
-  visible?: (e: MouseEvent, host: HTMLElement, target: HTMLElement) => boolean;
+  visible?: (e: MouseEvent, host: HTMLElement, target: HTMLElement, parent: Node | null) => boolean;
   /** Item clicks sooner than this after the panel opened are ignored. */
   settleMs?: number;
+  /** Without visibility tracking, cards and addresses need a second click at least this long after the first. */
+  confirmMs?: number;
+  /** How long the "Click again to fill" prompt stays. */
+  confirmWindowMs?: number;
+}
+
+/** Loopback, *.localhost and private addresses count as secure, like in the app. */
+export function secureHost(loc: { protocol: string; hostname?: string }): boolean {
+  if (loc.protocol === "https:") return true;
+  const host = (loc.hostname ?? "").toLowerCase().replace(/^\[|\]$/g, "");
+  if (host === "localhost" || host.endsWith(".localhost")) return true;
+  const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (v4) {
+    const [a, b] = [Number(v4[1]), Number(v4[2])];
+    return a === 127 || a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+  }
+  if (host === "::1") return true;
+  return /^f[cd][0-9a-f]{0,2}:/.test(host);
 }
 
 export class InlineMenu {
@@ -63,9 +81,14 @@ export class InlineMenu {
   private watched = new WeakSet<HTMLInputElement>();
   private modes = new WeakMap<HTMLInputElement, MenuMode>();
   private trusted: (e: Event) => boolean;
-  private visible: (e: MouseEvent, host: HTMLElement, target: HTMLElement) => boolean;
+  private visible: (e: MouseEvent, host: HTMLElement, target: HTMLElement, parent: Node | null) => boolean;
   private tracker = new VisibilityTracker();
   private settleMs: number;
+  private confirmMs: number;
+  private confirmWindowMs: number;
+  /** Where the host was attached; a page that moves it is refused. */
+  private parent: Node | null = null;
+  private armed: { button: HTMLElement; at: number; timer: ReturnType<typeof setTimeout>; restore: () => void } | null = null;
 
   constructor(
     private actions: MenuActions,
@@ -74,6 +97,8 @@ export class InlineMenu {
     this.trusted = options.trusted ?? ((e) => e.isTrusted);
     this.visible = options.visible ?? defaultVisible;
     this.settleMs = options.settleMs ?? 300;
+    this.confirmMs = options.confirmMs ?? 300;
+    this.confirmWindowMs = options.confirmWindowMs ?? 3000;
     this.host = document.createElement("lockbox-inline");
     this.host.style.setProperty("opacity", "1", "important");
     // Closed: page scripts cannot reach in and click the buttons.
@@ -94,6 +119,7 @@ export class InlineMenu {
     });
     this.root.append(style, this.icon);
     document.documentElement.append(this.host);
+    this.parent = document.documentElement;
     window.addEventListener("scroll", () => this.place(), true);
     window.addEventListener("resize", () => this.place());
     document.addEventListener("mousedown", (e) => {
@@ -112,7 +138,7 @@ export class InlineMenu {
 
   private allowed(e: MouseEvent): boolean {
     const target = e.currentTarget as HTMLElement;
-    if (!this.trusted(e) || !this.visible(e, this.host, target)) return false;
+    if (!this.trusted(e) || !this.visible(e, this.host, target, this.parent)) return false;
     if (!this.tracker.active) return true;
     // The icon and the panel (which holds the items) must both have been reported fully visible, if the browser says.
     const watched = target === this.icon ? [target] : [target, this.panel];
@@ -128,6 +154,11 @@ export class InlineMenu {
       /* :modal unsupported */
     }
     if (this.host.parentNode !== parent) parent.append(this.host);
+    this.parent = parent;
+  }
+
+  isWatched(field: HTMLInputElement): boolean {
+    return this.watched.has(field);
   }
 
   watch(field: HTMLInputElement, mode: MenuMode = "logins"): void {
@@ -156,7 +187,8 @@ export class InlineMenu {
     this.observe(panel);
     this.openedAt = Date.now();
     this.place();
-    const mode = (this.field && this.modes.get(this.field)) || "logins";
+    const field = this.field;
+    const mode = (field && this.modes.get(field)) || "logins";
     let state: State;
     let items: { id: string; title: string; sub: string; mono?: boolean }[] = [];
     let generated = "";
@@ -188,8 +220,11 @@ export class InlineMenu {
       button("unlock", label, (e) => {
         if (this.allowed(e)) void this.actions.unlock().catch(() => {});
       });
-    const pick = (run: () => Promise<void>) => (e: MouseEvent) => {
+    // Browsers without visibility tracking (Firefox, Safari) cannot tell that something covers the panel,
+    // so cards and addresses need a second, deliberate click in our own panel.
+    const pick = (run: () => Promise<void>, confirm = false) => (e: MouseEvent) => {
       if (!this.allowed(e) || Date.now() - this.openedAt < this.settleMs) return;
+      if (confirm && !this.tracker.active && !this.confirmed(e.currentTarget as HTMLElement)) return;
       void this.choose(run);
     };
     if (state === "locked") {
@@ -203,9 +238,9 @@ export class InlineMenu {
         panel.append(note("Couldn't generate a password"));
         return;
       }
-      panel.append(generatedEntry(generated, pick(() => this.actions.useGenerated(generated))));
+      panel.append(generatedEntry(generated, pick(() => (field ? this.actions.useGenerated(generated, field) : Promise.resolve()))));
     } else if (items.length === 0) {
-      const secure = location.protocol === "https:";
+      const secure = secureHost(location);
       panel.append(
         note(
           mode === "cards"
@@ -219,16 +254,48 @@ export class InlineMenu {
       for (const item of items) {
         const run =
           mode === "cards"
-            ? () => this.actions.fillCard(item.id)
+            ? () => (field ? this.actions.fillCard(item.id, field) : Promise.resolve())
             : mode === "identities"
-              ? () => this.actions.fillIdentity(item.id)
+              ? () => (field ? this.actions.fillIdentity(item.id, field) : Promise.resolve())
               : () => this.actions.fill(item.id);
-        panel.append(entry(item, pick(run)));
+        panel.append(entry(item, pick(run, mode === "cards" || mode === "identities")));
       }
     }
   }
 
+  /** First click arms the item ("Click again to fill"); a later click inside the window confirms. */
+  private confirmed(button: HTMLElement): boolean {
+    const now = Date.now();
+    if (this.armed?.button === button && now - this.armed.at >= this.confirmMs) {
+      this.disarm();
+      return true;
+    }
+    if (this.armed?.button === button) return false; // too soon after the first click
+    this.disarm();
+    const title = button.querySelector(".title");
+    const original = title?.textContent ?? "";
+    if (title) title.textContent = "Click again to fill";
+    const timer = setTimeout(() => this.disarm(), this.confirmWindowMs);
+    this.armed = {
+      button,
+      at: now,
+      timer,
+      restore: () => {
+        if (title) title.textContent = original;
+      },
+    };
+    return false;
+  }
+
+  private disarm(): void {
+    if (!this.armed) return;
+    clearTimeout(this.armed.timer);
+    this.armed.restore();
+    this.armed = null;
+  }
+
   close(): void {
+    this.disarm();
     if (this.panel) {
       this.tracker.unobserve(this.panel);
     }

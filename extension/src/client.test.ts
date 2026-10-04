@@ -190,6 +190,7 @@ test("save, generate, cards and identities send the right op and return the inne
 
   expect(await client.lookup(url, "ivan", "pw")).toEqual({ status: "changed", itemId: "i1" });
   expect(await client.save(url, "ivan", "pw", null)).toBe("i2");
+  expect(await client.save(url, "ivan", "gen", null, true)).toBe("i2");
   expect(await client.generate()).toBe("Gen-pw-1");
   expect(await client.cards(url)).toEqual([{ id: "c9", title: "Visa", last4: "1111" }]);
   expect((await client.fillCard(url, "c9")).number).toBe("4111111111111111");
@@ -199,6 +200,7 @@ test("save, generate, cards and identities send the right op and return the inne
   expect(app.requests).toEqual([
     { op: "lookup", url, username: "ivan", password: "pw" },
     { op: "save", url, username: "ivan", password: "pw", itemId: null },
+    { op: "save", url, username: "ivan", password: "gen", itemId: null, draft: true },
     { op: "generate" },
     { op: "cards", url },
     { op: "fillCard", url, itemId: "c9" },

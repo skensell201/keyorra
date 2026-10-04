@@ -57,7 +57,7 @@ async function handle(msg: ToBackground, sender: chrome.runtime.MessageSender): 
     case "lookup":
       return client.lookup(decision.url, msg.username, msg.password);
     case "save":
-      return client.save(decision.url, msg.username, msg.password, msg.itemId);
+      return client.save(decision.url, msg.username, msg.password, msg.itemId, msg.draft === true);
     case "generate":
       return client.generate();
     case "cards":

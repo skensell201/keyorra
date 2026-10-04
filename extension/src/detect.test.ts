@@ -70,8 +70,16 @@ test("new-password: autocomplete marks, login form gives none", () => {
 test("new-password: change-password and sign-up forms", () => {
   page(`<form><input type="password" name="cur" autocomplete="current-password"><input type="password" name="new"><input type="password" name="conf"></form>`);
   expect(findNewPasswordFields(document).map((i) => i.name)).toEqual(["new", "conf"]);
+  // Two fields: password and confirmation, both new.
   page(`<form><input type="password" name="pw"><input type="password" name="conf"></form>`);
-  expect(findNewPasswordFields(document).map((i) => i.name)).toEqual(["conf"]);
+  expect(findNewPasswordFields(document).map((i) => i.name)).toEqual(["pw", "conf"]);
+});
+
+test("new-password: two fields where the first asks for the current or old password", () => {
+  for (const first of [`name="current_pw"`, `id="old"`, `autocomplete="current-password" name="a"`, `placeholder="Existing password" name="a"`]) {
+    page(`<form><input type="password" ${first}><input type="password" name="new"></form>`);
+    expect(findNewPasswordFields(document).map((i) => i.name)).toEqual(["new"]);
+  }
 });
 
 test("new-password: hidden fields are ignored", () => {
@@ -135,5 +143,48 @@ test("address: a sign-in form gives nothing, email alone is not an address", () 
 
 test("address: a card form is not an address", () => {
   page(`<form><input autocomplete="cc-name" name="name_on_card"><input autocomplete="cc-number" name="cardnumber"></form>`);
+  expect(Object.values(findAddressFields(document)).every((v) => v === null)).toBe(true);
+});
+
+// ---- plausibility of card and address fields ----
+
+function layout(el: Element, rect: Partial<DOMRect>) {
+  const r = { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0, x: 0, y: 0, ...rect };
+  el.getBoundingClientRect = () => r as DOMRect;
+}
+
+const CARD_FORM = `<form><input autocomplete="cc-number" name="n"><input autocomplete="cc-csc" name="c" type="password"><input autocomplete="cc-name" name="h"></form>`;
+
+test("card: a masked CVC is accepted, other card fields never are password inputs", () => {
+  page(`<form><input autocomplete="cc-number" name="n"><input autocomplete="cc-csc" name="c" type="password"><input autocomplete="cc-name" name="h" type="password"><input autocomplete="cc-exp" name="e" type="password"></form>`);
+  const c = findCardFields(document);
+  expect(c.cvc?.getAttribute("name")).toBe("c");
+  expect(c.name).toBeNull();
+  expect(c.exp).toBeNull();
+});
+
+test("card and address: tiny, faded and off-document fields are ignored", () => {
+  page(CARD_FORM);
+  const inputs = Array.from(document.querySelectorAll("input"));
+  document.documentElement.getBoundingClientRect = () => ({ width: 1000, height: 800, left: 0, top: 0, right: 1000, bottom: 800 }) as DOMRect;
+  for (const i of inputs) layout(i, { left: 10, top: 10, right: 210, bottom: 40, width: 200, height: 30 });
+  expect(findCardFields(document).number?.getAttribute("name")).toBe("n");
+  layout(inputs[0], { left: 10, top: 10, right: 12, bottom: 12, width: 2, height: 2 });
+  expect(findCardFields(document).number).toBeNull();
+  layout(inputs[0], { left: -500, top: 10, right: -300, bottom: 40, width: 200, height: 30 });
+  expect(findCardFields(document).number).toBeNull();
+  layout(inputs[0], { left: 10, top: -90, right: 210, bottom: -60, width: 200, height: 30 });
+  expect(findCardFields(document).number).toBeNull();
+  layout(inputs[0], { left: 10, top: 10, right: 210, bottom: 40, width: 200, height: 30 });
+  inputs[0].style.opacity = "0.05";
+  expect(findCardFields(document).number).toBeNull();
+  inputs[0].style.opacity = "";
+  (inputs[0].parentElement as HTMLElement).style.opacity = "0.05";
+  expect(findCardFields(document).number).toBeNull();
+  delete (document.documentElement as any).getBoundingClientRect;
+});
+
+test("address: tiny or faded fields are ignored", () => {
+  page(`<form><input autocomplete="given-name" name="a"><input autocomplete="family-name" name="b" style="opacity:0.05"></form>`);
   expect(Object.values(findAddressFields(document)).every((v) => v === null)).toBe(true);
 });

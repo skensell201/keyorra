@@ -409,7 +409,8 @@ impl Session {
                 username,
                 password,
                 item_id,
-            } => self.save_login(&url, &username, &password, item_id, now),
+                draft,
+            } => self.save_login(&url, &username, &password, item_id, draft, now),
             Request::Generate => match lockbox_core::generator::password(&Default::default()) {
                 Ok(generated) => Reply::Generated { generated },
                 Err(e) => Reply::Error {
@@ -556,6 +557,7 @@ impl Session {
         username: &str,
         password: &str,
         item_id: Option<Uuid>,
+        draft: bool,
         now: u64,
     ) -> Reply {
         let Some(page) = Site::of(url) else {
@@ -572,10 +574,19 @@ impl Session {
             };
         }
         // Saving the same sign-up twice must not create a second login.
-        let item_id = item_id.or_else(|| self.same_user(&page, username).map(|i| i.id));
+        // A draft (generated password, sign-up not submitted yet) never touches an existing login.
+        let existing = self.same_user(&page, username);
+        let item_id = if draft {
+            item_id
+        } else {
+            item_id.or_else(|| existing.as_ref().map(|i| i.id))
+        };
         let result = match item_id {
             Some(id) => self.update_password(&page, id, username, password, now),
-            None => self.create_login(&page, username, password, now),
+            None => {
+                let duplicate = draft && existing.is_some();
+                self.create_login(&page, username, password, duplicate, now)
+            }
         };
         match result {
             Ok(id) => Reply::Saved { saved: id },
@@ -622,6 +633,7 @@ impl Session {
         page: &Site,
         username: &str,
         password: &str,
+        duplicate: bool,
         now: u64,
     ) -> CmdResult<Uuid> {
         let vaults = self.store()?.vaults()?;
@@ -636,6 +648,9 @@ impl Session {
         } else {
             page.host.clone()
         };
+        if duplicate {
+            item.title.push_str(" (new)");
+        }
         item.urls = vec![format!(
             "{}://{}",
             if page.secure { "https" } else { "http" },

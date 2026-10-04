@@ -15,21 +15,23 @@ export function plain(v: string): boolean {
   return !v || v === "none";
 }
 
-/** A click only counts if the user could see the menu: not hidden, faded, masked, clipped, filtered or covered. */
-export function defaultVisible(_e: MouseEvent, host: HTMLElement, target: HTMLElement): boolean {
+/** A click only counts if the user could see the menu: not hidden, faded, masked, clipped, filtered or covered.
+ * `parent` is the node the host was attached to; a page that moved the host elsewhere is refused. */
+export function defaultVisible(_e: MouseEvent, host: HTMLElement, target: HTMLElement, parent?: Node | null): boolean {
   if (host.hasAttribute("tabindex")) return false;
+  if (parent !== undefined && host.parentNode !== parent) return false;
   if (host.checkVisibility?.({ opacityProperty: true, visibilityProperty: true } as any) === false) return false;
-  const hs = getComputedStyle(host);
-  const ds = getComputedStyle(document.documentElement);
-  for (const cs of [hs, ds]) {
+  // Every ancestor can fade, filter, mask, clip, blend or move what is inside it.
+  for (let n: Element | null = host; n; n = n.parentElement) {
+    const cs = getComputedStyle(n);
     if (parseFloat(cs.opacity) < 0.9) return false;
     if (hidingFilter(cs.filter)) return false;
     if (!plain(cs.getPropertyValue("mask-image")) || !plain(cs.getPropertyValue("-webkit-mask-image"))) return false;
     if (!plain(cs.getPropertyValue("clip-path"))) return false;
     const blend = cs.getPropertyValue("mix-blend-mode");
     if (blend && blend !== "normal") return false;
+    if (!plain(cs.transform)) return false;
   }
-  if (!plain(hs.transform)) return false;
   // Hit-test the centre of the activated button: whatever is on top there must be our host.
   const r = target.getBoundingClientRect();
   if (r.width > 0 && r.height > 0 && typeof document.elementFromPoint === "function") {

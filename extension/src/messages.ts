@@ -10,7 +10,7 @@ export type ToBackground =
   | { type: "list"; url?: string }
   | { type: "fill"; itemId: string }
   | { type: "lookup"; username: string; password: string }
-  | { type: "save"; username: string; password: string; itemId: string | null }
+  | { type: "save"; username: string; password: string; itemId: string | null; draft?: boolean }
   | { type: "generate" }
   | { type: "cards" }
   | { type: "fillCard"; itemId: string }

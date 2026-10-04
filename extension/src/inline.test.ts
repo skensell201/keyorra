@@ -1,5 +1,5 @@
 import { beforeEach, expect, test, vi } from "vitest";
-import { InlineMenu, type MenuActions } from "./inline";
+import { InlineMenu, secureHost, type MenuActions } from "./inline";
 
 let actions: MenuActions;
 let menu: InlineMenu;
@@ -22,7 +22,7 @@ beforeEach(() => {
     identities: vi.fn().mockResolvedValue({ state: "ready", items: [{ id: "a1", title: "Home", detail: "Ivan, Berlin" }] }),
     fillIdentity: vi.fn().mockResolvedValue(undefined),
   };
-  menu = new InlineMenu(actions, { onRoot: (r) => (root = r), trusted: () => true, settleMs: 0 });
+  menu = new InlineMenu(actions, { onRoot: (r) => (root = r), trusted: () => true, settleMs: 0, confirmMs: 0 });
 });
 
 const shadow = () => root;
@@ -172,7 +172,7 @@ test("generator mode offers a strong password and uses it", async () => {
   expect(value.endsWith("Qz7")).toBe(true);
   expect(actions.list).not.toHaveBeenCalled();
   item.click();
-  expect(actions.useGenerated).toHaveBeenCalledWith("Xk9-very-long-generated-password-Qz7");
+  expect(actions.useGenerated).toHaveBeenCalledWith("Xk9-very-long-generated-password-Qz7", field);
 });
 
 test("generator mode handles a locked Lockbox", async () => {
@@ -187,7 +187,8 @@ test("cards mode shows title and last four digits; picking fills", async () => {
   expect(shadow().querySelector(".item")!.textContent).toContain("Visa");
   expect(shadow().querySelector(".item")!.textContent).toContain("•••• 1111");
   (shadow().querySelector(".item") as HTMLButtonElement).click();
-  expect(actions.fillCard).toHaveBeenCalledWith("c1");
+  (shadow().querySelector(".item") as HTMLButtonElement).click();
+  expect(actions.fillCard).toHaveBeenCalledWith("c1", field);
   expect(actions.fill).not.toHaveBeenCalled();
 });
 
@@ -202,9 +203,12 @@ test("no cards, and the secure-page note on an insecure page", async () => {
   vi.mocked(actions.cards).mockResolvedValue({ state: "ready", items: [] });
   openMenu("cards");
   await vi.waitFor(() => expect(shadow().textContent).toMatch(/No cards in Lockbox|only filled on secure pages/));
-  // jsdom runs on http://localhost:3000 — not https.
-  expect(shadow().textContent).toContain("Cards are only filled on secure pages");
-  vi.stubGlobal("location", { protocol: "https:" });
+  // jsdom runs on http://localhost:3000, which counts as secure.
+  expect(shadow().textContent).toContain("No cards in Lockbox");
+  vi.stubGlobal("location", { protocol: "http:", hostname: "example.com" });
+  shadow().querySelector<HTMLButtonElement>("button.icon")!.click();
+  await vi.waitFor(() => expect(shadow().textContent).toContain("Cards are only filled on secure pages"));
+  vi.stubGlobal("location", { protocol: "https:", hostname: "example.com" });
   shadow().querySelector<HTMLButtonElement>("button.icon")!.click();
   await vi.waitFor(() => expect(shadow().textContent).toContain("No cards in Lockbox"));
   vi.unstubAllGlobals();
@@ -216,12 +220,14 @@ test("identities mode shows title and detail; picking fills; empty notes", async
   expect(shadow().querySelector(".item")!.textContent).toContain("Home");
   expect(shadow().querySelector(".item")!.textContent).toContain("Ivan, Berlin");
   (shadow().querySelector(".item") as HTMLButtonElement).click();
-  expect(actions.fillIdentity).toHaveBeenCalledWith("a1");
+  (shadow().querySelector(".item") as HTMLButtonElement).click();
+  expect(actions.fillIdentity).toHaveBeenCalledWith("a1", field);
 
   vi.mocked(actions.identities).mockResolvedValue({ state: "ready", items: [] });
+  vi.stubGlobal("location", { protocol: "http:", hostname: "example.com" });
   shadow().querySelector<HTMLButtonElement>("button.icon")!.click();
   await vi.waitFor(() => expect(shadow().textContent).toContain("Addresses are only filled on secure pages"));
-  vi.stubGlobal("location", { protocol: "https:" });
+  vi.stubGlobal("location", { protocol: "https:", hostname: "example.com" });
   shadow().querySelector<HTMLButtonElement>("button.icon")!.click();
   await vi.waitFor(() => expect(shadow().textContent).toContain("No addresses in Lockbox"));
   vi.unstubAllGlobals();
@@ -242,4 +248,90 @@ test("untrusted clicks and early clicks are ignored in the new modes", async () 
   await vi.waitFor(() => expect(shadow().querySelector(".item")).not.toBeNull());
   (shadow().querySelector(".item") as HTMLButtonElement).click();
   expect(actions.useGenerated).not.toHaveBeenCalled();
+});
+
+test("secureHost: https, localhost, loopback and private networks are secure", () => {
+  for (const hostname of ["localhost", "app.localhost", "127.0.0.1", "127.9.9.9", "[::1]", "::1", "10.0.0.1", "172.16.5.5", "172.31.5.5", "192.168.0.1", "fd12::1"]) {
+    expect(secureHost({ protocol: "http:", hostname }), hostname).toBe(true);
+  }
+  for (const hostname of ["example.com", "203.0.113.5", "172.32.0.1", "11.0.0.1", "localhost.evil.com", "fake127.0.0.1"]) {
+    expect(secureHost({ protocol: "http:", hostname }), hostname).toBe(false);
+  }
+  expect(secureHost({ protocol: "https:", hostname: "example.com" })).toBe(true);
+});
+
+const openAndPick = async (mode: "logins" | "cards" | "identities", m: InlineMenu) => {
+  openMenu(mode, m);
+  await vi.waitFor(() => expect(shadow().querySelector(".item")).not.toBeNull());
+  return shadow().querySelector(".item") as HTMLButtonElement;
+};
+
+test("without visibility tracking, a card needs a second click; the first changes the label", async () => {
+  const item = await openAndPick("cards", menu);
+  item.click();
+  expect(actions.fillCard).not.toHaveBeenCalled();
+  expect(item.textContent).toContain("Click again to fill");
+  item.click();
+  expect(actions.fillCard).toHaveBeenCalledWith("c1", field);
+});
+
+test("the second click must come a little later, and the prompt expires after 3 s", async () => {
+  vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout", "Date"] });
+  const slow = new InlineMenu(actions, { onRoot: (r) => (root = r), trusted: () => true, settleMs: 0, confirmMs: 300 });
+  const item = await openAndPick("identities", slow);
+  item.click();
+  vi.advanceTimersByTime(100);
+  item.click(); // too soon: ignored
+  expect(actions.fillIdentity).not.toHaveBeenCalled();
+  vi.advanceTimersByTime(3100);
+  expect(item.textContent).not.toContain("Click again");
+  expect(item.textContent).toContain("Home");
+  item.click(); // arms again
+  expect(actions.fillIdentity).not.toHaveBeenCalled();
+  vi.advanceTimersByTime(400);
+  item.click();
+  expect(actions.fillIdentity).toHaveBeenCalledWith("a1", field);
+  vi.useRealTimers();
+});
+
+test("an untrusted second click does not confirm", async () => {
+  let ok = true;
+  const m = new InlineMenu(actions, { onRoot: (r) => (root = r), trusted: () => ok, settleMs: 0, confirmMs: 0 });
+  const item = await openAndPick("cards", m);
+  item.click();
+  ok = false;
+  item.click();
+  expect(actions.fillCard).not.toHaveBeenCalled();
+});
+
+test("with visibility tracking one click fills a card", async () => {
+  vi.stubGlobal("IntersectionObserver", class { observe() {} unobserve() {} });
+  const tracked = new InlineMenu(actions, { onRoot: (r) => (root = r), trusted: () => true, settleMs: 0 });
+  const item = await openAndPick("cards", tracked);
+  item.click();
+  expect(actions.fillCard).toHaveBeenCalledWith("c1", field);
+  vi.unstubAllGlobals();
+});
+
+test("logins never need a second click", async () => {
+  const item = await openAndPick("logins", menu);
+  item.click();
+  expect(actions.fill).toHaveBeenCalledWith("i1");
+});
+
+test("a host moved out of the place it was attached to is refused", async () => {
+  const guarded = new InlineMenu(actions, { onRoot: (r) => (root = r), trusted: () => true, settleMs: 0 });
+  guarded.watch(field);
+  field.dispatchEvent(new FocusEvent("focus"));
+  const hosts = document.querySelectorAll("lockbox-inline");
+  document.body.append(hosts[hosts.length - 1]);
+  shadow().querySelector<HTMLButtonElement>("button.icon")!.click();
+  await Promise.resolve();
+  expect(actions.list).not.toHaveBeenCalled();
+});
+
+test("watch tells whether a field is already watched", () => {
+  expect(menu.isWatched(field)).toBe(false);
+  menu.watch(field);
+  expect(menu.isWatched(field)).toBe(true);
 });

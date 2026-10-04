@@ -80,6 +80,9 @@ pub enum Request {
         username: String,
         password: String,
         item_id: Option<Uuid>,
+        /// A generated password saved before sign-up: never updates a login by username match.
+        #[serde(default)]
+        draft: bool,
     },
     Generate,
     Cards {
@@ -358,7 +361,20 @@ mod tests {
                 url: "https://a.com".into(),
                 username: "u".into(),
                 password: "p".into(),
-                item_id: None
+                item_id: None,
+                draft: false
+            }
+        );
+        assert_eq!(
+            parse(
+                json!({"op": "save", "url": "https://a.com", "username": "u", "password": "p", "itemId": null, "draft": true})
+            ),
+            Request::Save {
+                url: "https://a.com".into(),
+                username: "u".into(),
+                password: "p".into(),
+                item_id: None,
+                draft: true
             }
         );
         assert_eq!(parse(json!({"op": "generate"})), Request::Generate);

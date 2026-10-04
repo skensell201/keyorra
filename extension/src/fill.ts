@@ -39,8 +39,10 @@ function setSelect(select: HTMLSelectElement, match: (value: string, text: strin
   return true;
 }
 
-function put(field: Field, value: string, match: (value: string, text: string) => boolean = (v, t) => v === value || t === value): boolean {
+function put(field: Field, value: string, match: (value: string, text: string) => boolean = (v, t) => v === value || t === value, allowPassword = false): boolean {
   if (field instanceof HTMLSelectElement) return setSelect(field, match);
+  // Card and address data never goes into a password input (only a masked CVC may).
+  if (field.type === "password" && !allowPassword) return false;
   setValue(field, value);
   return true;
 }
@@ -53,14 +55,15 @@ export function fillNewPassword(fields: HTMLInputElement[], password: string): n
 export function fillCard(fields: CardFields, card: CardFill): number {
   let filled = 0;
   const month = card.expMonth.replace(/\D/g, "").padStart(2, "0").slice(-2);
-  const yy = card.expYear.replace(/\D/g, "").slice(-2);
-  const yyyy = card.expYear.replace(/\D/g, "").length === 4 ? card.expYear.replace(/\D/g, "") : `20${yy}`;
+  const yearDigits = card.expYear.replace(/\D/g, "");
+  const yy = yearDigits.slice(-2);
+  const yyyy = yearDigits.length === 4 ? yearDigits : `20${yy}`;
   const count = (ok: boolean) => {
     if (ok) filled++;
   };
   if (fields.number && card.number) count(put(fields.number, card.number));
   if (fields.name && card.name && !fields.name.value) count(put(fields.name, card.name));
-  if (fields.exp && isInputField(fields.exp)) {
+  if (fields.exp && isInputField(fields.exp) && fields.exp.type !== "password") {
     const long = fields.exp.maxLength >= 7 || /yyyy/i.test(fields.exp.placeholder);
     setValue(fields.exp, `${month}/${long ? yyyy : yy}`);
     filled++;
@@ -72,7 +75,7 @@ export function fillCard(fields: CardFields, card: CardFill): number {
     const short = isInputField(fields.expYear) && (fields.expYear.maxLength === 2 || /^yy$/i.test(fields.expYear.placeholder));
     count(put(fields.expYear, short ? yy : yyyy, (v, t) => v === yyyy || v === yy || t === yyyy || t === yy));
   }
-  if (fields.cvc && card.cvc) count(put(fields.cvc, card.cvc));
+  if (fields.cvc && card.cvc) count(put(fields.cvc, card.cvc, undefined, true));
   return filled;
 }
 

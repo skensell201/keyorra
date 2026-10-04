@@ -85,3 +85,27 @@ test("fillNewPassword fills every field via setValue", () => {
   expect(fillNewPassword([a, b], "S3cret!")).toBe(2);
   expect([a.value, b.value, seen]).toEqual(["S3cret!", "S3cret!", ["a"]]);
 });
+
+test("fillCard never writes card data into a password input, except the CVC", () => {
+  document.body.innerHTML = `<form><input autocomplete="cc-number" id="n" type="password"><input autocomplete="cc-csc" id="c" type="password"></form>`;
+  const fields = { number: document.getElementById("n") as HTMLInputElement, name: null, exp: null, expMonth: null, expYear: null, cvc: document.getElementById("c") as HTMLInputElement };
+  expect(fillCard(fields, CARD)).toBe(1);
+  expect((document.getElementById("n") as HTMLInputElement).value).toBe("");
+  expect((document.getElementById("c") as HTMLInputElement).value).toBe("123");
+});
+
+test("fillAddress skips password inputs", () => {
+  document.body.innerHTML = `<input id="s" type="password">`;
+  const s = document.getElementById("s") as HTMLInputElement;
+  const none = { givenName: null, familyName: null, name: null, email: null, phone: null, street: s, city: null, postalCode: null, country: null };
+  expect(fillAddress(none, ID)).toBe(0);
+  expect(s.value).toBe("");
+});
+
+test("fillCard handles two- and four-digit expiry years", () => {
+  document.body.innerHTML = `<form><input autocomplete="cc-number" id="n"><input autocomplete="cc-exp" id="e" maxlength="5"></form>`;
+  fillCard(findCardFields(document), { ...CARD, expYear: "27" });
+  expect((document.getElementById("e") as HTMLInputElement).value).toBe("12/27");
+  fillCard(findCardFields(document), { ...CARD, expYear: "2031" });
+  expect((document.getElementById("e") as HTMLInputElement).value).toBe("12/31");
+});

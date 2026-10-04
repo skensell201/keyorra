@@ -5,6 +5,7 @@ import { InlineMenu, type MenuMode } from "./inline";
 import { ask, type Candidate, type CardFill, type CardSummary, type Credentials, type IdentityFill, type IdentitySummary, type LookupStatus, type State, type ToContent } from "./messages";
 import { SaveBar } from "./savebar";
 import type { PendingSave } from "./pending";
+import { alreadyDrafted, planOffer, type Draft } from "./draft";
 
 async function list(): Promise<{ state: State; items: Candidate[] }> {
   const r = await ask<Candidate[]>({ type: "list" });
@@ -18,9 +19,11 @@ async function query<T>(msg: Parameters<typeof ask>[0]): Promise<{ state: State;
   return { state: r.error === "other" ? "ready" : r.error, value: null };
 }
 
-/** The input the user last focused: card and address fills stay within its form. */
-let lastField: HTMLInputElement | null = null;
-const scopeOf = (): Document | HTMLElement => lastField?.form ?? document;
+/** Card, address and generator fills stay within the form of the menu's own field. */
+const scopeOf = (field: HTMLInputElement): Document | HTMLElement => field.form ?? document;
+
+/** The generated password saved as a draft login on this page (content-script memory only). */
+let draft: Draft | null = null;
 
 /** Fills the page's fields; returns how many were filled. */
 async function fillItem(itemId: string): Promise<number> {
@@ -41,29 +44,32 @@ const menu = new InlineMenu({
     const r = await query<string>({ type: "generate" });
     return { state: r.state, value: r.value ?? "" };
   },
-  useGenerated: async (password) => {
-    fillNewPassword(findNewPasswordFields(document), password);
-    const username = findLoginFields(lastField?.form ?? document).username?.value ?? "";
-    // A draft right away; if this fails, the save bar after submitting still offers it.
-    await ask({ type: "save", username, password, itemId: null }).catch(() => {});
+  useGenerated: async (password, field) => {
+    const scope = scopeOf(field);
+    fillNewPassword(findNewPasswordFields(scope), password);
+    if (alreadyDrafted(draft, password)) return;
+    const username = findLoginFields(scope).username?.value ?? "";
+    // A draft login right away, never over an existing one; if this fails, the save bar after submitting still offers it.
+    const r = await ask<string>({ type: "save", username, password, itemId: null, draft: true }).catch(() => null);
+    if (r?.ok) draft = { id: r.value, username, password };
   },
   cards: async () => {
     const r = await query<CardSummary[]>({ type: "cards" });
     return { state: r.state, items: r.value ?? [] };
   },
-  fillCard: async (itemId) => {
+  fillCard: async (itemId, field) => {
     const r = await ask<CardFill>({ type: "fillCard", itemId });
     if (!r.ok) throw new Error(r.message);
-    fillCard(findCardFields(scopeOf()), r.value);
+    fillCard(findCardFields(scopeOf(field)), r.value);
   },
   identities: async () => {
     const r = await query<IdentitySummary[]>({ type: "identities" });
     return { state: r.state, items: r.value ?? [] };
   },
-  fillIdentity: async (itemId) => {
+  fillIdentity: async (itemId, field) => {
     const r = await ask<IdentityFill>({ type: "fillIdentity", itemId });
     if (!r.ok) throw new Error(r.message);
-    fillAddress(findAddressFields(scopeOf()), r.value);
+    fillAddress(findAddressFields(scopeOf(field)), r.value);
   },
 });
 
@@ -88,7 +94,7 @@ function showOffer(o: PendingSave): void {
   saveBar.show({ username: o.username, status: o.status });
 }
 
-/** Change-password forms have no username field: if exactly one login matches this site, it is the account. */
+/** Change-password forms (current + new password) have no username field: if exactly one login matches this site, it is the account. */
 async function withUsername(s: Submission): Promise<Submission> {
   if (s.username) return s;
   const r = await ask<Candidate[]>({ type: "list" });
@@ -97,9 +103,17 @@ async function withUsername(s: Submission): Promise<Submission> {
 
 async function onSubmission(raw: Submission): Promise<void> {
   const s = await withUsername(raw);
+  const plan = planOffer(draft, s);
+  if (plan.kind === "none") return;
+  if (plan.kind === "update") {
+    const o: PendingSave = { username: s.username, password: s.password, itemId: plan.itemId, status: "changed" };
+    showOffer(o);
+    void ask({ type: "pendingSave", ...o });
+    return;
+  }
   const r = await ask<{ status: LookupStatus; itemId: string | null }>({ type: "lookup", username: s.username, password: s.password });
   if (!r.ok || r.value.status === "same") return;
-  const o: PendingSave = { ...s, itemId: r.value.itemId, status: r.value.status };
+  const o: PendingSave = { username: s.username, password: s.password, itemId: r.value.itemId, status: r.value.status };
   // The page may navigate right away: show the bar now and let the background carry it over.
   showOffer(o);
   void ask({ type: "pendingSave", ...o });
@@ -148,8 +162,8 @@ scan();
 document.addEventListener(
   "focusin",
   (e) => {
-    if (!(e.target instanceof HTMLInputElement)) return;
-    lastField = e.target;
+    // Page scripts can fake focus events; only the user's count, and only for fields not yet watched.
+    if (!e.isTrusted || !(e.target instanceof HTMLInputElement) || menu.isWatched(e.target)) return;
     scan();
   },
   true,
