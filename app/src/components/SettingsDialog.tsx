@@ -1,4 +1,5 @@
 import { useEffect, useState, type FormEvent } from "react";
+import { IconClose } from "./icons";
 import { api, errorMessage, isCmdError, type Settings } from "../api";
 import { applyTheme, loadTheme, THEMES, type Theme } from "../theme";
 
@@ -73,7 +74,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
         <header className="modal-header">
           <h2 id="settings-title">Settings</h2>
           <button className="icon" aria-label="Close" onClick={onClose} disabled={busy}>
-            ✕
+            <IconClose />
           </button>
         </header>
 

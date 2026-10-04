@@ -1,3 +1,4 @@
+import { IconGrid, IconImport, IconLock, IconPlus, IconSettings, IconStar, IconTrash, IconVault } from "./icons";
 import { Keyhole } from "./Keyhole";
 import { useState, type FormEvent } from "react";
 import type { Vault } from "../api";
@@ -37,13 +38,16 @@ export function Sidebar({ vaults, selection, onSelect, onNewVault, onImport, onL
         Lockbox
       </div>
       <button className="nav" aria-current={isCurrent({ kind: "all" })} onClick={() => onSelect({ kind: "all" })}>
+        <IconGrid />
         <span>All items</span>
-        <span className="muted">{total}</span>
+        <span className="count">{total}</span>
       </button>
       <button className="nav" aria-current={isCurrent({ kind: "favorites" })} onClick={() => onSelect({ kind: "favorites" })}>
+        <IconStar />
         Favorites
       </button>
       <button className="nav" aria-current={isCurrent({ kind: "trash" })} onClick={() => onSelect({ kind: "trash" })}>
+        <IconTrash />
         Recently Deleted
       </button>
       <div className="heading">Vaults</div>
@@ -54,8 +58,9 @@ export function Sidebar({ vaults, selection, onSelect, onNewVault, onImport, onL
           aria-current={isCurrent({ kind: "vault", id: v.id })}
           onClick={() => onSelect({ kind: "vault", id: v.id })}
         >
+          <IconVault />
           <span>{v.name}</span>
-          <span className="muted">{v.itemCount}</span>
+          <span className="count">{v.itemCount}</span>
         </button>
       ))}
       {naming ? (
@@ -69,18 +74,22 @@ export function Sidebar({ vaults, selection, onSelect, onNewVault, onImport, onL
           />
         </form>
       ) : (
-        <button className="nav muted" onClick={() => setNaming(true)}>
-          + New vault
+        <button className="nav" aria-label="+ New vault" onClick={() => setNaming(true)}>
+          <IconPlus />
+          New vault
         </button>
       )}
       <div className="spacer" />
       <button className="nav" onClick={onImport}>
-        Import from 1Password…
+        <IconImport />
+        Import…
       </button>
       <button className="nav" onClick={onSettings}>
+        <IconSettings />
         Settings…
       </button>
       <button className="nav" onClick={onLock}>
+        <IconLock />
         Lock
       </button>
     </nav>

@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { api, errorMessage, type Field, type Item, type TotpCode } from "../api";
 import { fieldText, formatCode, KIND_LABEL } from "../format";
+import { IconCheck, IconCopy, IconEye, IconEyeOff, KindIcon } from "./icons";
 
 interface Props {
   itemId: string;
@@ -14,7 +15,7 @@ export function ItemDetail({ itemId, onEdit, onDeleted }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [revealed, setRevealed] = useState<Set<string>>(new Set());
-  const [copied, setCopied] = useState(false);
+  const [copied, setCopied] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
 
   useEffect(() => {
@@ -30,7 +31,7 @@ export function ItemDetail({ itemId, onEdit, onDeleted }: Props) {
 
   useEffect(() => {
     if (!copied) return;
-    const timer = setTimeout(() => setCopied(false), 3000);
+    const timer = setTimeout(() => setCopied(null), 3000);
     return () => clearTimeout(timer);
   }, [copied]);
 
@@ -46,7 +47,7 @@ export function ItemDetail({ itemId, onEdit, onDeleted }: Props) {
   async function copy(fieldId: string) {
     try {
       await api.copyField(itemId, fieldId);
-      setCopied(true);
+      setCopied(fieldId);
     } catch (e) {
       setActionError(errorMessage(e));
     }
@@ -82,7 +83,10 @@ export function ItemDetail({ itemId, onEdit, onDeleted }: Props) {
       )}
       <header>
         <div>
-          <span className="kind">{KIND_LABEL[item.kind]}</span>
+          <span className="kind">
+            <KindIcon kind={item.kind} width={13} height={13} />
+            {KIND_LABEL[item.kind]}
+          </span>
           <h2>{item.title}</h2>
         </div>
         <div className="actions">
@@ -111,12 +115,19 @@ export function ItemDetail({ itemId, onEdit, onDeleted }: Props) {
           {group.title && <h3>{group.title}</h3>}
           {group.fields.map((field) =>
             field.value.type === "totp" ? (
-              <TotpRow key={field.id} itemId={itemId} label={field.label} onCopy={() => copy("totp")} />
+              <TotpRow
+                key={field.id}
+                itemId={itemId}
+                label={field.label}
+                copied={copied === "totp"}
+                onCopy={() => copy("totp")}
+              />
             ) : (
               <FieldRow
                 key={field.id}
                 field={field}
                 revealed={revealed.has(field.id)}
+                copied={copied === field.id}
                 onToggle={() => toggle(field.id)}
                 onCopy={() => copy(field.id)}
               />
@@ -130,7 +141,15 @@ export function ItemDetail({ itemId, onEdit, onDeleted }: Props) {
           <div className="field notes">{item.notes}</div>
         </section>
       )}
-      {item.tags.length > 0 && <p className="muted">Tags: {item.tags.join(", ")}</p>}
+      {item.tags.length > 0 && (
+        <div className="meta" aria-label="Tags">
+          {item.tags.map((tag) => (
+            <span key={tag} className="chip">
+              {tag}
+            </span>
+          ))}
+        </div>
+      )}
       {item.attachments.length > 0 && (
         <p className="muted">Attachments: {item.attachments.map((a) => a.name).join(", ")}</p>
       )}
@@ -139,6 +158,7 @@ export function ItemDetail({ itemId, onEdit, onDeleted }: Props) {
       )}
       {copied && (
         <div className="toast" role="status">
+          <IconCheck />
           Copied. The clipboard is cleared automatically.
         </div>
       )}
@@ -146,8 +166,8 @@ export function ItemDetail({ itemId, onEdit, onDeleted }: Props) {
   );
 }
 
-function FieldRow(props: { field: Field; revealed: boolean; onToggle: () => void; onCopy: () => void }) {
-  const { field, revealed, onToggle, onCopy } = props;
+function FieldRow(props: { field: Field; revealed: boolean; copied: boolean; onToggle: () => void; onCopy: () => void }) {
+  const { field, revealed, copied, onToggle, onCopy } = props;
   const text = fieldText(field.value);
   if (!text) return null;
   const concealed = field.value.type === "concealed";
@@ -157,19 +177,31 @@ function FieldRow(props: { field: Field; revealed: boolean; onToggle: () => void
       <span className={concealed ? "value mono" : "value"}>{concealed && !revealed ? "••••••••••" : text}</span>
       <span className="field-actions">
         {concealed && (
-          <button aria-label={`${revealed ? "Hide" : "Reveal"} ${field.label}`} onClick={onToggle}>
-            {revealed ? "Hide" : "Reveal"}
+          <button
+            className="icon"
+            aria-label={`${revealed ? "Hide" : "Reveal"} ${field.label}`}
+            title={revealed ? "Hide" : "Reveal"}
+            onClick={onToggle}
+          >
+            {revealed ? <IconEyeOff /> : <IconEye />}
           </button>
         )}
-        <button aria-label={`Copy ${field.label}`} onClick={onCopy}>
-          Copy
-        </button>
+        <CopyButton name={field.label} copied={copied} onCopy={onCopy} />
       </span>
     </div>
   );
 }
 
-function TotpRow({ itemId, label, onCopy }: { itemId: string; label: string; onCopy: () => void }) {
+function CopyButton({ name, copied, onCopy }: { name: string; copied: boolean; onCopy: () => void }) {
+  return (
+    <button className={copied ? "icon done" : "icon"} aria-label={`Copy ${name}`} title="Copy" onClick={onCopy}>
+      {copied ? <IconCheck /> : <IconCopy />}
+    </button>
+  );
+}
+
+function TotpRow(props: { itemId: string; label: string; copied: boolean; onCopy: () => void }) {
+  const { itemId, label, copied, onCopy } = props;
   const [code, setCode] = useState<TotpCode | null>(null);
   const [failed, setFailed] = useState(false);
   const name = label || "one-time password";
@@ -205,14 +237,33 @@ function TotpRow({ itemId, label, onCopy }: { itemId: string; label: string; onC
   return (
     <div className="field">
       <span className="label">{name}</span>
-      <span className="value mono">
-        {formatCode(code.code)} <span className="muted">{code.secondsLeft}s</span>
+      <span className="value totp">
+        <span className="mono code">{formatCode(code.code)}</span>
+        <Countdown left={code.secondsLeft} period={code.period} />
       </span>
       <span className="field-actions">
-        <button aria-label={`Copy ${name}`} onClick={onCopy}>
-          Copy
-        </button>
+        <CopyButton name={name} copied={copied} onCopy={onCopy} />
       </span>
     </div>
+  );
+}
+
+/** Ring showing how much of the current one-time code's period is left. */
+function Countdown({ left, period }: { left: number; period: number }) {
+  const r = 8;
+  const circumference = 2 * Math.PI * r;
+  const fraction = period > 0 ? Math.min(1, left / period) : 0;
+  return (
+    <svg className={left <= 5 ? "ring low" : "ring"} viewBox="0 0 20 20" role="img" aria-label={`${left} seconds left`}>
+      <circle className="track" cx="10" cy="10" r={r} />
+      <circle
+        className="left"
+        cx="10"
+        cy="10"
+        r={r}
+        strokeDasharray={circumference}
+        strokeDashoffset={circumference * (1 - fraction)}
+      />
+    </svg>
   );
 }

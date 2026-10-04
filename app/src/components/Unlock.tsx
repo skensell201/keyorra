@@ -7,6 +7,7 @@ export function Unlock({ onUnlocked }: { onUnlocked: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [wait, setWait] = useState(0);
   const [busy, setBusy] = useState(false);
+  const [shakes, setShakes] = useState(0);
 
   useEffect(() => {
     if (wait <= 0) return;
@@ -32,6 +33,7 @@ export function Unlock({ onUnlocked }: { onUnlocked: () => void }) {
         setError(err.message);
       } else if (isCmdError(err) && err.kind === "wrongPassword") {
         setError("Incorrect password");
+        setShakes((n) => n + 1);
       } else {
         setError(errorMessage(err));
       }
@@ -42,7 +44,7 @@ export function Unlock({ onUnlocked }: { onUnlocked: () => void }) {
 
   return (
     <div className="center">
-      <form className="card auth" onSubmit={submit}>
+      <form key={shakes} className={shakes ? "card auth shake" : "card auth"} onSubmit={submit}>
         <div className="logo">
           <Keyhole width={24} height={24} />
         </div>

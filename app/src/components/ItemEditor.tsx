@@ -1,4 +1,5 @@
 import { useState, type FormEvent } from "react";
+import { IconClose } from "./icons";
 import { api, errorMessage, type Field, type FieldValue, type Item } from "../api";
 import { fieldText, KIND_LABEL } from "../format";
 import { Generator } from "./Generator";
@@ -197,7 +198,7 @@ export function ItemEditor({ item, isNew, onSave, onCancel }: Props) {
                   <span />
                 )}
                 <button type="button" aria-label={`Remove ${name}`} onClick={() => removeField(index)}>
-                  ✕
+                  <IconClose />
                 </button>
               </div>
             );

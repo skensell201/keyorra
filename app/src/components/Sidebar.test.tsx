@@ -31,7 +31,7 @@ test("creates a vault, imports and locks", async () => {
   await user.click(screen.getByRole("button", { name: "+ New vault" }));
   await user.type(screen.getByLabelText("Vault name"), "Work{Enter}");
   expect(props.onNewVault).toHaveBeenCalledWith("Work");
-  await user.click(screen.getByRole("button", { name: "Import from 1Password…" }));
+  await user.click(screen.getByRole("button", { name: "Import…" }));
   expect(props.onImport).toHaveBeenCalled();
   await user.click(screen.getByRole("button", { name: "Lock" }));
   expect(props.onLock).toHaveBeenCalled();

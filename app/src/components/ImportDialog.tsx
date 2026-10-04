@@ -1,4 +1,5 @@
 import { open } from "@tauri-apps/plugin-dialog";
+import { IconClose } from "./icons";
 import { useEffect, useState } from "react";
 import { api, errorMessage, type ImportPreview, type ImportResult } from "../api";
 
@@ -55,7 +56,7 @@ export function ImportDialog({ onClose, onImported }: { onClose: () => void; onI
         <header className="modal-header">
           <h2 id="import-title">Import from 1Password</h2>
           <button className="icon" aria-label="Close" onClick={onClose} disabled={busy}>
-            ✕
+            <IconClose />
           </button>
         </header>
         {step.kind === "pick" && (

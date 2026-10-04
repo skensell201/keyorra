@@ -108,9 +108,11 @@ test("status regions stay mounted", async () => {
 test("switches the theme", async () => {
   const user = userEvent.setup();
   render(<SettingsDialog onClose={vi.fn()} />);
+  await user.click(screen.getByRole("button", { name: "Light" }));
+  expect(document.documentElement.dataset.theme).toBe("light");
+  expect(screen.getByRole("button", { name: "Light" })).toHaveAttribute("aria-pressed", "true");
+  await user.click(screen.getByRole("button", { name: "Dark" }));
+  expect(document.documentElement.dataset.theme).toBe("dark");
   await user.click(screen.getByRole("button", { name: "Index" }));
   expect(document.documentElement.dataset.theme).toBe("index");
-  expect(screen.getByRole("button", { name: "Index" })).toHaveAttribute("aria-pressed", "true");
-  await user.click(screen.getByRole("button", { name: "Doppler" }));
-  expect(document.documentElement.dataset.theme).toBe("doppler");
 });
