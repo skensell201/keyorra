@@ -24,6 +24,7 @@ const STYLE = `
 .icon { position: fixed; z-index: 2147483646; width: 24px; height: 24px; border-radius: 7px; border: 0; padding: 0;
   display: grid; place-items: center; background: #111; color: #fff; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,.25);
   transition: box-shadow 120ms; }
+.icon[hidden], .panel[hidden] { display: none !important; }
 .icon:hover { filter: none; box-shadow: 0 1px 6px rgba(0,0,0,.35); }
 .panel { position: fixed; z-index: 2147483647; min-width: 260px; max-width: 340px; padding: 6px; border-radius: 16px;
   background: rgba(255,255,255,.96); color: #111; box-shadow: 0 12px 40px rgba(17,17,17,.2), 0 2px 6px rgba(17,17,17,.08);
@@ -313,8 +314,26 @@ export class InlineMenu {
     }
   }
 
+  private following = false;
+
+  /** Pages move fields without scrolling (messages or results appearing above): follow while shown. */
+  private follow(): void {
+    if (this.following || typeof requestAnimationFrame !== "function") return;
+    this.following = true;
+    const tick = () => {
+      if (this.icon.hidden && !this.panel) {
+        this.following = false;
+        return;
+      }
+      this.place();
+      requestAnimationFrame(tick);
+    };
+    requestAnimationFrame(tick);
+  }
+
   private place(): void {
     if (!this.field) return;
+    this.follow();
     const r = this.field.getBoundingClientRect();
     this.icon.style.left = `${r.right - 30}px`;
     this.icon.style.top = `${r.top + (r.height - 24) / 2}px`;

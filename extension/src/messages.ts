@@ -16,7 +16,7 @@ export type ToBackground =
   | { type: "fillCard"; itemId: string }
   | { type: "identities" }
   | { type: "fillIdentity"; itemId: string }
-  | { type: "pendingSave"; username: string; password: string; itemId: string | null; status: Exclude<LookupStatus, "same"> }
+  | { type: "submitted"; username: string; password: string; draftId: string | null }
   | { type: "takePendingSave" }
   | { type: "clearPendingSave" };
 

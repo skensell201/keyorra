@@ -72,6 +72,11 @@ fn connection(app: AppHandle, mut stream: UnixStream) {
 }
 
 fn on_event(app: &AppHandle, event: BridgeEvent) {
+    if event == BridgeEvent::ItemsChanged {
+        // Quietly: the user is in the browser, the window only needs fresh lists.
+        let _ = app.emit("items-changed", ());
+        return;
+    }
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.unminimize();
         let _ = window.show();

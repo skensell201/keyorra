@@ -40,6 +40,8 @@ pub enum BridgeEvent {
     Show,
     /// Ask the user to confirm a browser.
     PairRequest(PairingRequest),
+    /// The extension saved an item: lists on screen are stale.
+    ItemsChanged,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -149,7 +151,11 @@ impl Session {
             } => self.reveal_pairing(&client_id, &client_pub, now),
             Inbound::PairStatus { client_id } => (self.pairing_status(&client_id, now), None),
             Inbound::Call { client_id, sealed } => {
-                (self.serve_call(&client_id, &sealed, now), None)
+                self.items_changed = false;
+                let out = self.serve_call(&client_id, &sealed, now);
+                let event =
+                    std::mem::take(&mut self.items_changed).then_some(BridgeEvent::ItemsChanged);
+                (out, event)
             }
         }
     }
@@ -589,7 +595,10 @@ impl Session {
             }
         };
         match result {
-            Ok(id) => Reply::Saved { saved: id },
+            Ok(id) => {
+                self.items_changed = true;
+                Reply::Saved { saved: id }
+            }
             Err(e) => Reply::Error { error: e.message },
         }
     }

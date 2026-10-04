@@ -10,14 +10,9 @@ export interface Sender {
 
 export type Decision = { ok: true; url: string } | { ok: false; message: string };
 
-function validPending(msg: object): boolean {
+function validSubmission(msg: object): boolean {
   const m = msg as Record<string, unknown>;
-  return (
-    typeof m.username === "string" &&
-    typeof m.password === "string" &&
-    (m.itemId === null || typeof m.itemId === "string") &&
-    (m.status === "new" || m.status === "changed")
-  );
+  return typeof m.username === "string" && typeof m.password === "string" && (m.draftId === null || typeof m.draftId === "string");
 }
 
 export function authorize(msg: ToBackground, sender: Sender, extensionId: string, extensionBase: string): Decision {
@@ -44,9 +39,9 @@ export function authorize(msg: ToBackground, sender: Sender, extensionId: string
     case "identities":
     case "fillIdentity":
       return page ? { ok: true, url: sender.url! } : refuse();
-    case "pendingSave":
-      // Only the top frame may park a login, with well-formed fields.
-      return page && sender.frameId === 0 && validPending(msg) ? { ok: true, url: sender.url! } : refuse();
+    case "submitted":
+      // Any frame may report its own sign-in; only the top frame's is parked for the next page.
+      return page && validSubmission(msg) ? { ok: true, url: sender.url! } : refuse();
     case "takePendingSave":
     case "clearPendingSave":
       return page && sender.frameId === 0 ? { ok: true, url: sender.url! } : refuse();

@@ -57,6 +57,8 @@ pub struct Session {
     guard_path: PathBuf,
     /// Recent `lookup` times per paired browser, for rate limiting.
     lookups: std::collections::HashMap<String, Vec<u64>>,
+    /// Set while serving a bridge call that saved an item.
+    items_changed: bool,
 }
 
 impl Session {
@@ -82,6 +84,7 @@ impl Session {
             pair_blocked_until: guard.blocked_until,
             guard_path,
             lookups: std::collections::HashMap::new(),
+            items_changed: false,
         }
     }
 

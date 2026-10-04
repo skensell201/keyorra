@@ -2,7 +2,7 @@ import { watchSubmissions, type Submission } from "./capture";
 import { findAddressFields, findCardFields, findLoginFields, findNewPasswordFields, usable } from "./detect";
 import { fillAddress, fillCard, fillLogin, fillNewPassword } from "./fill";
 import { InlineMenu, type MenuMode } from "./inline";
-import { ask, type Candidate, type CardFill, type CardSummary, type Credentials, type IdentityFill, type IdentitySummary, type LookupStatus, type State, type ToContent } from "./messages";
+import { ask, type Candidate, type CardFill, type CardSummary, type Credentials, type IdentityFill, type IdentitySummary, type State, type ToContent } from "./messages";
 import { SaveBar } from "./savebar";
 import type { PendingSave } from "./pending";
 import { alreadyDrafted, planOffer, type Draft } from "./draft";
@@ -111,18 +111,10 @@ async function onSubmission(raw: Submission): Promise<void> {
   const s = await withUsername(raw);
   const plan = planOffer(draft, s);
   if (plan.kind === "none") return;
-  if (plan.kind === "update") {
-    const o: PendingSave = { username: s.username, password: s.password, itemId: plan.itemId, status: "changed" };
-    showOffer(o);
-    void ask({ type: "pendingSave", ...o });
-    return;
-  }
-  const r = await ask<{ status: LookupStatus; itemId: string | null }>({ type: "lookup", username: s.username, password: s.password });
-  if (!r.ok || r.value.status === "same") return;
-  const o: PendingSave = { username: s.username, password: s.password, itemId: r.value.itemId, status: r.value.status };
-  // The page may navigate right away: show the bar now and let the background carry it over.
-  showOffer(o);
-  void ask({ type: "pendingSave", ...o });
+  const draftId = plan.kind === "update" ? plan.itemId : null;
+  // The background asks the app and parks the offer for the next page, so it survives navigation.
+  const r = await ask<PendingSave | null>({ type: "submitted", username: s.username, password: s.password, draftId });
+  if (r.ok && r.value) showOffer(r.value);
 }
 
 watchSubmissions(document, (s) => void onSubmission(s).catch(() => {}));

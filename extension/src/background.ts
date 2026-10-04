@@ -1,7 +1,7 @@
 import { authorize } from "./access";
 import { idbDelete, idbGet, idbPut } from "./idb";
 import { Client, LockedError, NoAppError, UnpairedError, type Pairing } from "./client";
-import { PendingSaves } from "./pending";
+import { PendingSaves, offerFor } from "./pending";
 import type { ErrorKind, Result, ToBackground, ToContent } from "./messages";
 
 const HOST = "app.lockbox.bridge";
@@ -68,11 +68,11 @@ async function handle(msg: ToBackground, sender: chrome.runtime.MessageSender): 
       return client.identities(decision.url);
     case "fillIdentity":
       return client.fillIdentity(decision.url, msg.itemId);
-    case "pendingSave": {
-      if (sender.tab?.id === undefined) throw new Error("Not allowed from here");
-      const { username, password, itemId, status } = msg;
-      pending.set(sender.tab.id, { username, password, itemId, status }, decision.url);
-      return null;
+    case "submitted": {
+      // Decided here, not in the page: the page often navigates before the app answers.
+      const offer = await offerFor(msg, (u, p) => client.lookup(decision.url, u, p));
+      if (offer && sender.frameId === 0 && sender.tab?.id !== undefined) pending.set(sender.tab.id, offer, decision.url);
+      return offer;
     }
     case "takePendingSave":
       return sender.tab?.id === undefined ? null : pending.take(sender.tab.id, decision.url);

@@ -1,5 +1,5 @@
 import { beforeEach, expect, test } from "vitest";
-import { PendingSaves } from "./pending";
+import { PendingSaves, offerFor } from "./pending";
 
 let now = 0;
 let p: PendingSaves;
@@ -42,4 +42,13 @@ test("clear drops a tab's save", () => {
   p.set(1, data, "https://a.com/");
   p.clear(1);
   expect(p.take(1, "https://a.com/")).toBeNull();
+});
+
+test("an offer comes from the app's lookup, or updates the page's own draft without asking", async () => {
+  const lookup = async (u: string, pw: string) =>
+    pw === "same" ? { status: "same" as const, itemId: "i1" } : u === "known" ? { status: "changed" as const, itemId: "i1" } : { status: "new" as const, itemId: null };
+  expect(await offerFor({ username: "known", password: "same", draftId: null }, lookup)).toBeNull();
+  expect(await offerFor({ username: "known", password: "x", draftId: null }, lookup)).toEqual({ username: "known", password: "x", itemId: "i1", status: "changed" });
+  expect(await offerFor({ username: "me", password: "x", draftId: null }, lookup)).toEqual({ username: "me", password: "x", itemId: null, status: "new" });
+  expect(await offerFor({ username: "me", password: "same", draftId: "d1" }, lookup)).toEqual({ username: "me", password: "same", itemId: "d1", status: "changed" });
 });

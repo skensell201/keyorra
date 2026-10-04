@@ -54,3 +54,20 @@ export class PendingSaves {
     this.entries.delete(tabId);
   }
 }
+
+export interface Submission {
+  username: string;
+  password: string;
+  /** A draft this page saved from the generator: the submission updates it. */
+  draftId: string | null;
+}
+
+type Lookup = (username: string, password: string) => Promise<{ status: LookupStatus; itemId: string | null }>;
+
+/** What to offer after a sign-in: nothing when the app already has it, else save or update. */
+export async function offerFor(s: Submission, lookup: Lookup): Promise<PendingSave | null> {
+  if (s.draftId) return { username: s.username, password: s.password, itemId: s.draftId, status: "changed" };
+  const r = await lookup(s.username, s.password);
+  if (r.status === "same") return null;
+  return { username: s.username, password: s.password, itemId: r.itemId, status: r.status };
+}

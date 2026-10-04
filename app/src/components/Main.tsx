@@ -70,6 +70,13 @@ export function Main({ onLock }: { onLock: () => void }) {
     };
   }, []);
   useEffect(() => {
+    // The browser extension saved a login: refresh what's on screen.
+    const unlisten = api.onItemsChanged(() => void refresh());
+    return () => {
+      unlisten.then((stop) => stop());
+    };
+  }, [refresh]);
+  useEffect(() => {
     loadVaults();
   }, [loadVaults]);
   useEffect(() => {

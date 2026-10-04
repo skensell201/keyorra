@@ -161,4 +161,5 @@ export const api = {
   onPairRequest: (callback: (request: PairingRequest) => void): Promise<UnlistenFn> =>
     listen<PairingRequest>("pair-request", (e) => callback(e.payload)),
   onLocked: (callback: () => void): Promise<UnlistenFn> => listen("locked", () => callback()),
+  onItemsChanged: (callback: () => void): Promise<UnlistenFn> => listen("items-changed", () => callback()),
 };

@@ -66,30 +66,34 @@ test("save, generate, cards and identities are refused from extension pages and 
   }
 });
 
-const pending = { type: "pendingSave", username: "u", password: "p", itemId: null, status: "new" };
+const submitted = { type: "submitted", username: "u", password: "p", draftId: null };
 const top = { ...page, frameId: 0 };
 
-test("pending saves are page-only and use the browser's URL", () => {
-  for (const msg of [pending, { type: "takePendingSave" }, { type: "clearPendingSave" }]) {
+test("submissions come from any page frame and use the browser's URL", () => {
+  expect(run({ ...submitted, url: "https://evil.com" }, top)).toEqual({ ok: true, url: PAGE_URL });
+  expect(run(submitted, { ...page, frameId: 3 })).toEqual({ ok: true, url: PAGE_URL });
+  expect(run(submitted, { ...ext, frameId: 0 }).ok).toBe(false);
+  expect(run(submitted, { id: ID, url: "file:///x", frameId: 0 }).ok).toBe(false);
+  expect(run(submitted, {}).ok).toBe(false);
+});
+
+test("submitted validates its fields", () => {
+  expect(run({ ...submitted, draftId: "d1" }, top).ok).toBe(true);
+  expect(run({ ...submitted, username: 5 }, top).ok).toBe(false);
+  expect(run({ ...submitted, password: undefined }, top).ok).toBe(false);
+  expect(run({ ...submitted, draftId: 7 }, top).ok).toBe(false);
+});
+
+test("taking and clearing a pending save is top-frame only and uses the browser's URL", () => {
+  for (const msg of [{ type: "takePendingSave" }, { type: "clearPendingSave" }]) {
     expect(run({ ...msg, url: "https://evil.com" }, top)).toEqual({ ok: true, url: PAGE_URL });
+    expect(run(msg, { ...page, frameId: 3 }).ok).toBe(false);
+    expect(run(msg, page).ok).toBe(false);
     expect(run(msg, { ...ext, frameId: 0 }).ok).toBe(false);
-    expect(run(msg, { id: ID, url: "file:///x", frameId: 0 }).ok).toBe(false);
     expect(run(msg, {}).ok).toBe(false);
   }
 });
 
-test("pending saves are refused from subframes and from senders without a frame id", () => {
-  for (const msg of [pending, { type: "takePendingSave" }, { type: "clearPendingSave" }]) {
-    expect(run(msg, { ...page, frameId: 3 }).ok).toBe(false);
-    expect(run(msg, page).ok).toBe(false);
-  }
-});
-
-test("pendingSave validates its status and string fields", () => {
-  expect(run({ ...pending, status: "same" }, top).ok).toBe(false);
-  expect(run({ ...pending, status: undefined }, top).ok).toBe(false);
-  expect(run({ ...pending, status: "changed", itemId: "i1" }, top).ok).toBe(true);
-  expect(run({ ...pending, username: 5 }, top).ok).toBe(false);
-  expect(run({ ...pending, password: undefined }, top).ok).toBe(false);
-  expect(run({ ...pending, itemId: 7 }, top).ok).toBe(false);
+test("the content script can no longer park arbitrary pending saves", () => {
+  expect(run({ type: "pendingSave", username: "u", password: "p", itemId: null, status: "new" }, top).ok).toBe(false);
 });

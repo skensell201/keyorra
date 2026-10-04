@@ -1331,3 +1331,32 @@ fn personal_vault(s: &mut Session) -> uuid::Uuid {
         .unwrap()
         .id
 }
+
+#[test]
+fn saving_from_the_extension_tells_the_window_to_refresh() {
+    let (_dir, mut s) = unlocked_session();
+    let ext = paired(&mut s);
+    let send = |s: &mut Session, request: Value| {
+        let sealed = crypto::seal(
+            &ext.key,
+            &ext.client_id,
+            Direction::Request,
+            request.to_string().as_bytes(),
+        );
+        s.bridge(
+            Inbound::Call {
+                client_id: ext.client_id.clone(),
+                sealed,
+            },
+            2_000,
+        )
+        .1
+    };
+    let lookup =
+        json!({"op": "lookup", "url": "https://a.example", "username": "me", "password": "pw"});
+    assert_eq!(send(&mut s, lookup), None);
+    let save = json!({"op": "save", "url": "https://a.example", "username": "me", "password": "pw", "itemId": null});
+    assert_eq!(send(&mut s, save), Some(BridgeEvent::ItemsChanged));
+    let refused = json!({"op": "save", "url": "https://a.example", "username": "me", "password": "", "itemId": null});
+    assert_eq!(send(&mut s, refused), None);
+}

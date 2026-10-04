@@ -15,6 +15,7 @@ vi.mock("./api", async (importOriginal) => {
       items: vi.fn().mockResolvedValue([]),
       onLocked: vi.fn().mockResolvedValue(() => {}),
       onPairRequest: vi.fn().mockResolvedValue(() => {}),
+      onItemsChanged: vi.fn().mockResolvedValue(() => {}),
     },
   };
 });

@@ -22,11 +22,13 @@ vi.mock("../api", async (importOriginal) => {
       restoreItem: vi.fn(),
       settings: vi.fn(),
       onPairRequest: vi.fn(),
+      onItemsChanged: vi.fn(),
     },
   };
 });
 
 let pairCallback: ((r: PairingRequest) => void) | null = null;
+let changedCallback: (() => void) | null = null;
 
 const github: ItemSummary = {
   id: "i1", vaultId: "v1", kind: "login", title: "GitHub", subtitle: "ivan",
@@ -35,6 +37,13 @@ const github: ItemSummary = {
 
 beforeEach(() => {
   pairCallback = null;
+  changedCallback = null;
+  vi.mocked(api.onItemsChanged)
+    .mockReset()
+    .mockImplementation(async (cb) => {
+      changedCallback = cb;
+      return () => {};
+    });
   vi.mocked(api.onPairRequest)
     .mockReset()
     .mockImplementation(async (cb) => {
@@ -149,4 +158,15 @@ test("a pairing request from a browser opens the confirmation", async () => {
   await waitFor(() => expect(pairCallback).not.toBeNull());
   act(() => pairCallback!({ clientId: "c1", name: "Opera", code: "123456" }));
   expect(await screen.findByRole("dialog", { name: "Connect Opera?" })).toBeInTheDocument();
+});
+
+test("reloads vaults and items when the browser extension saves something", async () => {
+  render(<Main onLock={vi.fn()} />);
+  expect(await screen.findByText("GitHub")).toBeInTheDocument();
+  vi.mocked(api.items).mockResolvedValue([github, { ...github, id: "i2", title: "shop.example" }]);
+  const vaultCalls = vi.mocked(api.vaults).mock.calls.length;
+  await waitFor(() => expect(changedCallback).not.toBeNull());
+  act(() => changedCallback!());
+  expect(await screen.findByText("shop.example")).toBeInTheDocument();
+  expect(vi.mocked(api.vaults).mock.calls.length).toBeGreaterThan(vaultCalls);
 });
