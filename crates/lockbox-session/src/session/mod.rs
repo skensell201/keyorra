@@ -109,6 +109,8 @@ impl Session {
             Ok(()) => {
                 self.throttle.record_success();
                 self.autolock.touch(now);
+                // Housekeeping, not part of unlocking: a failure here must not lock the user out.
+                let _ = store.purge_expired(now as i64);
                 self.store = Some(store);
                 Ok(())
             }
@@ -285,6 +287,29 @@ impl Session {
     pub fn delete_item(&mut self, id: Uuid, now: u64) -> CmdResult<()> {
         self.touch(now);
         Ok(self.store_mut()?.delete_item(id, now as i64)?)
+    }
+
+    /// Items in Recently Deleted, sorted by title.
+    pub fn deleted_items(&mut self, now: u64) -> CmdResult<Vec<ItemSummary>> {
+        self.touch(now);
+        let mut out: Vec<ItemSummary> = self
+            .store()?
+            .deleted_items()?
+            .iter()
+            .map(ItemSummary::from_entry)
+            .collect();
+        out.sort_by(|a, b| {
+            a.title
+                .to_lowercase()
+                .cmp(&b.title.to_lowercase())
+                .then(a.id.cmp(&b.id))
+        });
+        Ok(out)
+    }
+
+    pub fn restore_item(&mut self, id: Uuid, now: u64) -> CmdResult<()> {
+        self.touch(now);
+        Ok(self.store_mut()?.restore_item(id)?)
     }
 
     fn store(&self) -> CmdResult<&Store> {

@@ -567,3 +567,55 @@ fn empty_totp_fields_are_dropped_on_save() {
     assert_eq!(saved.totp(), None);
     assert_eq!(saved.fields.len(), 2);
 }
+
+use lockbox_core::store::DELETED_RETENTION_SECS;
+
+#[test]
+fn deleted_items_can_be_listed_and_restored() {
+    let (_dir, mut s) = unlocked_session();
+    let p = personal(&mut s);
+    let item = save_login(&mut s, p, "GitHub", "ivan", "pw");
+    s.delete_item(item.id, 1_000).unwrap();
+    let trash: Vec<_> = s
+        .deleted_items(1_000)
+        .unwrap()
+        .into_iter()
+        .map(|i| i.title)
+        .collect();
+    assert_eq!(trash, ["GitHub"]);
+    s.restore_item(item.id, 1_000).unwrap();
+    assert!(s.deleted_items(1_000).unwrap().is_empty());
+    assert_eq!(s.item(item.id, 1_000).unwrap().title, "GitHub");
+}
+
+#[test]
+fn unlocking_purges_items_deleted_more_than_30_days_ago() {
+    let (_dir, mut s) = unlocked_session();
+    let p = personal(&mut s);
+    let old = save_login(&mut s, p, "Old", "a", "pw");
+    let recent = save_login(&mut s, p, "Recent", "b", "pw");
+    s.delete_item(old.id, 1_000).unwrap();
+    s.delete_item(recent.id, 1_000 + DELETED_RETENTION_SECS as u64)
+        .unwrap();
+    s.lock();
+    s.unlock(PW, 1_000 + DELETED_RETENTION_SECS as u64 + 1)
+        .unwrap();
+    let trash: Vec<_> = s
+        .deleted_items(2_000)
+        .unwrap()
+        .into_iter()
+        .map(|i| i.title)
+        .collect();
+    assert_eq!(trash, ["Recent"]);
+}
+
+#[test]
+fn trash_requires_unlock() {
+    let (_dir, mut s) = unlocked_session();
+    s.lock();
+    assert_eq!(s.deleted_items(1_000).unwrap_err().kind, ErrorKind::Locked);
+    assert_eq!(
+        s.restore_item(Uuid::new_v4(), 1_000).unwrap_err().kind,
+        ErrorKind::Locked
+    );
+}
