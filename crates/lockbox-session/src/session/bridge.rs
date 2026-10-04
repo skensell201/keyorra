@@ -64,7 +64,6 @@ pub(super) struct PendingPairing {
     commit: [u8; 32],
     server: KeyPair,
     key: Option<Zeroizing<[u8; 32]>>,
-    code: Option<String>,
     created_at: u64,
     state: PendingState,
 }
@@ -112,7 +111,7 @@ impl PairGuard {
 struct Pairing {
     client_id: String,
     name: String,
-    key: String,
+    key: Zeroizing<String>,
     created_at: u64,
 }
 
@@ -139,7 +138,7 @@ impl Session {
                 client_id,
                 client_pub,
             } => self.reveal_pairing(&client_id, &client_pub, now),
-            Inbound::PairStatus { client_id } => (self.pairing_status(&client_id), None),
+            Inbound::PairStatus { client_id } => (self.pairing_status(&client_id, now), None),
             Inbound::Call { client_id, sealed } => {
                 (self.serve_call(&client_id, &sealed, now), None)
             }
@@ -159,7 +158,7 @@ impl Session {
         let record = Pairing {
             client_id: pending.client_id.clone(),
             name: pending.name.clone(),
-            key: b64(&key[..]),
+            key: Zeroizing::new(b64(&key[..])),
             created_at: now,
         };
         let mut all = self.load_pairings()?;
@@ -201,7 +200,24 @@ impl Session {
     pub fn remove_paired_browser(&mut self, client_id: &str) -> CmdResult<()> {
         let mut all = self.load_pairings()?;
         all.retain(|p| p.client_id != client_id);
-        self.save_pairings(&all)
+        self.save_pairings(&all)?;
+        if self
+            .pending
+            .as_ref()
+            .is_some_and(|p| p.client_id == client_id)
+        {
+            self.pending = None;
+        }
+        Ok(())
+    }
+
+    /// Clears the pending pairing; one nobody approved counts as a failure.
+    pub(super) fn drop_pending_pairing(&mut self) {
+        if let Some(p) = self.pending.take() {
+            if p.unapproved() {
+                self.record_pair_failure();
+            }
+        }
     }
 
     fn start_pairing(
@@ -215,14 +231,13 @@ impl Session {
         }
         self.forget_expired(now);
         // A new request replaces the old one; an unapproved old one counts against the cap.
-        if let Some(old) = self.pending.take() {
-            if old.unapproved() {
-                self.record_pair_failure();
-            }
-        }
+        self.drop_pending_pairing();
         if self.pair_failures >= MAX_PAIR_FAILURES {
-            if self.pair_blocked_until == 0 {
-                self.set_guard(self.pair_failures, now.saturating_add(PAIR_COOLDOWN_SECS));
+            // The block starts at the first refusal; a stored value from a clock that was far
+            // ahead is clamped (and saved) so it can't block for longer than the cooldown.
+            let latest = now.saturating_add(PAIR_COOLDOWN_SECS);
+            if self.pair_blocked_until == 0 || self.pair_blocked_until > latest {
+                self.set_guard(self.pair_failures, latest);
             }
             if now < self.pair_blocked_until {
                 return (
@@ -249,7 +264,6 @@ impl Session {
             commit,
             server,
             key: None,
-            code: None,
             created_at: now,
             state: PendingState::AwaitingReveal,
         });
@@ -282,7 +296,6 @@ impl Session {
             return (error("Pairing check failed"), None);
         };
         pending.key = Some(derived.key);
-        pending.code = Some(derived.code.clone());
         pending.state = PendingState::Waiting;
         let reply = Outbound::PairPending {
             client_id: pending.client_id.clone(),
@@ -297,7 +310,8 @@ impl Session {
         (reply, Some(event))
     }
 
-    fn pairing_status(&mut self, client_id: &str) -> Outbound {
+    fn pairing_status(&mut self, client_id: &str, now: u64) -> Outbound {
+        self.forget_expired(now);
         if let Some(p) = self.pending.as_ref().filter(|p| p.client_id == client_id) {
             return match p.state {
                 PendingState::AwaitingReveal | PendingState::Waiting => Outbound::PairPending {
@@ -317,6 +331,7 @@ impl Session {
         match self.load_pairings() {
             Ok(all) if all.iter().any(|p| p.client_id == client_id) => Outbound::Paired,
             Ok(_) => Outbound::UnknownClient,
+            Err(e) if self.store.is_some() => error(&e.message),
             Err(_) => Outbound::Locked,
         }
     }
@@ -325,8 +340,9 @@ impl Session {
         if self.store.is_none() {
             return Outbound::Locked;
         }
-        let Ok(all) = self.load_pairings() else {
-            return Outbound::Locked;
+        let all = match self.load_pairings() {
+            Ok(all) => all,
+            Err(e) => return error(&e.message),
         };
         let Some(pairing) = all.into_iter().find(|p| p.client_id == client_id) else {
             return Outbound::UnknownClient;
@@ -395,7 +411,7 @@ impl Session {
                 id: item.id,
                 title: item.title.clone(),
                 username: item.username().unwrap_or_default().to_owned(),
-                has_totp: item.totp().is_some(),
+                has_totp: item.totp().is_some_and(|raw| Totp::parse(raw).is_ok()),
             })
             .collect()
     }
@@ -430,17 +446,15 @@ impl Session {
     }
 
     /// An unapproved request that timed out counts as a failure.
+    /// An unapproved request that timed out counts as a failure. A clock that went backwards
+    /// (`now < created_at`) also counts as expired.
     fn forget_expired(&mut self, now: u64) {
         let expired = self
             .pending
             .as_ref()
-            .is_some_and(|p| now.saturating_sub(p.created_at) > PAIRING_TTL_SECS);
+            .is_some_and(|p| now < p.created_at || now - p.created_at > PAIRING_TTL_SECS);
         if expired {
-            if let Some(p) = self.pending.take() {
-                if p.unapproved() {
-                    self.record_pair_failure();
-                }
-            }
+            self.drop_pending_pairing();
         }
     }
 
@@ -466,10 +480,11 @@ impl Session {
     }
 
     fn load_pairings(&self) -> CmdResult<Vec<Pairing>> {
-        let raw = self.store()?.sealed_meta(PAIRINGS_META)?;
-        Ok(raw
-            .and_then(|bytes| serde_json::from_slice(&bytes).ok())
-            .unwrap_or_default())
+        match self.store()?.sealed_meta(PAIRINGS_META)? {
+            None => Ok(Vec::new()),
+            Some(bytes) => serde_json::from_slice(&bytes)
+                .map_err(|_| CmdError::new(ErrorKind::Other, "Browser pairings are damaged")),
+        }
     }
 
     fn save_pairings(&mut self, all: &[Pairing]) -> CmdResult<()> {

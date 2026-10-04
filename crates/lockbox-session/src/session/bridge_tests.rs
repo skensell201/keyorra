@@ -386,10 +386,7 @@ fn a_reveal_that_does_not_match_the_commitment_is_refused() {
     assert_eq!(event, None);
     // The attempt is gone: even the honest reveal can't continue it.
     let (out, event) = reveal(&mut s, &keys, &client_id, 1_000);
-    assert!(
-        matches!(out, Outbound::Error { .. } | Outbound::UnknownClient),
-        "{out:?}"
-    );
+    assert_eq!(out, Outbound::UnknownClient);
     assert_eq!(event, None);
 }
 
@@ -437,10 +434,7 @@ fn a_second_pair_replaces_the_first() {
     };
     let (_ext2, request2) = pair(&mut s);
     let (out, event) = reveal(&mut s, &first, &first_id, 1_000);
-    assert!(
-        matches!(out, Outbound::Error { .. } | Outbound::UnknownClient),
-        "{out:?}"
-    );
+    assert_eq!(out, Outbound::UnknownClient);
     assert_eq!(event, None);
     assert!(s.approve_pairing(&first_id, 1_000).is_err());
     s.approve_pairing(&request2.client_id, 1_000).unwrap();
@@ -604,4 +598,231 @@ fn replies_are_bound_to_the_request_they_answer() {
         &reply_a
     )
     .is_none());
+}
+
+fn guard_failures(s: &Session) -> u32 {
+    s.pair_failures
+}
+
+#[test]
+fn locking_counts_an_unapproved_pairing_as_a_failure() {
+    let (_dir, mut s) = unlocked_session();
+    for _ in 0..5 {
+        let (_ext, _request) = pair(&mut s);
+        s.lock();
+        s.unlock(PW, 1_000).unwrap();
+    }
+    assert_eq!(start(&mut s, &KeyPair::random(), 1_000).0, too_many());
+}
+
+#[test]
+fn locking_after_an_approval_is_not_a_failure() {
+    let (_dir, mut s) = unlocked_session();
+    let _ext = paired(&mut s);
+    s.lock();
+    assert_eq!(guard_failures(&s), 0);
+}
+
+#[test]
+fn auto_lock_counts_an_unapproved_pairing_as_a_failure() {
+    let (_dir, mut s) = unlocked_session();
+    let (out, _) = start(&mut s, &KeyPair::random(), 1_000);
+    assert!(matches!(out, Outbound::PairPending { .. }));
+    assert!(s.tick(1_000 + 600));
+    assert_eq!(guard_failures(&s), 1);
+}
+
+#[test]
+fn a_blocked_until_far_in_the_future_is_clamped_to_the_cooldown() {
+    let (_dir, s) = unlocked_session();
+    let path = s.path.clone();
+    drop(s);
+    std::fs::write(
+        path.with_file_name("pairing-guard.json"),
+        br#"{"failures":5,"blockedUntil":99999999999}"#,
+    )
+    .unwrap();
+    let mut s = Session::new(path, KdfParams::INSECURE_FAST, 1_000);
+    s.unlock(PW, 1_000).unwrap();
+    assert_eq!(start(&mut s, &KeyPair::random(), 1_000).0, too_many());
+    let (out, _) = start(&mut s, &KeyPair::random(), 1_000 + PAIR_COOLDOWN_SECS);
+    assert!(matches!(out, Outbound::PairPending { .. }), "{out:?}");
+}
+
+#[test]
+fn a_clock_that_goes_backwards_expires_the_pairing() {
+    let (_dir, mut s) = unlocked_session();
+    let (_ext, request) = pair(&mut s);
+    let err = s.approve_pairing(&request.client_id, 500).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::NotFound);
+}
+
+#[test]
+fn polling_the_status_expires_a_stale_pairing() {
+    let (_dir, mut s) = unlocked_session();
+    let (ext, _request) = pair(&mut s);
+    let late = 1_000 + PAIRING_TTL_SECS + 1;
+    assert_eq!(
+        s.bridge(
+            Inbound::PairStatus {
+                client_id: ext.client_id.clone()
+            },
+            late
+        )
+        .0,
+        Outbound::UnknownClient
+    );
+    assert_eq!(guard_failures(&s), 1);
+}
+
+#[test]
+fn removing_a_browser_clears_its_pending_pairing() {
+    let (_dir, mut s) = unlocked_session();
+    let (_ext, request) = pair(&mut s);
+    s.remove_paired_browser(&request.client_id).unwrap();
+    assert!(s.approve_pairing(&request.client_id, 1_001).is_err());
+}
+
+#[test]
+fn damaged_pairings_are_an_error_and_are_not_overwritten() {
+    let (_dir, mut s) = unlocked_session();
+    let (ext, request) = pair(&mut s);
+    s.store_mut()
+        .unwrap()
+        .set_sealed_meta("bridge.pairings", b"garbage")
+        .unwrap();
+    let err = s.approve_pairing(&request.client_id, 1_001).unwrap_err();
+    assert_eq!(
+        (err.kind, err.message.as_str()),
+        (ErrorKind::Other, "Browser pairings are damaged")
+    );
+    assert!(s.paired_browsers().is_err());
+    assert_eq!(
+        s.store()
+            .unwrap()
+            .sealed_meta("bridge.pairings")
+            .unwrap()
+            .unwrap()
+            .as_slice(),
+        b"garbage"
+    );
+    let sealed = crypto::seal(
+        &ext.key,
+        &ext.client_id,
+        Direction::Request,
+        br#"{"op":"ping"}"#,
+    );
+    assert_eq!(
+        s.bridge(
+            Inbound::Call {
+                client_id: ext.client_id.clone(),
+                sealed
+            },
+            1_001
+        )
+        .0,
+        Outbound::Error {
+            message: "Browser pairings are damaged".into()
+        }
+    );
+}
+
+#[test]
+fn has_totp_needs_a_secret_that_parses() {
+    let (_dir, mut s) = unlocked_session();
+    let p = personal(&mut s);
+    let mut item = save_login(&mut s, p, "GitHub", "ivan", "pw");
+    item.urls = vec!["https://github.com".into()];
+    item.fields.push(lockbox_core::model::Field {
+        id: "otp".into(),
+        label: "one-time password".into(),
+        value: FieldValue::Totp("not a secret!!".into()),
+        purpose: None,
+    });
+    // Imported items can carry secrets that save_item would reject.
+    s.store_mut().unwrap().save_item(&item).unwrap();
+    let ext = paired(&mut s);
+    let list = call(
+        &mut s,
+        &ext,
+        json!({"op": "list", "url": "https://github.com/"}),
+        1_000,
+    );
+    assert_eq!(list["items"][0]["hasTotp"], false);
+}
+
+#[test]
+fn listing_does_not_extend_auto_lock_but_filling_does() {
+    let (_dir, mut s) = unlocked_session();
+    let p = personal(&mut s);
+    let mut item = save_login(&mut s, p, "GitHub", "ivan", "pw");
+    item.urls = vec!["https://github.com".into()];
+    let item = s.save_item(item, 1_000).unwrap();
+    let ext = paired(&mut s);
+    call(
+        &mut s,
+        &ext,
+        json!({"op": "list", "url": "https://github.com/"}),
+        1_500,
+    );
+    assert!(s.tick(1_600), "a list is not activity");
+    s.unlock(PW, 1_600).unwrap();
+    let creds = call(
+        &mut s,
+        &ext,
+        json!({"op": "fill", "url": "https://github.com/", "itemId": item.id}),
+        1_700,
+    );
+    assert_eq!(creds["password"], "pw");
+    assert!(!s.tick(2_200), "a fill is activity");
+}
+
+#[test]
+fn an_https_login_is_refused_on_an_http_page() {
+    let (_dir, mut s) = unlocked_session();
+    let p = personal(&mut s);
+    let mut item = save_login(&mut s, p, "GitHub", "ivan", "pw");
+    item.urls = vec!["https://github.com".into()];
+    let item = s.save_item(item, 1_000).unwrap();
+    let ext = paired(&mut s);
+    let list = call(
+        &mut s,
+        &ext,
+        json!({"op": "list", "url": "http://github.com/"}),
+        1_000,
+    );
+    assert_eq!(list, json!({"items": []}));
+    let refused = call(
+        &mut s,
+        &ext,
+        json!({"op": "fill", "url": "http://github.com/", "itemId": item.id}),
+        1_000,
+    );
+    assert_eq!(refused["error"], "This login doesn't belong to this site");
+}
+
+#[test]
+fn a_trashed_login_is_neither_listed_nor_filled() {
+    let (_dir, mut s) = unlocked_session();
+    let p = personal(&mut s);
+    let mut item = save_login(&mut s, p, "GitHub", "ivan", "pw");
+    item.urls = vec!["https://github.com".into()];
+    let item = s.save_item(item, 1_000).unwrap();
+    let ext = paired(&mut s);
+    s.delete_item(item.id, 1_000).unwrap();
+    let list = call(
+        &mut s,
+        &ext,
+        json!({"op": "list", "url": "https://github.com/"}),
+        1_000,
+    );
+    assert_eq!(list, json!({"items": []}));
+    let refused = call(
+        &mut s,
+        &ext,
+        json!({"op": "fill", "url": "https://github.com/", "itemId": item.id}),
+        1_000,
+    );
+    assert!(refused["error"].is_string(), "{refused}");
+    assert!(refused.get("password").is_none());
 }

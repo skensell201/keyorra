@@ -151,7 +151,7 @@ impl Session {
     pub fn lock(&mut self) {
         self.store = None;
         self.pending_import = None;
-        self.pending = None;
+        self.drop_pending_pairing();
     }
 
     /// Records user activity for the auto-lock timer.
