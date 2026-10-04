@@ -10,8 +10,13 @@ pub enum Inbound {
     Show,
     #[serde(rename_all = "camelCase")]
     Pair {
-        client_pub: String,
+        commit: String,
         name: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    PairReveal {
+        client_id: String,
+        client_pub: String,
     },
     #[serde(rename_all = "camelCase")]
     PairStatus {
@@ -111,10 +116,17 @@ mod tests {
         assert_eq!(inbound(json!({"kind": "status"})), Inbound::Status);
         assert_eq!(inbound(json!({"kind": "show"})), Inbound::Show);
         assert_eq!(
-            inbound(json!({"kind": "pair", "clientPub": "AAA", "name": "Chrome"})),
+            inbound(json!({"kind": "pair", "commit": "AAA", "name": "Chrome"})),
             Inbound::Pair {
-                client_pub: "AAA".into(),
+                commit: "AAA".into(),
                 name: "Chrome".into()
+            }
+        );
+        assert_eq!(
+            inbound(json!({"kind": "pairReveal", "clientId": "c1", "clientPub": "BBB"})),
+            Inbound::PairReveal {
+                client_id: "c1".into(),
+                client_pub: "BBB".into()
             }
         );
         assert_eq!(

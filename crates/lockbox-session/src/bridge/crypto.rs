@@ -209,6 +209,47 @@ mod tests {
             boxed,
             "AwMDAwMDAwMDAwMDAwMDAwMDAwMDAwMD1AE3nLoQfQz8s+kYte/Lb0sVrtQoMnmqsIE17w4="
         );
+        assert_eq!(nonce_of(&boxed), Some([3; 24]));
+
+        assert_eq!(
+            hex(&commitment(&client.public)),
+            "0508377f5f81fe96b49ca9716290979eb78f4998351ea5839718bcb263fd3f72"
+        );
+        let reply = seal_with_nonce(
+            &on_server.key,
+            CLIENT_ID,
+            Direction::Response {
+                request_nonce: [3; 24],
+            },
+            br#"{"pong":true}"#,
+            [4; 24],
+        );
+        assert_eq!(
+            reply,
+            "BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEygTHFmx53/OhKi8d/MurWGQxk4F6NCh6C7zMkk8="
+        );
+    }
+
+    #[test]
+    fn replies_are_bound_to_their_request() {
+        let key = [7u8; 32];
+        let a = Direction::Response {
+            request_nonce: [1; 24],
+        };
+        let b = Direction::Response {
+            request_nonce: [2; 24],
+        };
+        let boxed = seal(&key, CLIENT_ID, a, b"x");
+        assert!(open(&key, CLIENT_ID, a, &boxed).is_some());
+        assert!(open(&key, CLIENT_ID, b, &boxed).is_none());
+        assert_eq!(nonce_of("AAAA"), None);
+        assert_eq!(nonce_of("not base64!"), None);
+    }
+
+    #[test]
+    fn rejects_non_contributory_peer_keys() {
+        let own = KeyPair::from_secret([1; 32]);
+        assert!(derive(&own, &[0; 32], &own.public, &own.public).is_none());
     }
 
     #[test]
