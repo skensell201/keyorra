@@ -65,3 +65,14 @@ test("save, generate, cards and identities are refused from extension pages and 
     expect(run(msg, { id: "other", url: "chrome-extension://other/x.html" }).ok).toBe(false);
   }
 });
+
+const pending = { type: "pendingSave", username: "u", password: "p", itemId: null, status: "new" };
+
+test("pending saves are page-only and use the browser's URL", () => {
+  for (const msg of [pending, { type: "takePendingSave" }]) {
+    expect(run({ ...msg, url: "https://evil.com" }, page)).toEqual({ ok: true, url: PAGE_URL });
+    expect(run(msg, ext).ok).toBe(false);
+    expect(run(msg, { id: ID, url: "file:///x" }).ok).toBe(false);
+    expect(run(msg, {}).ok).toBe(false);
+  }
+});

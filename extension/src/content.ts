@@ -1,7 +1,10 @@
+import { watchSubmissions, type Submission } from "./capture";
 import { findLoginFields } from "./detect";
 import { fillLogin } from "./fill";
 import { InlineMenu } from "./inline";
-import { ask, type Candidate, type Credentials, type State, type ToContent } from "./messages";
+import { ask, type Candidate, type Credentials, type LookupStatus, type State, type ToContent } from "./messages";
+import { SaveBar } from "./savebar";
+import type { PendingSave } from "./pending";
 
 async function list(): Promise<{ state: State; items: Candidate[] }> {
   const r = await ask<Candidate[]>({ type: "list" });
@@ -25,6 +28,44 @@ const menu = new InlineMenu({
     await ask({ type: "show" });
   },
 });
+
+// ---- offer to save or update a login after sign-in ----
+
+let offer: { username: string; password: string; itemId: string | null } | null = null;
+
+const saveBar = new SaveBar({
+  save: async () => {
+    if (!offer) return;
+    const r = await ask<string>({ type: "save", username: offer.username, password: offer.password, itemId: offer.itemId });
+    if (!r.ok) throw new Error(r.message);
+    offer = null;
+  },
+  dismiss: () => {
+    offer = null;
+  },
+});
+
+function showOffer(o: PendingSave): void {
+  offer = { username: o.username, password: o.password, itemId: o.itemId };
+  saveBar.show({ username: o.username, status: o.status });
+}
+
+async function onSubmission(s: Submission): Promise<void> {
+  const r = await ask<{ status: LookupStatus; itemId: string | null }>({ type: "lookup", username: s.username, password: s.password });
+  if (!r.ok || r.value.status === "same") return;
+  const o: PendingSave = { ...s, itemId: r.value.itemId, status: r.value.status };
+  // The page may navigate right away: show the bar now and let the background carry it over.
+  showOffer(o);
+  void ask({ type: "pendingSave", ...o });
+}
+
+watchSubmissions(document, (s) => void onSubmission(s).catch(() => {}));
+
+if (window === window.top) {
+  void ask<PendingSave | null>({ type: "takePendingSave" })
+    .then((r) => r.ok && r.value && showOffer(r.value))
+    .catch(() => {});
+}
 
 function scan(): void {
   const f = findLoginFields(document);

@@ -32,6 +32,8 @@ export function authorize(msg: ToBackground, sender: Sender, extensionId: string
     case "fillCard":
     case "identities":
     case "fillIdentity":
+    case "pendingSave":
+    case "takePendingSave":
       return page ? { ok: true, url: sender.url! } : refuse();
     default:
       return { ok: false, message: "Unknown request" };

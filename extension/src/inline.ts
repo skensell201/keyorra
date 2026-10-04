@@ -1,5 +1,6 @@
 // The Lockbox icon inside focused login fields and its dropdown, isolated in a shadow root.
 import type { Candidate, State } from "./client";
+import { defaultVisible, VisibilityTracker } from "./visibility";
 
 export interface MenuActions {
   list(): Promise<{ state: State; items: Candidate[] }>;
@@ -43,45 +44,6 @@ export interface MenuOptions {
   settleMs?: number;
 }
 
-/** True for filters that hide or wash out the page; invert() (Dark Reader) and the like are fine. */
-function hidingFilter(filter: string): boolean {
-  if (!filter || filter === "none") return false;
-  if (/opacity\(/.test(filter)) return true;
-  for (const m of filter.matchAll(/(brightness|contrast)\(\s*([\d.]+)(%?)/g)) {
-    const v = parseFloat(m[2]) / (m[3] ? 100 : 1);
-    if (v < 0.5) return true;
-  }
-  return false;
-}
-
-function plain(v: string): boolean {
-  return !v || v === "none";
-}
-
-/** A click only counts if the user could see the menu: not hidden, faded, masked, clipped, filtered or covered. */
-function defaultVisible(_e: MouseEvent, host: HTMLElement, target: HTMLElement): boolean {
-  if (host.hasAttribute("tabindex")) return false;
-  if (host.checkVisibility?.({ opacityProperty: true, visibilityProperty: true } as any) === false) return false;
-  const hs = getComputedStyle(host);
-  const ds = getComputedStyle(document.documentElement);
-  for (const cs of [hs, ds]) {
-    if (parseFloat(cs.opacity) < 0.9) return false;
-    if (hidingFilter(cs.filter)) return false;
-    if (!plain(cs.getPropertyValue("mask-image")) || !plain(cs.getPropertyValue("-webkit-mask-image"))) return false;
-    if (!plain(cs.getPropertyValue("clip-path"))) return false;
-    const blend = cs.getPropertyValue("mix-blend-mode");
-    if (blend && blend !== "normal") return false;
-  }
-  if (!plain(hs.transform)) return false;
-  // Hit-test the centre of the activated button: whatever is on top there must be our host.
-  const r = target.getBoundingClientRect();
-  if (r.width > 0 && r.height > 0 && typeof document.elementFromPoint === "function") {
-    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
-    if (hit !== host) return false;
-  }
-  return true;
-}
-
 export class InlineMenu {
   private host: HTMLElement;
   private root: ShadowRoot;
@@ -92,8 +54,7 @@ export class InlineMenu {
   private watched = new WeakSet<HTMLInputElement>();
   private trusted: (e: Event) => boolean;
   private visible: (e: MouseEvent, host: HTMLElement, target: HTMLElement) => boolean;
-  private seen = new Map<Element, boolean | undefined>();
-  private observer: IntersectionObserver | null = null;
+  private tracker = new VisibilityTracker();
   private settleMs: number;
 
   constructor(
@@ -135,26 +96,17 @@ export class InlineMenu {
     });
   }
 
-  /** Chromium can tell whether anything covers an element (trackVisibility); elsewhere this is a no-op.
-   * Keep the menu free of transforms, filters and backdrop-filter: they make Chromium report it invisible. */
   private observe(el: Element): void {
-    if (typeof IntersectionObserver !== "function") return;
-    this.observer ??= new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) this.seen.set(entry.target, "isVisible" in entry ? (entry as any).isVisible === true : undefined);
-      },
-      { trackVisibility: true, delay: 100, threshold: [1] } as IntersectionObserverInit,
-    );
-    this.observer.observe(el);
+    this.tracker.observe(el);
   }
 
   private allowed(e: MouseEvent): boolean {
     const target = e.currentTarget as HTMLElement;
     if (!this.trusted(e) || !this.visible(e, this.host, target)) return false;
-    if (!this.observer) return true;
+    if (!this.tracker.active) return true;
     // The icon and the panel (which holds the items) must both have been reported fully visible, if the browser says.
     const watched = target === this.icon ? [target] : [target, this.panel];
-    return watched.every((el) => !el || this.seen.get(el) !== false);
+    return watched.every((el) => this.tracker.ok(el));
   }
 
   /** In a modal <dialog> only the dialog's subtree is interactive, so the host has to live there. */
@@ -229,8 +181,7 @@ export class InlineMenu {
 
   close(): void {
     if (this.panel) {
-      this.observer?.unobserve(this.panel);
-      this.seen.delete(this.panel);
+      this.tracker.unobserve(this.panel);
     }
     this.panel?.remove();
     this.panel = null;

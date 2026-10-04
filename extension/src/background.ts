@@ -1,6 +1,7 @@
 import { authorize } from "./access";
 import { idbDelete, idbGet, idbPut } from "./idb";
 import { Client, LockedError, NoAppError, UnpairedError, type Pairing } from "./client";
+import { PendingSaves } from "./pending";
 import type { ErrorKind, Result, ToBackground, ToContent } from "./messages";
 
 const HOST = "app.lockbox.bridge";
@@ -13,6 +14,10 @@ const client = new Client((msg) => chrome.runtime.sendNativeMessage(HOST, msg), 
   getPending: () => idbGet<Pairing>("pending"),
   setPending: (p) => (p ? idbPut("pending", p) : idbDelete("pending")).then(() => {}),
 });
+
+// Logins awaiting a save across a page navigation: memory only, never page storage.
+const pending = new PendingSaves();
+chrome.tabs.onRemoved.addListener((tabId) => pending.clear(tabId));
 
 function browserName(): string {
   const ua = navigator.userAgent;
@@ -63,6 +68,14 @@ async function handle(msg: ToBackground, sender: chrome.runtime.MessageSender): 
       return client.identities(decision.url);
     case "fillIdentity":
       return client.fillIdentity(decision.url, msg.itemId);
+    case "pendingSave": {
+      if (sender.tab?.id === undefined) throw new Error("Not allowed from here");
+      const { username, password, itemId, status } = msg;
+      pending.set(sender.tab.id, { username, password, itemId, status }, decision.url);
+      return null;
+    }
+    case "takePendingSave":
+      return sender.tab?.id === undefined ? null : pending.take(sender.tab.id, decision.url);
   }
 }
 

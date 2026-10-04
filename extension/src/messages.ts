@@ -15,7 +15,9 @@ export type ToBackground =
   | { type: "cards" }
   | { type: "fillCard"; itemId: string }
   | { type: "identities" }
-  | { type: "fillIdentity"; itemId: string };
+  | { type: "fillIdentity"; itemId: string }
+  | { type: "pendingSave"; username: string; password: string; itemId: string | null; status: Exclude<LookupStatus, "same"> }
+  | { type: "takePendingSave" };
 
 /** Requests from the popup/shortcut to the content script in the top frame. */
 export type ToContent = { type: "fill-item"; itemId: string } | { type: "fill-best" };
