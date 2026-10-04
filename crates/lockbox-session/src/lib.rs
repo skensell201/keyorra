@@ -1,6 +1,7 @@
 //! Desktop-app logic over `lockbox-core`, free of any UI framework so it can be unit-tested.
 
 pub mod autolock;
+pub mod bridge;
 pub mod clipboard;
 pub mod dto;
 pub mod error;
