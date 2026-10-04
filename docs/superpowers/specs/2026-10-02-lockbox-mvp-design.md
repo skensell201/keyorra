@@ -247,3 +247,6 @@ after a click or the shortcut.
   24-byte nonce of the request box`, so a recorded reply can't answer another request.
 - *Scheme rule* (user decision): an item saved with `https://` is not offered on an `http:`
   page. Exempt: IP addresses, `localhost`/`*.localhost`, and saved URLs without a scheme.
+- *Pairing attempt cap*: five pairings that end without approval (replaced, expired, failed
+  check, denied) block new pairing requests for 10 minutes, so the app side can't be
+  re-rolled until the codes collide.

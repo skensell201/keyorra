@@ -2980,7 +2980,7 @@ Implemented first as **Task 5b** (Rust), then Tasks 6, 9, 10 follow the revised 
 | What | Value |
 |---|---|
 | commit of the client public (secret 32 × `0x01`) | `0508377f5f81fe96b49ca9716290979eb78f4998351ea5839718bcb263fd3f72` |
-| reply box of `{"pong":true}`, key from the table, client id `11111111-1111-4111-8111-111111111111`, request nonce 24 × `0x03`, reply nonce 24 × `0x04` | `BAQEBAQEBAQEBAQEBAQEBAQEBAQEygTHFmx53/OhKi8d/MurWGQxk4F6NCh6C7zMkk8=` |
+| reply box of `{"pong":true}`, key from the table, client id `11111111-1111-4111-8111-111111111111`, request nonce 24 × `0x03`, reply nonce 24 × `0x04` | `BAQEBAQEBAQEBAQEBAQEBAQEBAQEBAQEygTHFmx53/OhKi8d/MurWGQxk4F6NCh6C7zMkk8=` |
 
 Reply AAD = UTF-8 `"lockbox-bridge-v1/<clientId>/res/"` followed by the **raw 24 bytes** of the request box's nonce. Request AAD is unchanged (`…/<clientId>/req`).
 
@@ -3003,6 +3003,7 @@ Reply AAD = UTF-8 `"lockbox-bridge-v1/<clientId>/res/"` followed by the **raw 24
 ### Revised Task 6 (Session)
 
 - `PendingPairing` gains `commit: [u8; 32]`, `server: KeyPair` (kept until reveal), `code: Option<String>`, and state `AwaitingReveal` before `Waiting`. Only one pending pairing exists at a time (a new `pair` replaces any other).
+- **Attempt cap** (stops a relay from re-rolling the app side until the codes collide): `Session` keeps `pair_failures: u32` and `pair_blocked_until: u64`. Every pairing that ends without approval counts as a failure: replaced by a new `pair`, expired, failed reveal, denied. After `MAX_PAIR_FAILURES = 5` failures, `pair` answers `Error { "Too many pairing attempts. Open Lockbox and try again in a few minutes." }` with event `Show` until `PAIR_COOLDOWN_SECS = 600` have passed (then the counter resets). An approval resets the counter. Test: five `pair` calls that replace each other plus one more → the sixth (or the one after five failures) is refused; after the cool-down `pair` works again; an approval resets the count.
 - `Inbound::Pair { commit, name }`: locked → `(Locked, Some(Show))`; bad base64 → `Error`; else create the pending entry with a fresh server key pair, reply `PairPending { client_id, server_pub }`, **no event**.
 - `Inbound::PairReveal { client_id, client_pub }`: find the `AwaitingReveal` entry; `commitment(client_pub) != commit` → drop the entry, `Error { "Pairing check failed" }`; `derive` returns `None` → same; else store key + code, state `Waiting`, reply `PairPending { client_id, server_pub }`, event `PairRequest { client_id, name, code }`.
 - `pairing_status` for an `AwaitingReveal` entry answers `PairPending` too.
