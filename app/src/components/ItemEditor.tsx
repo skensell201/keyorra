@@ -1,6 +1,6 @@
 import { useState, type FormEvent } from "react";
-import { api, errorMessage, type FieldValue, type Item } from "../api";
-import { KIND_LABEL } from "../format";
+import { api, errorMessage, type Field, type FieldValue, type Item } from "../api";
+import { fieldText, KIND_LABEL } from "../format";
 import { Generator } from "./Generator";
 
 interface Props {
@@ -8,6 +8,21 @@ interface Props {
   isNew: boolean;
   onSave: (saved: Item) => void;
   onCancel: () => void;
+}
+
+type EditableType = "text" | "concealed" | "totp" | "url" | "email" | "phone";
+const EDITABLE_TYPES: EditableType[] = ["text", "concealed", "totp", "url", "email", "phone"];
+const TYPE_LABEL: Record<EditableType, string> = {
+  text: "Text",
+  concealed: "Hidden",
+  totp: "One-time password",
+  url: "URL",
+  email: "Email",
+  phone: "Phone",
+};
+
+function newFieldId(prefix: string): string {
+  return `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
 /** Edits the common fields; other fields and sections are passed through unchanged. */
@@ -30,6 +45,22 @@ export function ItemEditor({ item, isNew, onSave, onCancel }: Props) {
     setDraft((d) => ({
       ...d,
       fields: d.fields.map((f, i) => (i === index ? { ...f, value: { type: f.value.type, value } as FieldValue } : f)),
+    }));
+  const custom = draft.fields.map((field, index) => ({ field, index })).filter(({ field }) => !field.purpose);
+  const updateField = (index: number, patch: Partial<Field>) =>
+    setDraft((d) => ({ ...d, fields: d.fields.map((f, i) => (i === index ? { ...f, ...patch } : f)) }));
+  const removeField = (index: number) => setDraft((d) => ({ ...d, fields: d.fields.filter((_, i) => i !== index) }));
+  const addField = (type: "text" | "totp") =>
+    setDraft((d) => ({
+      ...d,
+      fields: [
+        ...d.fields,
+        {
+          id: newFieldId(type === "totp" ? "otp" : "field"),
+          label: type === "totp" ? "one-time password" : "",
+          value: { type, value: "" },
+        },
+      ],
     }));
 
   async function submit(e: FormEvent) {
@@ -116,6 +147,67 @@ export function ItemEditor({ item, isNew, onSave, onCancel }: Props) {
           <textarea rows={2} value={urls} onChange={(e) => setUrls(e.target.value)} />
         </label>
       )}
+      {custom.length > 0 && (
+        <fieldset className="fields">
+          <legend>Fields</legend>
+          {custom.map(({ field, index }, n) => {
+            const name = field.label || `field ${n + 1}`;
+            const editable = field.value.type !== "date" && field.value.type !== "month_year";
+            return (
+              <div className="field-edit" key={field.id}>
+                <input
+                  aria-label={`Label of ${name}`}
+                  placeholder="Label"
+                  value={field.label}
+                  onChange={(e) => updateField(index, { label: e.target.value })}
+                />
+                {editable ? (
+                  <input
+                    aria-label={`Value of ${name}`}
+                    className={field.value.type === "text" ? undefined : "mono"}
+                    type={field.value.type === "concealed" ? "password" : "text"}
+                    placeholder={field.value.type === "totp" ? "otpauth://… or secret key" : ""}
+                    value={text(index)}
+                    onChange={(e) => setField(index, e.target.value)}
+                  />
+                ) : (
+                  <span className="muted">{fieldText(field.value)}</span>
+                )}
+                {editable ? (
+                  <select
+                    aria-label={`Type of ${name}`}
+                    value={field.value.type}
+                    onChange={(e) =>
+                      updateField(index, {
+                        value: { type: e.target.value as EditableType, value: text(index) },
+                      })
+                    }
+                  >
+                    {EDITABLE_TYPES.map((t) => (
+                      <option key={t} value={t}>
+                        {TYPE_LABEL[t]}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <span />
+                )}
+                <button type="button" aria-label={`Remove ${name}`} onClick={() => removeField(index)}>
+                  Remove
+                </button>
+              </div>
+            );
+          })}
+        </fieldset>
+      )}
+      <div className="actions">
+        <button type="button" onClick={() => addField("text")}>
+          Add field
+        </button>
+        <button type="button" onClick={() => addField("totp")}>
+          Add one-time password
+        </button>
+      </div>
       <label>
         Notes
         <textarea rows={4} value={draft.notes} onChange={(e) => setDraft({ ...draft, notes: e.target.value })} />

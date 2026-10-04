@@ -1,9 +1,6 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
-/** Keep in sync with ClipboardGuard::DEFAULT_CLEAR_SECS (lockbox-session). */
-export const CLIPBOARD_CLEAR_SECS = 90;
-
 export type Status = "new" | "locked" | "unlocked";
 
 export type ErrorKind = "wrongPassword" | "locked" | "throttled" | "notFound" | "invalid" | "other";
@@ -104,6 +101,11 @@ export interface GeneratorRequest {
   includeNumber: boolean;
 }
 
+export interface Settings {
+  autoLockMinutes: number;
+  clipboardSeconds: number;
+}
+
 export interface ImportPreview {
   vaults: { name: string; items: number }[];
   skipped: { title: string; reason: string }[];
@@ -133,5 +135,11 @@ export const api = {
   generate: (request: GeneratorRequest) => invoke<string>("generate", { request }),
   importPreview: (path: string) => invoke<ImportPreview>("import_preview", { path }),
   importApply: () => invoke<ImportResult>("import_apply"),
+  deletedItems: () => invoke<ItemSummary[]>("deleted_items"),
+  restoreItem: (id: string) => invoke<void>("restore_item", { id }),
+  settings: () => invoke<Settings>("settings"),
+  updateSettings: (settings: Settings) => invoke<Settings>("update_settings", { settings }),
+  changePassword: (current: string, newPassword: string) =>
+    invoke<void>("change_password", { current, newPassword }),
   onLocked: (callback: () => void): Promise<UnlistenFn> => listen("locked", () => callback()),
 };

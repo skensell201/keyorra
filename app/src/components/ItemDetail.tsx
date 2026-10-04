@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, CLIPBOARD_CLEAR_SECS, errorMessage, type Field, type Item, type TotpCode } from "../api";
+import { api, errorMessage, type Field, type Item, type TotpCode } from "../api";
 import { fieldText, formatCode, KIND_LABEL } from "../format";
 
 interface Props {
@@ -139,7 +139,7 @@ export function ItemDetail({ itemId, onEdit, onDeleted }: Props) {
       )}
       {copied && (
         <div className="toast" role="status">
-          Copied. The clipboard clears in {CLIPBOARD_CLEAR_SECS} seconds.
+          Copied. The clipboard is cleared automatically.
         </div>
       )}
     </article>

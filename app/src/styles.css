@@ -83,3 +83,8 @@ h1, h2, h3 { margin: 0; font-weight: 600; }
 .modal-backdrop { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.55); display: grid; place-items: center; z-index: 10; }
 .modal { width: 520px; max-height: 80vh; overflow-y: auto; display: flex; flex-direction: column; gap: 14px; }
 .modal ul { margin: 0; padding-left: 18px; }
+
+fieldset.fields { border: 1px solid var(--border); border-radius: var(--radius); padding: 12px; margin: 0; display: flex; flex-direction: column; gap: 8px; }
+fieldset.fields legend { color: var(--muted); font-size: 12px; padding: 0 6px; }
+.field-edit { display: grid; grid-template-columns: 170px 1fr 150px auto; gap: 8px; align-items: center; }
+select { width: auto; }

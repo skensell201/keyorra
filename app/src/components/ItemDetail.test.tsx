@@ -90,7 +90,7 @@ test("the copied toast disappears after a few seconds", async () => {
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     setup();
     await user.click(await screen.findByRole("button", { name: "Copy username" }));
-    expect(screen.getByRole("status")).toHaveTextContent("90 seconds");
+    expect(screen.getByRole("status")).toHaveTextContent("cleared automatically");
     await act(async () => {
       await vi.advanceTimersByTimeAsync(3100);
     });

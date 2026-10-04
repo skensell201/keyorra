@@ -67,3 +67,47 @@ test("cancel", async () => {
   await user.click(screen.getByRole("button", { name: "Cancel" }));
   expect(onCancel).toHaveBeenCalled();
 });
+
+test("adds a one-time password secret", async () => {
+  const user = userEvent.setup();
+  render(<ItemEditor item={loginItem({ sections: [] })} isNew={false} onSave={vi.fn()} onCancel={vi.fn()} />);
+  await user.click(screen.getByRole("button", { name: "Add one-time password" }));
+  await user.type(screen.getByLabelText("Value of one-time password"), "JBSWY3DPEHPK3PXP");
+  await user.click(screen.getByRole("button", { name: "Save" }));
+  const otp = saved().fields.find((f) => f.value.type === "totp");
+  expect(otp).toMatchObject({ label: "one-time password", value: { type: "totp", value: "JBSWY3DPEHPK3PXP" } });
+  expect(otp!.id).toMatch(/^otp-/);
+});
+
+test("edits, retypes, relabels and removes template fields", async () => {
+  const user = userEvent.setup();
+  const card = loginItem({
+    kind: "credit_card",
+    sections: [],
+    fields: [
+      { id: "cardholder", label: "cardholder name", value: { type: "text", value: "" } },
+      { id: "number", label: "number", value: { type: "concealed", value: "" } },
+      { id: "cvv", label: "verification number", value: { type: "concealed", value: "" } },
+    ],
+  });
+  render(<ItemEditor item={card} isNew onSave={vi.fn()} onCancel={vi.fn()} />);
+  await user.type(screen.getByLabelText("Value of number"), "4111111111111111");
+  await user.selectOptions(screen.getByLabelText("Type of cardholder name"), "concealed");
+  await user.clear(screen.getByLabelText("Label of cardholder name"));
+  await user.type(screen.getByLabelText("Label of field 1"), "owner");
+  await user.click(screen.getByRole("button", { name: "Remove verification number" }));
+  await user.click(screen.getByRole("button", { name: "Save" }));
+  expect(saved().fields).toEqual([
+    { id: "cardholder", label: "owner", value: { type: "concealed", value: "" } },
+    { id: "number", label: "number", value: { type: "concealed", value: "4111111111111111" } },
+  ]);
+});
+
+test("adds a plain field", async () => {
+  const user = userEvent.setup();
+  render(<ItemEditor item={loginItem({ sections: [] })} isNew={false} onSave={vi.fn()} onCancel={vi.fn()} />);
+  await user.click(screen.getByRole("button", { name: "Add field" }));
+  await user.type(screen.getByLabelText("Value of field 1"), "PIN 1234");
+  await user.click(screen.getByRole("button", { name: "Save" }));
+  expect(saved().fields[2]).toMatchObject({ label: "", value: { type: "text", value: "PIN 1234" } });
+});
