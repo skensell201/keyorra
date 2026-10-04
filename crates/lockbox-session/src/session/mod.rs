@@ -324,10 +324,18 @@ impl Session {
                 if known.contains(raw) {
                     continue;
                 }
-                Totp::parse(raw).map_err(|e| {
+                Totp::parse(raw).map_err(|_| {
+                    let name = if field.label.is_empty() {
+                        "one-time password"
+                    } else {
+                        &field.label
+                    };
                     CmdError::new(
                         ErrorKind::Invalid,
-                        format!("One-time password \"{}\": {e}", field.label),
+                        format!(
+                            "\"{name}\" isn't a valid one-time password: paste the secret key \
+                             or the otpauth:// link from the site's 2FA setup"
+                        ),
                     )
                 })?;
             }
