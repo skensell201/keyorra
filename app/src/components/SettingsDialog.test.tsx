@@ -104,3 +104,13 @@ test("status regions stay mounted", async () => {
   expect(screen.getByRole("status", { name: "Settings saved" })).toBeEmptyDOMElement();
   expect(screen.getByRole("status", { name: "Password change" })).toBeEmptyDOMElement();
 });
+
+test("switches the theme", async () => {
+  const user = userEvent.setup();
+  render(<SettingsDialog onClose={vi.fn()} />);
+  await user.click(screen.getByRole("button", { name: "Index" }));
+  expect(document.documentElement.dataset.theme).toBe("index");
+  expect(screen.getByRole("button", { name: "Index" })).toHaveAttribute("aria-pressed", "true");
+  await user.click(screen.getByRole("button", { name: "Doppler" }));
+  expect(document.documentElement.dataset.theme).toBe("doppler");
+});

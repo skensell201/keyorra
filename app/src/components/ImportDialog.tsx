@@ -52,23 +52,21 @@ export function ImportDialog({ onClose, onImported }: { onClose: () => void; onI
   return (
     <div className="modal-backdrop">
       <div className="card modal" role="dialog" aria-modal="true" aria-labelledby="import-title">
-        <h2 id="import-title">Import from 1Password</h2>
+        <header className="modal-header">
+          <h2 id="import-title">Import from 1Password</h2>
+          <button className="icon" aria-label="Close" onClick={onClose} disabled={busy}>
+            ✕
+          </button>
+        </header>
         {step.kind === "pick" && (
-          <>
-            <p className="muted">
-              In 1Password choose File → Export, pick your account and the <b>1PUX</b> format (it keeps vaults,
-              attachments and one-time codes). CSV works too but has less.
-            </p>
-            <button className="primary" onClick={choose} disabled={busy}>
-              Choose export file…
-            </button>
-          </>
+          <p className="muted">
+            In 1Password choose File → Export, pick your account and the <b>1PUX</b> format (it keeps vaults,
+            attachments and one-time codes). CSV works too but has less.
+          </p>
         )}
         {step.kind === "preview" && (
           <>
-            <p>
-              {step.preview.totalItems} items will be added as new vaults:
-            </p>
+            <p>{step.preview.totalItems} items will be added as new vaults:</p>
             <ul>
               {step.preview.vaults.map((v) => (
                 <li key={v.name}>
@@ -88,20 +86,15 @@ export function ImportDialog({ onClose, onImported }: { onClose: () => void; onI
                 </ul>
               </details>
             )}
-            <button className="primary" onClick={apply} disabled={busy}>
-              Import {step.preview.totalItems} items
-            </button>
           </>
         )}
         {step.kind === "done" && (
           <>
             <p>
-              Imported {plural(step.result.items, "item")} into {plural(step.result.vaults, "vault")} ({plural(step.result.attachments, "attachment")}).
+              Imported {plural(step.result.items, "item")} into {plural(step.result.vaults, "vault")} (
+              {plural(step.result.attachments, "attachment")}).
             </p>
             <p className="muted">Delete the export file now: it is not encrypted.</p>
-            <button className="primary" onClick={onClose}>
-              Done
-            </button>
           </>
         )}
         {error && (
@@ -109,11 +102,28 @@ export function ImportDialog({ onClose, onImported }: { onClose: () => void; onI
             {error}
           </p>
         )}
-        {step.kind !== "done" && (
-          <button onClick={onClose} disabled={busy}>
-            Cancel
-          </button>
-        )}
+        <div className="modal-actions">
+          {step.kind !== "done" && (
+            <button onClick={onClose} disabled={busy}>
+              Cancel
+            </button>
+          )}
+          {step.kind === "pick" && (
+            <button className="primary" onClick={choose} disabled={busy}>
+              Choose export file…
+            </button>
+          )}
+          {step.kind === "preview" && (
+            <button className="primary" onClick={apply} disabled={busy}>
+              Import {step.preview.totalItems} items
+            </button>
+          )}
+          {step.kind === "done" && (
+            <button className="primary" onClick={onClose}>
+              Done
+            </button>
+          )}
+        </div>
       </div>
     </div>
   );
