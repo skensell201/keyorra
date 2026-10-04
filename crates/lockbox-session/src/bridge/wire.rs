@@ -9,10 +9,15 @@ pub const MAX_FRAME: u32 = 1024 * 1024;
 /// `Ok(None)` at a clean end of stream.
 pub fn read_frame(r: &mut impl Read) -> io::Result<Option<Vec<u8>>> {
     let mut len = [0u8; 4];
-    match r.read_exact(&mut len) {
-        Ok(()) => {}
-        Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(None),
-        Err(e) => return Err(e),
+    let mut got = 0;
+    while got < len.len() {
+        match r.read(&mut len[got..]) {
+            Ok(0) if got == 0 => return Ok(None),
+            Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
+            Ok(n) => got += n,
+            Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
     }
     let n = u32::from_le_bytes(len);
     if n > MAX_FRAME {
@@ -70,6 +75,12 @@ mod tests {
         short.extend_from_slice(b"abc");
         assert!(read_frame(&mut Cursor::new(short)).is_err());
         assert!(write_frame(&mut Vec::new(), &vec![0u8; MAX_FRAME as usize + 1]).is_err());
+    }
+
+    #[test]
+    fn a_truncated_length_prefix_is_an_error() {
+        assert!(read_frame(&mut Cursor::new(vec![1u8, 0])).is_err());
+        assert_eq!(read_frame(&mut Cursor::new(Vec::new())).unwrap(), None);
     }
 
     #[test]

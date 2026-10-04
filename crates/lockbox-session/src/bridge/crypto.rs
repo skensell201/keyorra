@@ -37,17 +37,18 @@ pub struct Derived {
     pub code: String,
 }
 
+/// `None` when the peer's public key is a low-order point (no contribution to the secret).
 pub fn derive(
     own: &KeyPair,
     peer_public: &[u8; 32],
     client_public: &[u8; 32],
     server_public: &[u8; 32],
-) -> Derived {
-    let shared = Zeroizing::new(
-        own.secret
-            .diffie_hellman(&PublicKey::from(*peer_public))
-            .to_bytes(),
-    );
+) -> Option<Derived> {
+    let secret = own.secret.diffie_hellman(&PublicKey::from(*peer_public));
+    if !secret.was_contributory() {
+        return None;
+    }
+    let shared = Zeroizing::new(secret.to_bytes());
     let hash = |label: &str| {
         let mut h = Sha256::new();
         h.update(format!("{PROTOCOL}/{label}").as_bytes());
@@ -59,24 +60,48 @@ pub fn derive(
     let key: [u8; 32] = hash("key").into();
     let c = hash("code");
     let n = u32::from_be_bytes([c[0], c[1], c[2], c[3]]) % 1_000_000;
-    Derived {
+    Some(Derived {
         key: Zeroizing::new(key),
         code: format!("{n:06}"),
-    }
+    })
+}
+
+/// What the client sends before revealing its public key.
+pub fn commitment(client_public: &[u8; 32]) -> [u8; 32] {
+    let mut h = Sha256::new();
+    h.update(format!("{PROTOCOL}/commit").as_bytes());
+    h.update(client_public);
+    h.finalize().into()
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Direction {
     Request,
-    Response,
+    /// A reply is bound to the nonce of the request box it answers.
+    Response {
+        request_nonce: [u8; NONCE_LEN],
+    },
 }
 
 fn aad(client_id: &str, direction: Direction) -> Vec<u8> {
-    let dir = match direction {
-        Direction::Request => "req",
-        Direction::Response => "res",
-    };
-    format!("{PROTOCOL}/{client_id}/{dir}").into_bytes()
+    let mut aad = format!("{PROTOCOL}/{client_id}/").into_bytes();
+    match direction {
+        Direction::Request => aad.extend_from_slice(b"req"),
+        Direction::Response { request_nonce } => {
+            aad.extend_from_slice(b"res/");
+            aad.extend_from_slice(&request_nonce);
+        }
+    }
+    aad
+}
+
+/// The nonce of a well-formed box.
+pub fn nonce_of(boxed: &str) -> Option<[u8; NONCE_LEN]> {
+    let raw = BASE64.decode(boxed.as_bytes()).ok()?;
+    if raw.len() < NONCE_LEN + TAG_LEN {
+        return None;
+    }
+    raw[..NONCE_LEN].try_into().ok()
 }
 
 /// `base64(nonce ‖ XChaCha20-Poly1305(key, nonce, aad, plaintext))`.
@@ -161,8 +186,8 @@ mod tests {
             hex(&server.public),
             "ce8d3ad1ccb633ec7b70c17814a5c76ecd029685050d344745ba05870e587d59"
         );
-        let on_server = derive(&server, &client.public, &client.public, &server.public);
-        let on_client = derive(&client, &server.public, &client.public, &server.public);
+        let on_server = derive(&server, &client.public, &client.public, &server.public).unwrap();
+        let on_client = derive(&client, &server.public, &client.public, &server.public).unwrap();
         assert_eq!(
             hex(&*on_server.key),
             "a178ba3480042df492c34be53f4b5698d8225ccb1315b67df195bf5842f451ab"
@@ -189,18 +214,72 @@ mod tests {
     #[test]
     fn boxes_are_bound_to_key_client_and_direction() {
         let key = [7u8; 32];
-        let boxed = seal(&key, CLIENT_ID, Direction::Response, b"hello");
+        let boxed = seal(
+            &key,
+            CLIENT_ID,
+            Direction::Response {
+                request_nonce: [9; 24],
+            },
+            b"hello",
+        );
         assert_eq!(
-            &**open(&key, CLIENT_ID, Direction::Response, &boxed).unwrap(),
+            &**open(
+                &key,
+                CLIENT_ID,
+                Direction::Response {
+                    request_nonce: [9; 24]
+                },
+                &boxed
+            )
+            .unwrap(),
             b"hello"
         );
         assert!(open(&key, CLIENT_ID, Direction::Request, &boxed).is_none());
-        assert!(open(&key, "other", Direction::Response, &boxed).is_none());
-        assert!(open(&[8u8; 32], CLIENT_ID, Direction::Response, &boxed).is_none());
-        assert!(open(&key, CLIENT_ID, Direction::Response, "AAAA").is_none());
-        assert!(open(&key, CLIENT_ID, Direction::Response, "not base64!").is_none());
+        assert!(open(
+            &key,
+            "other",
+            Direction::Response {
+                request_nonce: [9; 24]
+            },
+            &boxed
+        )
+        .is_none());
+        assert!(open(
+            &[8u8; 32],
+            CLIENT_ID,
+            Direction::Response {
+                request_nonce: [9; 24]
+            },
+            &boxed
+        )
+        .is_none());
+        assert!(open(
+            &key,
+            CLIENT_ID,
+            Direction::Response {
+                request_nonce: [9; 24]
+            },
+            "AAAA"
+        )
+        .is_none());
+        assert!(open(
+            &key,
+            CLIENT_ID,
+            Direction::Response {
+                request_nonce: [9; 24]
+            },
+            "not base64!"
+        )
+        .is_none());
         assert_ne!(
-            seal(&key, CLIENT_ID, Direction::Response, b"hello"),
+            seal(
+                &key,
+                CLIENT_ID,
+                Direction::Response {
+                    request_nonce: [9; 24]
+                },
+                b"hello"
+            ),
             boxed,
             "fresh nonce every time"
         );
