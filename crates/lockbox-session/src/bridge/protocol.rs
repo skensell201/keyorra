@@ -69,6 +69,82 @@ pub enum Request {
         url: String,
         item_id: Uuid,
     },
+    Lookup {
+        url: String,
+        username: String,
+        password: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    Save {
+        url: String,
+        username: String,
+        password: String,
+        item_id: Option<Uuid>,
+    },
+    Generate,
+    Cards {
+        url: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    FillCard {
+        url: String,
+        item_id: Uuid,
+    },
+    Identities {
+        url: String,
+    },
+    #[serde(rename_all = "camelCase")]
+    FillIdentity {
+        url: String,
+        item_id: Uuid,
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum LookupStatus {
+    New,
+    Changed,
+    Same,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CardSummary {
+    pub id: Uuid,
+    pub title: String,
+    pub last4: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CardFill {
+    pub name: String,
+    pub number: String,
+    pub exp_month: String,
+    pub exp_year: String,
+    pub cvc: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdentitySummary {
+    pub id: Uuid,
+    pub title: String,
+    pub detail: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IdentityFill {
+    pub given_name: String,
+    pub family_name: String,
+    pub email: String,
+    pub phone: String,
+    pub street: String,
+    pub city: String,
+    pub postal_code: String,
+    pub country: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,6 +167,29 @@ pub enum Reply {
         username: String,
         password: String,
         totp: Option<String>,
+    },
+    #[serde(rename_all = "camelCase")]
+    Lookup {
+        status: LookupStatus,
+        item_id: Option<Uuid>,
+    },
+    Saved {
+        saved: Uuid,
+    },
+    Generated {
+        generated: String,
+    },
+    Cards {
+        cards: Vec<CardSummary>,
+    },
+    Card {
+        card: CardFill,
+    },
+    Identities {
+        identities: Vec<IdentitySummary>,
+    },
+    Identity {
+        identity: IdentityFill,
     },
     Pong {
         pong: bool,
@@ -234,6 +333,116 @@ mod tests {
         assert_eq!(
             serde_json::to_value(Reply::Error { error: "e".into() }).unwrap(),
             json!({"error": "e"})
+        );
+    }
+
+    #[test]
+    fn requests_and_replies_for_saving_generating_cards_and_identities() {
+        let id = uuid::Uuid::nil();
+        let parse = |v: serde_json::Value| serde_json::from_value::<Request>(v).unwrap();
+        assert_eq!(
+            parse(
+                json!({"op": "lookup", "url": "https://a.com", "username": "u", "password": "p"})
+            ),
+            Request::Lookup {
+                url: "https://a.com".into(),
+                username: "u".into(),
+                password: "p".into()
+            }
+        );
+        assert_eq!(
+            parse(
+                json!({"op": "save", "url": "https://a.com", "username": "u", "password": "p", "itemId": null})
+            ),
+            Request::Save {
+                url: "https://a.com".into(),
+                username: "u".into(),
+                password: "p".into(),
+                item_id: None
+            }
+        );
+        assert_eq!(parse(json!({"op": "generate"})), Request::Generate);
+        assert_eq!(
+            parse(json!({"op": "cards", "url": "https://a.com"})),
+            Request::Cards {
+                url: "https://a.com".into()
+            }
+        );
+        assert_eq!(
+            parse(json!({"op": "fillCard", "url": "https://a.com", "itemId": id})),
+            Request::FillCard {
+                url: "https://a.com".into(),
+                item_id: id
+            }
+        );
+        assert_eq!(
+            parse(json!({"op": "identities", "url": "https://a.com"})),
+            Request::Identities {
+                url: "https://a.com".into()
+            }
+        );
+        assert_eq!(
+            parse(json!({"op": "fillIdentity", "url": "https://a.com", "itemId": id})),
+            Request::FillIdentity {
+                url: "https://a.com".into(),
+                item_id: id
+            }
+        );
+
+        let s = |r: Reply| serde_json::to_value(r).unwrap();
+        assert_eq!(
+            s(Reply::Lookup {
+                status: LookupStatus::Changed,
+                item_id: Some(id)
+            }),
+            json!({"status": "changed", "itemId": id})
+        );
+        assert_eq!(s(Reply::Saved { saved: id }), json!({"saved": id}));
+        assert_eq!(
+            s(Reply::Generated {
+                generated: "pw".into()
+            }),
+            json!({"generated": "pw"})
+        );
+        assert_eq!(
+            s(Reply::Cards {
+                cards: vec![CardSummary {
+                    id,
+                    title: "Visa".into(),
+                    last4: "1111".into()
+                }]
+            }),
+            json!({"cards": [{"id": id, "title": "Visa", "last4": "1111"}]})
+        );
+        assert_eq!(
+            s(Reply::Card {
+                card: CardFill {
+                    name: "IVAN".into(),
+                    number: "4111".into(),
+                    exp_month: "12".into(),
+                    exp_year: "2027".into(),
+                    cvc: "123".into()
+                }
+            }),
+            json!({"card": {"name": "IVAN", "number": "4111", "expMonth": "12", "expYear": "2027", "cvc": "123"}})
+        );
+        assert_eq!(
+            s(Reply::Identities {
+                identities: vec![IdentitySummary {
+                    id,
+                    title: "Home".into(),
+                    detail: "Hanoi".into()
+                }]
+            }),
+            json!({"identities": [{"id": id, "title": "Home", "detail": "Hanoi"}]})
+        );
+        let fill = IdentityFill {
+            given_name: "Ivan".into(),
+            ..IdentityFill::default()
+        };
+        assert_eq!(
+            s(Reply::Identity { identity: fill })["identity"]["givenName"],
+            "Ivan"
         );
     }
 }

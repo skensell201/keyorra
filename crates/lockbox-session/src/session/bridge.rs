@@ -381,6 +381,10 @@ impl Session {
                 items: self.candidates(&url),
             },
             Request::Fill { url, item_id } => self.credentials(&url, item_id, now),
+            // Served from the following tasks.
+            _ => Reply::Error {
+                error: "Unknown request".into(),
+            },
         }
     }
 
