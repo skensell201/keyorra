@@ -1,0 +1,20 @@
+:root { color-scheme: light dark; --bg: #f1f2f3; --surface: #fff; --text: #111; --muted: #76767b; --hover: rgba(17,17,17,.05); --cta: #111; --cta-text: #fff; }
+@media (prefers-color-scheme: dark) { :root { --bg: #161618; --surface: #222224; --text: #f5f5f7; --muted: #8e8e93; --hover: rgba(255,255,255,.06); --cta: #f5f5f7; --cta-text: #111; } }
+* { box-sizing: border-box; }
+body { margin: 0; width: 340px; background: var(--bg); color: var(--text); font: 500 13px/1.45 -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif; }
+main { padding: 14px; display: flex; flex-direction: column; gap: 10px; animation: in 180ms cubic-bezier(.2,.8,.2,1); }
+@keyframes in { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
+header { display: flex; align-items: center; gap: 8px; font-weight: 800; font-size: 16px; letter-spacing: -0.03em; }
+.mark { width: 26px; height: 26px; border-radius: 8px; background: var(--cta); color: var(--cta-text); display: grid; place-items: center; }
+p { margin: 0; color: var(--muted); }
+button { font: inherit; font-weight: 600; border-radius: 999px; padding: 8px 16px; cursor: pointer; border: 1px solid transparent; color: var(--text); background: transparent; transition: transform 120ms, background 120ms; }
+button:active { transform: scale(.97); }
+button.primary { background: var(--cta); color: var(--cta-text); }
+.code { font: 600 30px/1.2 ui-monospace, "SF Mono", Menlo, monospace; letter-spacing: .12em; text-align: center; padding: 8px 0; color: var(--text); }
+ul { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+button.item { width: 100%; display: flex; gap: 10px; align-items: center; text-align: left; border-radius: 12px; padding: 8px 10px; }
+button.item:hover { background: var(--hover); }
+.mono { width: 30px; height: 30px; border-radius: 9px; display: grid; place-items: center; background: var(--hover); font-weight: 800; text-transform: uppercase; flex-shrink: 0; }
+.text { display: flex; flex-direction: column; min-width: 0; }
+.sub { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+@media (prefers-reduced-motion: reduce) { main { animation: none; } }
