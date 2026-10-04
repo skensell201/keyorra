@@ -1,4 +1,4 @@
-import { render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 import { api } from "../api";
@@ -26,7 +26,7 @@ test("loads and saves timeouts", async () => {
   await user.selectOptions(screen.getByLabelText("Clear copied secrets after"), "30");
   await user.click(screen.getByRole("button", { name: "Save settings" }));
   expect(api.updateSettings).toHaveBeenCalledWith({ autoLockMinutes: 30, clipboardSeconds: 30 });
-  expect(await screen.findByRole("status")).toHaveTextContent("Saved");
+  expect(await screen.findByRole("status", { name: "Settings saved" })).toHaveTextContent("Saved");
 });
 
 test("changes the master password", async () => {
@@ -61,4 +61,46 @@ test("closes", async () => {
   render(<SettingsDialog onClose={onClose} />);
   await user.click(screen.getByRole("button", { name: "Close" }));
   expect(onClose).toHaveBeenCalled();
+});
+
+test("ignores Escape and disables Close while the password change is in flight", async () => {
+  const user = userEvent.setup();
+  vi.mocked(api.changePassword).mockReturnValue(new Promise(() => {}));
+  const onClose = vi.fn();
+  render(<SettingsDialog onClose={onClose} />);
+  await user.type(screen.getByLabelText("Current password"), "old password 1");
+  await user.type(screen.getByLabelText("New password"), "a brand new password");
+  await user.type(screen.getByLabelText("Confirm new password"), "a brand new password");
+  await user.click(screen.getByRole("button", { name: "Change password" }));
+  expect(screen.getByRole("button", { name: "Close" })).toBeDisabled();
+  act(() => {
+    fireEvent.keyDown(window, { key: "Escape" });
+  });
+  expect(onClose).not.toHaveBeenCalled();
+});
+
+test("a settings load error does not block the password form", async () => {
+  const user = userEvent.setup();
+  vi.mocked(api.settings).mockRejectedValue({ kind: "other", message: "disk gone" });
+  render(<SettingsDialog onClose={vi.fn()} />);
+  expect(await screen.findByRole("alert")).toHaveTextContent("Couldn't load settings: disk gone");
+  expect(screen.queryByLabelText("Lock after")).not.toBeInTheDocument();
+  await user.type(screen.getByLabelText("Current password"), "old password 1");
+  await user.type(screen.getByLabelText("New password"), "a brand new password");
+  await user.type(screen.getByLabelText("Confirm new password"), "a brand new password");
+  await user.click(screen.getByRole("button", { name: "Change password" }));
+  expect(api.changePassword).toHaveBeenCalled();
+});
+
+test("shows a stored value that is not among the presets", async () => {
+  vi.mocked(api.settings).mockResolvedValue({ autoLockMinutes: 15, clipboardSeconds: 90 });
+  render(<SettingsDialog onClose={vi.fn()} />);
+  expect(await screen.findByLabelText("Lock after")).toHaveValue("15");
+});
+
+test("status regions stay mounted", async () => {
+  render(<SettingsDialog onClose={vi.fn()} />);
+  await screen.findByLabelText("Lock after");
+  expect(screen.getByRole("status", { name: "Settings saved" })).toBeEmptyDOMElement();
+  expect(screen.getByRole("status", { name: "Password change" })).toBeEmptyDOMElement();
 });

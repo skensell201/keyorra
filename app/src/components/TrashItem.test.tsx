@@ -36,3 +36,8 @@ test("shows a restore error", async () => {
   await user.click(screen.getByRole("button", { name: "Restore" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("not found");
 });
+
+test("shows Untitled for an empty title", () => {
+  render(<TrashItem item={{ ...deleted, title: "" }} onRestored={vi.fn()} />);
+  expect(screen.getByRole("heading", { name: "Untitled" })).toBeInTheDocument();
+});

@@ -5,6 +5,10 @@ const LOCK_MINUTES = [1, 5, 10, 30, 60, 240];
 const CLIPBOARD_SECONDS = [30, 60, 90, 180];
 const MIN_LENGTH = 10;
 
+function withCurrent(options: number[], value: number) {
+  return options.includes(value) ? options : [...options, value].sort((a, b) => a - b);
+}
+
 export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const [settings, setSettings] = useState<Settings | null>(null);
   const [saved, setSaved] = useState(false);
@@ -12,27 +16,31 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const [next, setNext] = useState("");
   const [confirm, setConfirm] = useState("");
   const [changed, setChanged] = useState(false);
+  const [settingsError, setSettingsError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
   useEffect(() => {
-    api.settings().then(setSettings).catch((e) => setError(errorMessage(e)));
+    api
+      .settings()
+      .then(setSettings)
+      .catch((e) => setSettingsError(`Couldn't load settings: ${errorMessage(e)}`));
   }, []);
 
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    const onKey = (e: KeyboardEvent) => e.key === "Escape" && !busy && onClose();
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, [onClose, busy]);
 
   async function save() {
     if (!settings) return;
-    setError(null);
+    setSettingsError(null);
     try {
       setSettings(await api.updateSettings(settings));
       setSaved(true);
     } catch (e) {
-      setError(errorMessage(e));
+      setSettingsError(`Couldn't save settings: ${errorMessage(e)}`);
     }
   }
 
@@ -72,7 +80,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                   setSettings({ ...settings, autoLockMinutes: Number(e.target.value) });
                 }}
               >
-                {LOCK_MINUTES.map((m) => (
+                {withCurrent(LOCK_MINUTES, settings.autoLockMinutes).map((m) => (
                   <option key={m} value={m}>
                     {m} min of inactivity
                   </option>
@@ -88,7 +96,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                   setSettings({ ...settings, clipboardSeconds: Number(e.target.value) });
                 }}
               >
-                {CLIPBOARD_SECONDS.map((s) => (
+                {withCurrent(CLIPBOARD_SECONDS, settings.clipboardSeconds).map((s) => (
                   <option key={s} value={s}>
                     {s} seconds
                   </option>
@@ -99,9 +107,16 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
               <button className="primary" onClick={save}>
                 Save settings
               </button>
-              {saved && <span role="status">Saved</span>}
+              <span role="status" aria-label="Settings saved">
+                {saved ? "Saved" : ""}
+              </span>
             </div>
           </>
+        )}
+        {settingsError && (
+          <p className="error" role="alert">
+            {settingsError}
+          </p>
         )}
         <form className="editor" onSubmit={change}>
           <h3>Change master password</h3>
@@ -122,7 +137,9 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
             <button type="submit" disabled={!canChange}>
               Change password
             </button>
-            {changed && <span>Password changed</span>}
+            <span role="status" aria-label="Password change">
+              {changed ? "Password changed" : ""}
+            </span>
           </div>
         </form>
         {error && (
@@ -130,7 +147,9 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
             {error}
           </p>
         )}
-        <button onClick={onClose}>Close</button>
+        <button onClick={onClose} disabled={busy}>
+          Close
+        </button>
       </div>
     </div>
   );

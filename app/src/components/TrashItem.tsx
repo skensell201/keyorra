@@ -24,7 +24,7 @@ export function TrashItem({ item, onRestored }: { item: ItemSummary; onRestored:
       <header>
         <div>
           <span className="kind">{item.kind ? KIND_LABEL[item.kind] : "Item"}</span>
-          <h2>{item.title}</h2>
+          <h2>{item.title || "Untitled"}</h2>
         </div>
         <div className="actions">
           <button className="primary" onClick={restore} disabled={busy}>
