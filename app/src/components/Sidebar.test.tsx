@@ -9,7 +9,7 @@ const vaults = [
 ];
 
 function setup() {
-  const props = { onSelect: vi.fn(), onNewVault: vi.fn(), onImport: vi.fn(), onLock: vi.fn() };
+  const props = { onSelect: vi.fn(), onNewVault: vi.fn(), onImport: vi.fn(), onLock: vi.fn(), onSettings: vi.fn() };
   render(<Sidebar vaults={vaults} selection={{ kind: "all" }} {...props} />);
   return props;
 }
@@ -35,4 +35,13 @@ test("creates a vault, imports and locks", async () => {
   expect(props.onImport).toHaveBeenCalled();
   await user.click(screen.getByRole("button", { name: "Lock" }));
   expect(props.onLock).toHaveBeenCalled();
+});
+
+test("recently deleted and settings", async () => {
+  const user = userEvent.setup();
+  const props = setup();
+  await user.click(screen.getByRole("button", { name: "Recently Deleted" }));
+  expect(props.onSelect).toHaveBeenCalledWith({ kind: "trash" });
+  await user.click(screen.getByRole("button", { name: "Settings…" }));
+  expect(props.onSettings).toHaveBeenCalled();
 });

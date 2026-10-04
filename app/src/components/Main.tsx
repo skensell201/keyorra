@@ -4,6 +4,7 @@ import { ImportDialog } from "./ImportDialog";
 import { ItemDetail } from "./ItemDetail";
 import { ItemEditor } from "./ItemEditor";
 import { ItemList } from "./ItemList";
+import { TrashItem } from "./TrashItem";
 import { Sidebar, type Selection } from "./Sidebar";
 
 type Pane = { mode: "empty" } | { mode: "view"; id: string } | { mode: "edit"; item: Item; isNew: boolean };
@@ -15,6 +16,7 @@ export function Main({ onLock }: { onLock: () => void }) {
   const [items, setItems] = useState<ItemSummary[]>([]);
   const [pane, setPane] = useState<Pane>({ mode: "empty" });
   const [importing, setImporting] = useState(false);
+  const [, setShowSettings] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const vaultsSeq = useRef(0);
@@ -35,12 +37,18 @@ export function Main({ onLock }: { onLock: () => void }) {
   }, []);
   const loadItems = useCallback(() => {
     const seq = ++itemsSeq.current;
-    return api
-      .items({
-        query,
-        vaultId: selection.kind === "vault" ? selection.id : null,
-        favorites: selection.kind === "favorites",
-      })
+    const request =
+      selection.kind === "trash"
+        ? api.deletedItems().then((list) => {
+            const q = query.trim().toLowerCase();
+            return list.filter((i) => !q || i.title.toLowerCase().includes(q));
+          })
+        : api.items({
+            query,
+            vaultId: selection.kind === "vault" ? selection.id : null,
+            favorites: selection.kind === "favorites",
+          });
+    return request
       .then((list) => {
         if (seq !== itemsSeq.current) return;
         setItems(list);
@@ -59,7 +67,8 @@ export function Main({ onLock }: { onLock: () => void }) {
     loadItems();
   }, [loadItems]);
 
-  const targetVault = selection.kind === "vault" ? selection.id : vaults[0]?.id;
+  const targetVault =
+    selection.kind === "vault" ? selection.id : selection.kind === "trash" ? undefined : vaults[0]?.id;
 
   async function newItem(kind: ItemKind) {
     if (!targetVault) return;
@@ -91,6 +100,7 @@ export function Main({ onLock }: { onLock: () => void }) {
         onNewVault={newVault}
         onImport={() => setImporting(true)}
         onLock={onLock}
+        onSettings={() => setShowSettings(true)}
       />
       <ItemList
         items={items}
@@ -109,7 +119,17 @@ export function Main({ onLock }: { onLock: () => void }) {
           </div>
         )}
         {pane.mode === "empty" && <p className="empty">Select an item</p>}
-        {pane.mode === "view" && (
+        {pane.mode === "view" && selection.kind === "trash" && (
+          <TrashPane
+            key={pane.id}
+            item={items.find((i) => i.id === pane.id)}
+            onRestored={async () => {
+              setPane({ mode: "empty" });
+              await refresh();
+            }}
+          />
+        )}
+        {pane.mode === "view" && selection.kind !== "trash" && (
           <ItemDetail
             key={pane.id}
             itemId={pane.id}
@@ -136,4 +156,8 @@ export function Main({ onLock }: { onLock: () => void }) {
       {importing && <ImportDialog onClose={() => setImporting(false)} onImported={refresh} />}
     </div>
   );
+}
+
+function TrashPane({ item, onRestored }: { item: ItemSummary | undefined; onRestored: () => void }) {
+  return item ? <TrashItem item={item} onRestored={onRestored} /> : <p className="empty">Select an item</p>;
 }

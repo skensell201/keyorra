@@ -18,6 +18,8 @@ vi.mock("../api", async (importOriginal) => {
       newItem: vi.fn(),
       saveItem: vi.fn(),
       createVault: vi.fn(),
+      deletedItems: vi.fn(),
+      restoreItem: vi.fn(),
     },
   };
 });
@@ -38,6 +40,8 @@ beforeEach(() => {
   vi.mocked(api.newItem).mockReset().mockResolvedValue(loginItem({ id: "new", title: "" }));
   vi.mocked(api.saveItem).mockReset().mockImplementation(async (item) => item);
   vi.mocked(api.createVault).mockReset().mockResolvedValue({ id: "v3", name: "Home", itemCount: 0 });
+  vi.mocked(api.deletedItems).mockReset().mockResolvedValue([{ ...github, id: "d1", title: "Old forum" }]);
+  vi.mocked(api.restoreItem).mockReset().mockResolvedValue(undefined);
 });
 
 const lastFilter = () => vi.mocked(api.items).mock.lastCall![0];
@@ -108,4 +112,15 @@ test("a stale items reply does not overwrite a newer one", async () => {
   await new Promise((r) => setTimeout(r, 20));
   expect(screen.getByText("Second")).toBeInTheDocument();
   expect(screen.queryByText("First")).not.toBeInTheDocument();
+});
+
+test("recently deleted lists deleted items and restores one", async () => {
+  const user = userEvent.setup();
+  render(<Main onLock={vi.fn()} />);
+  await user.click(await screen.findByRole("button", { name: "Recently Deleted" }));
+  await user.click(await screen.findByText("Old forum"));
+  await user.click(screen.getByRole("button", { name: "Restore" }));
+  expect(api.restoreItem).toHaveBeenCalledWith("d1");
+  await waitFor(() => expect(api.deletedItems).toHaveBeenCalledTimes(2));
+  expect(screen.getByRole("button", { name: "+ New" })).toBeDisabled();
 });
