@@ -6,7 +6,7 @@ use lockbox_core::model::{Item, ItemKind};
 use lockbox_session::dto::{
     GeneratorRequest, ImportPreview, ImportResult, ItemFilter, ItemSummary, TotpCode, VaultDto,
 };
-use lockbox_session::{CmdError, CmdResult, ErrorKind, Status};
+use lockbox_session::{CmdError, CmdResult, ErrorKind, Settings, Status};
 use tauri::{AppHandle, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use uuid::Uuid;
@@ -102,4 +102,33 @@ pub fn import_preview(state: State<'_, AppState>, path: String) -> CmdResult<Imp
 #[tauri::command(async)]
 pub fn import_apply(state: State<'_, AppState>) -> CmdResult<ImportResult> {
     lock_session(&state).import_apply(now())
+}
+
+#[tauri::command(async)]
+pub fn deleted_items(state: State<'_, AppState>) -> CmdResult<Vec<ItemSummary>> {
+    lock_session(&state).deleted_items(now())
+}
+
+#[tauri::command(async)]
+pub fn restore_item(state: State<'_, AppState>, id: Uuid) -> CmdResult<()> {
+    lock_session(&state).restore_item(id, now())
+}
+
+#[tauri::command(async)]
+pub fn settings(state: State<'_, AppState>) -> CmdResult<Settings> {
+    Ok(lock_session(&state).settings())
+}
+
+#[tauri::command(async)]
+pub fn update_settings(state: State<'_, AppState>, settings: Settings) -> CmdResult<Settings> {
+    lock_session(&state).update_settings(settings, now())
+}
+
+#[tauri::command(async)]
+pub fn change_password(
+    state: State<'_, AppState>,
+    current: String,
+    new_password: String,
+) -> CmdResult<()> {
+    lock_session(&state).change_password(&current, &new_password, now())
 }
