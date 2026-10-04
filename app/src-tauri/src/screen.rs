@@ -32,7 +32,9 @@ pub fn is_locked() -> bool {
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
+    // Depends on the live GUI session (and `ioreg`), so it is not run by default.
     #[test]
+    #[ignore = "depends on the live GUI session; run manually"]
     fn screen_lock_flag_reads() {
         // Cross-check against what `ioreg` reports for the same session flag, so the test
         // holds whether or not the screen happens to be locked while it runs.

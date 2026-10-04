@@ -723,12 +723,25 @@ fn change_password_checks_input_and_counts_wrong_guesses() {
 #[test]
 fn tick_with_locks_on_screen_lock_and_after_sleep() {
     let (_dir, mut s) = unlocked_session();
-    assert!(!s.tick_with(1_002, false));
-    assert!(s.tick_with(1_004, true), "screen locked");
+    assert!(!s.tick_with(1_002, 2, false));
+    assert!(s.tick_with(1_004, 4, true), "screen locked");
     s.unlock(PW, 1_006).unwrap();
-    assert!(!s.tick_with(1_008, false));
-    assert!(s.tick_with(1_008 + 300, false), "the Mac slept");
-    assert!(!s.tick_with(1_400, true), "already locked");
+    assert!(!s.tick_with(1_008, 8, false));
+    assert!(
+        s.tick_with(1_008 + 300, 10, false),
+        "wall jumped, awake did not: the Mac slept"
+    );
+    assert!(!s.tick_with(1_400, 12, true), "already locked");
+}
+
+#[test]
+fn tick_with_does_not_lock_after_a_long_busy_wait() {
+    let (_dir, mut s) = unlocked_session();
+    assert!(!s.tick_with(1_002, 2, false));
+    assert!(
+        !s.tick_with(1_002 + 100, 2 + 100, false),
+        "both clocks advanced: a command held the lock, the Mac did not sleep"
+    );
 }
 
 fn hotp_section() -> Section {

@@ -2,7 +2,7 @@ mod commands;
 mod screen;
 
 use std::sync::{Mutex, MutexGuard};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use lockbox_core::crypto::KdfParams;
 use lockbox_session::Session;
@@ -70,17 +70,20 @@ pub fn run() {
 /// Every two seconds: lock when idle (and tell the window), clear the clipboard once our copy
 /// has expired — but only if it still holds our copy.
 fn housekeeping(app: AppHandle) {
+    // `Instant` does not advance while the Mac sleeps (CLOCK_UPTIME_RAW), unlike wall time.
+    let start = Instant::now();
     loop {
         std::thread::sleep(Duration::from_secs(2));
         let state = app.state::<AppState>();
-        // Read the flag before taking the lock, and take the timestamp only after we hold it: a
-        // long-running command holding the lock must not make the gap look like the Mac slept.
+        // Read the flag before taking the lock. Sleep is detected from wall time vs the
+        // monotonic `start` clock, so a command holding the lock for a long time (both clocks
+        // advance) does not look like sleep.
         let screen_locked = screen::is_locked();
         // The lock spans the clipboard calls on purpose: a copy command must not arm the guard
         // and write between our read and our clear, or we would wipe the fresh copy.
         let mut session = lock_session(&state);
         let t = now();
-        let locked = session.tick_with(t, screen_locked);
+        let locked = session.tick_with(t, start.elapsed().as_secs(), screen_locked);
         if session.clipboard_pending() {
             let current = app.clipboard().read_text().ok();
             if session.clipboard_should_clear(t, current.as_deref()) {

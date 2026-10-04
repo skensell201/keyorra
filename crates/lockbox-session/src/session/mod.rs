@@ -202,8 +202,9 @@ impl Session {
     }
 
     /// Housekeeping tick from the app: also locks when the screen is locked or the Mac slept.
-    pub fn tick_with(&mut self, now: u64, screen_locked: bool) -> bool {
-        let slept = self.sleep.observe(now);
+    /// `awake` is seconds of a monotonic clock that does not advance during sleep.
+    pub fn tick_with(&mut self, now: u64, awake: u64, screen_locked: bool) -> bool {
+        let slept = self.sleep.observe(now, awake);
         if self.store.is_some() && (screen_locked || slept || self.autolock.is_due(now)) {
             self.lock();
             true
