@@ -236,3 +236,14 @@ username, password, current one-time code. While locked every call answers plain
 List); exact host first. `fill` re-checks that the item matches the URL of the frame that
 asked (taken from the browser, not from the page). The extension asks for a fill only
 after a click or the shortcut.
+
+**Hardening after review (2026-10-04), supersedes the pairing/messages text above:**
+- *Commit-then-reveal pairing* (stops a relay from brute-forcing the 6-digit code): the
+  extension first sends `pair {commit, name}` with `commit = SHA-256("lockbox-bridge-v1/commit" ‖ clientPub)`,
+  gets `pairPending {clientId, serverPub}`, then sends `pairReveal {clientId, clientPub}`.
+  The app checks the commitment and only then derives key and code and asks the user.
+  One pending pairing at a time; low-order (non-contributory) keys are rejected.
+- *Replies bound to their request*: reply AAD = `"lockbox-bridge-v1/<clientId>/res/" ‖ the
+  24-byte nonce of the request box`, so a recorded reply can't answer another request.
+- *Scheme rule* (user decision): an item saved with `https://` is not offered on an `http:`
+  page. Exempt: IP addresses, `localhost`/`*.localhost`, and saved URLs without a scheme.

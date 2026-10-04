@@ -2968,3 +2968,48 @@ if (typeof chrome !== "undefined" && chrome.runtime?.id && document.getElementBy
 
 - Spec addendum coverage: transport (Tasks 4, 5, 7), pairing with code + approval + storage in the vault (1, 3, 6, 8), sealed calls and release rules incl. frame URL from the browser (3, 6, 10, 12), site matching (2), browsers incl. Firefox (5, 9), inline icon + popup + shortcut (12, 13). Saving logins, generator on sign-up forms, cards/addresses are plan 3c; Safari is 3b.
 - Type names used across tasks: `Inbound/Outbound/Request/Reply/Candidate` (Rust), `BridgeEvent/PairingRequest/PairedBrowser` re-exported from `lockbox_session`; TS `Client/State/Candidate/Credentials/Pairing/PairingStore/ToBackground/ToContent/Result`.
+
+---
+
+## Protocol revision after the Tasks 1–5 review (supersedes earlier text where they differ)
+
+Implemented first as **Task 5b** (Rust), then Tasks 6, 9, 10 follow the revised shapes below.
+
+**New shared vectors** (in addition to the table above):
+
+| What | Value |
+|---|---|
+| commit of the client public (secret 32 × `0x01`) | `0508377f5f81fe96b49ca9716290979eb78f4998351ea5839718bcb263fd3f72` |
+| reply box of `{"pong":true}`, key from the table, client id `11111111-1111-4111-8111-111111111111`, request nonce 24 × `0x03`, reply nonce 24 × `0x04` | `BAQEBAQEBAQEBAQEBAQEBAQEBAQEygTHFmx53/OhKi8d/MurWGQxk4F6NCh6C7zMkk8=` |
+
+Reply AAD = UTF-8 `"lockbox-bridge-v1/<clientId>/res/"` followed by the **raw 24 bytes** of the request box's nonce. Request AAD is unchanged (`…/<clientId>/req`).
+
+### Task 5b: Harden the bridge primitives (Rust)
+
+- `crypto.rs`:
+  - `pub fn commitment(client_public: &[u8; 32]) -> [u8; 32]` = SHA-256(`"lockbox-bridge-v1/commit"` ‖ client_public). Test against the vector.
+  - `Direction` becomes `pub enum Direction { Request, Response { request_nonce: [u8; 24] } }`; `aad()` appends `b"/res/"` + nonce bytes for responses. Test: the reply vector above (`seal_with_nonce(key, CLIENT_ID, Direction::Response { request_nonce: [3; 24] }, br#"{"pong":true}"#, [4; 24])`), and that a reply sealed for nonce A doesn't open for nonce B.
+  - `pub fn nonce_of(boxed: &str) -> Option<[u8; 24]>` (first 24 bytes of a well-formed box).
+  - `derive` returns `Option<Derived>`: `None` when `SharedSecret::was_contributory()` is false. Test with an all-zero peer public key.
+  - Update existing tests to the new signatures (vectors unchanged).
+- `protocol.rs`: `Inbound::Pair { commit: String, name: String }` (field `commit`, base64 of 32 bytes) and new `Inbound::PairReveal { client_id: String, client_pub: String }` (`{"kind":"pairReveal","clientId","clientPub"}`). Update the parse test.
+- `site.rs`:
+  - `Site` gains `pub secure: bool` (scheme `https`) and `pub local: bool` (IP address, `localhost` or `*.localhost`).
+  - `matches(page, saved)`: trim `saved`; use the `https://` fallback only when `saved` has no `"://"`, and remember that it had no scheme. If the saved URL has scheme `https`, the page is not secure, and the page isn't local → `None`.
+  - Tests: `http://github.com` vs `https://github.com` → None; vs `github.com` (no scheme) → SameHost; `http://192.168.1.10:8006` vs `https://192.168.1.10:8006` → SameHost; `http://localhost:8765` vs `https://localhost:8765` → SameHost; `http://ftp/` vs `ftp://github.com` → None; `" https://github.com "` with spaces → SameHost on `https://github.com`.
+- `wire.rs`: a stream that ends inside the 4-byte length is an error (`Ok(None)` only when 0 bytes were read). Test with 2 bytes.
+- Commit: `"Harden bridge pairing and reply binding"`.
+
+### Revised Task 6 (Session)
+
+- `PendingPairing` gains `commit: [u8; 32]`, `server: KeyPair` (kept until reveal), `code: Option<String>`, and state `AwaitingReveal` before `Waiting`. Only one pending pairing exists at a time (a new `pair` replaces any other).
+- `Inbound::Pair { commit, name }`: locked → `(Locked, Some(Show))`; bad base64 → `Error`; else create the pending entry with a fresh server key pair, reply `PairPending { client_id, server_pub }`, **no event**.
+- `Inbound::PairReveal { client_id, client_pub }`: find the `AwaitingReveal` entry; `commitment(client_pub) != commit` → drop the entry, `Error { "Pairing check failed" }`; `derive` returns `None` → same; else store key + code, state `Waiting`, reply `PairPending { client_id, server_pub }`, event `PairRequest { client_id, name, code }`.
+- `pairing_status` for an `AwaitingReveal` entry answers `PairPending` too.
+- `serve_call`: `let Some(request_nonce) = nonce_of(sealed)` (else `Error`); seal the reply with `Direction::Response { request_nonce }`.
+- Tests: the `pair()` helper sends `Pair { commit: b64(&commitment(&keys.public)) }`, then `PairReveal { client_pub: b64(&keys.public) }`, and takes the event from the reveal; the `call()` helper opens replies with `Direction::Response { request_nonce: nonce_of(&request_box).unwrap() }`. Add: a reveal with a different public key than committed → `Error` and no event; a second `pair` replaces the first (the first's reveal → `Error`/`UnknownClient`); `pairing_needs_an_unlocked_vault` uses the new `Pair` shape.
+
+### Revised Tasks 9–10 (extension)
+
+- `crypto.ts`: `commitment(clientPublic)`; `seal()` unchanged for requests; `openReply(key, clientId, requestBox, boxed)` builds the reply AAD from the request box's first 24 bytes. Tests: commit vector, reply vector, wrong request nonce → `null`.
+- `client.ts` `startPairing`: send `{kind:"pair", commit: toB64(commitment(keys.public)), name}` → `pairPending {clientId, serverPub}`; then `{kind:"pairReveal", clientId, clientPub: toB64(keys.public)}` → `pairPending`; derive and return the code. `request()` keeps the request box and opens the reply with `openReply`. The fake app in `client.test.ts` follows the same flow (checks the commitment, binds replies to the request nonce).
