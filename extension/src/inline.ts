@@ -1,11 +1,19 @@
 // The Lockbox icon inside focused login fields and its dropdown, isolated in a shadow root.
-import type { Candidate, State } from "./client";
+import type { Candidate, CardSummary, IdentitySummary, State } from "./client";
 import { defaultVisible, VisibilityTracker } from "./visibility";
+
+export type MenuMode = "logins" | "generator" | "cards" | "identities";
 
 export interface MenuActions {
   list(): Promise<{ state: State; items: Candidate[] }>;
   fill(itemId: string): Promise<void>;
   unlock(): Promise<void>;
+  generate(): Promise<{ state: State; value: string }>;
+  useGenerated(value: string): Promise<void>;
+  cards(): Promise<{ state: State; items: CardSummary[] }>;
+  fillCard(itemId: string): Promise<void>;
+  identities(): Promise<{ state: State; items: IdentitySummary[] }>;
+  fillIdentity(itemId: string): Promise<void>;
 }
 
 const KEYHOLE = `<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true"><circle cx="12" cy="9" r="4" fill="currentColor"/><path d="M10.2 11.5h3.6l1.2 8h-6z" fill="currentColor"/></svg>`;
@@ -29,6 +37,7 @@ const STYLE = `
   background: rgba(127,127,127,.16); font-weight: 800; text-transform: uppercase; }
 .text { display: flex; flex-direction: column; min-width: 0; }
 .title { font-weight: 600; } .sub { opacity: .6; font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.generated { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; opacity: .7; white-space: nowrap; }
 .note { padding: 10px; opacity: .7; }
 @media (prefers-reduced-motion: reduce) { .panel { animation: none; } .icon { transition: none; } }
 `;
@@ -52,6 +61,7 @@ export class InlineMenu {
   private openedAt = 0;
   private field: HTMLInputElement | null = null;
   private watched = new WeakSet<HTMLInputElement>();
+  private modes = new WeakMap<HTMLInputElement, MenuMode>();
   private trusted: (e: Event) => boolean;
   private visible: (e: MouseEvent, host: HTMLElement, target: HTMLElement) => boolean;
   private tracker = new VisibilityTracker();
@@ -120,7 +130,8 @@ export class InlineMenu {
     if (this.host.parentNode !== parent) parent.append(this.host);
   }
 
-  watch(field: HTMLInputElement): void {
+  watch(field: HTMLInputElement, mode: MenuMode = "logins"): void {
+    this.modes.set(field, mode);
     if (this.watched.has(field)) return;
     this.watched.add(field);
     const show = () => {
@@ -145,36 +156,74 @@ export class InlineMenu {
     this.observe(panel);
     this.openedAt = Date.now();
     this.place();
-    let result: { state: State; items: Candidate[] };
+    const mode = (this.field && this.modes.get(this.field)) || "logins";
+    let state: State;
+    let items: { id: string; title: string; sub: string; mono?: boolean }[] = [];
+    let generated = "";
     try {
-      result = await this.actions.list();
+      if (mode === "generator") {
+        const r = await this.actions.generate();
+        state = r.state;
+        generated = r.value;
+      } else if (mode === "cards") {
+        const r = await this.actions.cards();
+        state = r.state;
+        items = r.items.map((c) => ({ id: c.id, title: c.title, sub: c.last4 ? `•••• ${c.last4}` : "" }));
+      } else if (mode === "identities") {
+        const r = await this.actions.identities();
+        state = r.state;
+        items = r.items.map((c) => ({ id: c.id, title: c.title, sub: c.detail }));
+      } else {
+        const r = await this.actions.list();
+        state = r.state;
+        items = r.items.map((c) => ({ id: c.id, title: c.title, sub: c.username + (c.hasTotp ? " · one-time code" : "") }));
+      }
     } catch {
       if (this.panel === panel) panel.replaceChildren(note("Lockbox was updated — reload the page."));
       return;
     }
     if (this.panel !== panel) return;
-    const { state, items } = result;
     panel.replaceChildren();
     const unlock = (label: string) =>
       button("unlock", label, (e) => {
         if (this.allowed(e)) void this.actions.unlock().catch(() => {});
       });
+    const pick = (run: () => Promise<void>) => (e: MouseEvent) => {
+      if (!this.allowed(e) || Date.now() - this.openedAt < this.settleMs) return;
+      void this.choose(run);
+    };
     if (state === "locked") {
       panel.append(note("Lockbox is locked"), unlock("Unlock Lockbox"));
     } else if (state === "unpaired" || state === "pairing") {
       panel.append(note("Connect this browser: open the Lockbox extension in the toolbar."));
     } else if (state === "noApp") {
       panel.append(note("Lockbox isn't running."), unlock("Open Lockbox"));
+    } else if (mode === "generator") {
+      if (!generated) {
+        panel.append(note("Couldn't generate a password"));
+        return;
+      }
+      panel.append(generatedEntry(generated, pick(() => this.actions.useGenerated(generated))));
     } else if (items.length === 0) {
-      panel.append(note("No logins for this site"));
+      const secure = location.protocol === "https:";
+      panel.append(
+        note(
+          mode === "cards"
+            ? secure ? "No cards in Lockbox" : "Cards are only filled on secure pages"
+            : mode === "identities"
+              ? secure ? "No addresses in Lockbox" : "Addresses are only filled on secure pages"
+              : "No logins for this site",
+        ),
+      );
     } else {
       for (const item of items) {
-        panel.append(
-          entry(item, (e) => {
-            if (!this.allowed(e) || Date.now() - this.openedAt < this.settleMs) return;
-            void this.choose(item.id);
-          }),
-        );
+        const run =
+          mode === "cards"
+            ? () => this.actions.fillCard(item.id)
+            : mode === "identities"
+              ? () => this.actions.fillIdentity(item.id)
+              : () => this.actions.fill(item.id);
+        panel.append(entry(item, pick(run)));
       }
     }
   }
@@ -187,11 +236,11 @@ export class InlineMenu {
     this.panel = null;
   }
 
-  private async choose(itemId: string): Promise<void> {
+  private async choose(run: () => Promise<void>): Promise<void> {
     this.close();
     this.icon.hidden = true;
     try {
-      await this.actions.fill(itemId);
+      await run();
     } catch {
       /* the page was reloaded or the extension updated */
     }
@@ -225,7 +274,7 @@ function button(className: string, text: string, onClick: (e: MouseEvent) => voi
   return b;
 }
 
-function entry(item: Candidate, onClick: (e: MouseEvent) => void): HTMLButtonElement {
+function entry(item: { title: string; sub: string }, onClick: (e: MouseEvent) => void): HTMLButtonElement {
   const b = button("item", "", onClick);
   b.setAttribute("role", "menuitem");
   const mono = document.createElement("span");
@@ -238,7 +287,31 @@ function entry(item: Candidate, onClick: (e: MouseEvent) => void): HTMLButtonEle
   title.textContent = item.title;
   const sub = document.createElement("span");
   sub.className = "sub";
-  sub.textContent = item.username + (item.hasTotp ? " · one-time code" : "");
+  sub.textContent = item.sub;
+  text.append(title, sub);
+  b.append(mono, text);
+  return b;
+}
+
+/** Middle-truncates so the ends stay recognisable. */
+function shorten(value: string): string {
+  return value.length > 18 ? `${value.slice(0, 8)}…${value.slice(-4)}` : value;
+}
+
+function generatedEntry(value: string, onClick: (e: MouseEvent) => void): HTMLButtonElement {
+  const b = button("item", "", onClick);
+  b.setAttribute("role", "menuitem");
+  const mono = document.createElement("span");
+  mono.className = "mono";
+  mono.textContent = "✦";
+  const text = document.createElement("span");
+  text.className = "text";
+  const title = document.createElement("span");
+  title.className = "title";
+  title.textContent = "Use a strong password";
+  const sub = document.createElement("span");
+  sub.className = "generated";
+  sub.textContent = shorten(value);
   text.append(title, sub);
   b.append(mono, text);
   return b;

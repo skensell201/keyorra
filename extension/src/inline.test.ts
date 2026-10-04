@@ -15,6 +15,12 @@ beforeEach(() => {
     list: vi.fn().mockResolvedValue({ state: "ready", items: [{ id: "i1", title: "GitHub", username: "ivan", hasTotp: true }] }),
     fill: vi.fn().mockResolvedValue(undefined),
     unlock: vi.fn().mockResolvedValue(undefined),
+    generate: vi.fn().mockResolvedValue({ state: "ready", value: "Xk9-very-long-generated-password-Qz7" }),
+    useGenerated: vi.fn().mockResolvedValue(undefined),
+    cards: vi.fn().mockResolvedValue({ state: "ready", items: [{ id: "c1", title: "Visa", last4: "1111" }] }),
+    fillCard: vi.fn().mockResolvedValue(undefined),
+    identities: vi.fn().mockResolvedValue({ state: "ready", items: [{ id: "a1", title: "Home", detail: "Ivan, Berlin" }] }),
+    fillIdentity: vi.fn().mockResolvedValue(undefined),
   };
   menu = new InlineMenu(actions, { onRoot: (r) => (root = r), trusted: () => true, settleMs: 0 });
 });
@@ -146,4 +152,94 @@ test("a field that is already focused when watched shows the icon", () => {
   field.focus();
   menu.watch(field);
   expect(shadow().querySelector<HTMLButtonElement>("button.icon")!.hidden).toBe(false);
+});
+
+const openMenu = (mode: "logins" | "generator" | "cards" | "identities", m: InlineMenu = menu) => {
+  m.watch(field, mode);
+  field.dispatchEvent(new FocusEvent("focus"));
+  shadow().querySelector<HTMLButtonElement>("button.icon")!.click();
+};
+
+test("generator mode offers a strong password and uses it", async () => {
+  openMenu("generator");
+  await vi.waitFor(() => expect(shadow().querySelector(".item")).not.toBeNull());
+  const item = shadow().querySelector<HTMLButtonElement>(".item")!;
+  expect(item.getAttribute("role")).toBe("menuitem");
+  expect(item.textContent).toContain("Use a strong password");
+  const value = shadow().querySelector(".generated")!.textContent!;
+  expect(value).toContain("…");
+  expect(value.startsWith("Xk9")).toBe(true);
+  expect(value.endsWith("Qz7")).toBe(true);
+  expect(actions.list).not.toHaveBeenCalled();
+  item.click();
+  expect(actions.useGenerated).toHaveBeenCalledWith("Xk9-very-long-generated-password-Qz7");
+});
+
+test("generator mode handles a locked Lockbox", async () => {
+  vi.mocked(actions.generate).mockResolvedValue({ state: "locked", value: "" });
+  openMenu("generator");
+  await vi.waitFor(() => expect(shadow().textContent).toContain("Lockbox is locked"));
+});
+
+test("cards mode shows title and last four digits; picking fills", async () => {
+  openMenu("cards");
+  await vi.waitFor(() => expect(shadow().querySelector(".item")).not.toBeNull());
+  expect(shadow().querySelector(".item")!.textContent).toContain("Visa");
+  expect(shadow().querySelector(".item")!.textContent).toContain("•••• 1111");
+  (shadow().querySelector(".item") as HTMLButtonElement).click();
+  expect(actions.fillCard).toHaveBeenCalledWith("c1");
+  expect(actions.fill).not.toHaveBeenCalled();
+});
+
+test("a card without last digits shows no mask", async () => {
+  vi.mocked(actions.cards).mockResolvedValue({ state: "ready", items: [{ id: "c1", title: "Visa", last4: "" }] });
+  openMenu("cards");
+  await vi.waitFor(() => expect(shadow().querySelector(".item")).not.toBeNull());
+  expect(shadow().querySelector(".item")!.textContent).not.toContain("•");
+});
+
+test("no cards, and the secure-page note on an insecure page", async () => {
+  vi.mocked(actions.cards).mockResolvedValue({ state: "ready", items: [] });
+  openMenu("cards");
+  await vi.waitFor(() => expect(shadow().textContent).toMatch(/No cards in Lockbox|only filled on secure pages/));
+  // jsdom runs on http://localhost:3000 — not https.
+  expect(shadow().textContent).toContain("Cards are only filled on secure pages");
+  vi.stubGlobal("location", { protocol: "https:" });
+  shadow().querySelector<HTMLButtonElement>("button.icon")!.click();
+  await vi.waitFor(() => expect(shadow().textContent).toContain("No cards in Lockbox"));
+  vi.unstubAllGlobals();
+});
+
+test("identities mode shows title and detail; picking fills; empty notes", async () => {
+  openMenu("identities");
+  await vi.waitFor(() => expect(shadow().querySelector(".item")).not.toBeNull());
+  expect(shadow().querySelector(".item")!.textContent).toContain("Home");
+  expect(shadow().querySelector(".item")!.textContent).toContain("Ivan, Berlin");
+  (shadow().querySelector(".item") as HTMLButtonElement).click();
+  expect(actions.fillIdentity).toHaveBeenCalledWith("a1");
+
+  vi.mocked(actions.identities).mockResolvedValue({ state: "ready", items: [] });
+  shadow().querySelector<HTMLButtonElement>("button.icon")!.click();
+  await vi.waitFor(() => expect(shadow().textContent).toContain("Addresses are only filled on secure pages"));
+  vi.stubGlobal("location", { protocol: "https:" });
+  shadow().querySelector<HTMLButtonElement>("button.icon")!.click();
+  await vi.waitFor(() => expect(shadow().textContent).toContain("No addresses in Lockbox"));
+  vi.unstubAllGlobals();
+});
+
+test("untrusted clicks and early clicks are ignored in the new modes", async () => {
+  const strict = new InlineMenu(actions, { onRoot: (r) => (root = r) });
+  openMenu("cards", strict);
+  await Promise.resolve();
+  expect(actions.cards).not.toHaveBeenCalled();
+
+  const quick = new InlineMenu(actions, { onRoot: (r) => (root = r), trusted: () => true, settleMs: 60_000 });
+  const f2 = document.createElement("input");
+  document.body.append(f2);
+  quick.watch(f2, "generator");
+  f2.dispatchEvent(new FocusEvent("focus"));
+  shadow().querySelector<HTMLButtonElement>("button.icon")!.click();
+  await vi.waitFor(() => expect(shadow().querySelector(".item")).not.toBeNull());
+  (shadow().querySelector(".item") as HTMLButtonElement).click();
+  expect(actions.useGenerated).not.toHaveBeenCalled();
 });
