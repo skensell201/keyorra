@@ -15,6 +15,7 @@ use crate::autolock::AutoLock;
 use crate::clipboard::ClipboardGuard;
 use crate::error::{CmdError, CmdResult, ErrorKind};
 use crate::settings::Settings;
+use crate::sleep::SleepDetector;
 use crate::throttle::UnlockThrottle;
 
 #[cfg(test)]
@@ -44,6 +45,7 @@ pub struct Session {
     pending_import: Option<ImportPlan>,
     settings: Settings,
     settings_path: PathBuf,
+    sleep: SleepDetector,
 }
 
 impl Session {
@@ -61,6 +63,7 @@ impl Session {
             pending_import: None,
             settings,
             settings_path,
+            sleep: SleepDetector::default(),
         }
     }
 
@@ -195,6 +198,17 @@ impl Session {
                 Err(lockbox_core::Error::WrongPassword.into())
             }
             Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Housekeeping tick from the app: also locks when the screen is locked or the Mac slept.
+    pub fn tick_with(&mut self, now: u64, screen_locked: bool) -> bool {
+        let slept = self.sleep.observe(now);
+        if self.store.is_some() && (screen_locked || slept || self.autolock.is_due(now)) {
+            self.lock();
+            true
+        } else {
+            false
         }
     }
 

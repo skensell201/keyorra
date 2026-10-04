@@ -716,3 +716,14 @@ fn change_password_checks_input_and_counts_wrong_guesses() {
         ErrorKind::Locked
     );
 }
+
+#[test]
+fn tick_with_locks_on_screen_lock_and_after_sleep() {
+    let (_dir, mut s) = unlocked_session();
+    assert!(!s.tick_with(1_002, false));
+    assert!(s.tick_with(1_004, true), "screen locked");
+    s.unlock(PW, 1_006).unwrap();
+    assert!(!s.tick_with(1_008, false));
+    assert!(s.tick_with(1_008 + 300, false), "the Mac slept");
+    assert!(!s.tick_with(1_400, true), "already locked");
+}
