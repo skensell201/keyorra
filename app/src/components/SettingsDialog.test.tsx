@@ -140,3 +140,10 @@ test("connects browsers and removes a paired one", async () => {
   expect(api.removePairedBrowser).toHaveBeenCalledWith("c1");
   await waitFor(() => expect(screen.queryByRole("button", { name: "Disconnect Chrome" })).not.toBeInTheDocument());
 });
+
+test("says so when the browsers cannot be loaded", async () => {
+  vi.mocked(api.pairedBrowsers).mockRejectedValue({ kind: "other", message: "boom" });
+  render(<SettingsDialog onClose={vi.fn()} />);
+  expect(await screen.findByText("Couldn't load browsers")).toBeInTheDocument();
+  expect(screen.queryByText("No browsers connected yet.")).not.toBeInTheDocument();
+});

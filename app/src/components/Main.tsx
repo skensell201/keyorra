@@ -164,7 +164,7 @@ export function Main({ onLock }: { onLock: () => void }) {
       </section>
       {importing && <ImportDialog onClose={() => setImporting(false)} onImported={refresh} />}
       {showSettings && <SettingsDialog onClose={() => setShowSettings(false)} />}
-      {pairing && <PairingDialog request={pairing} onDone={() => setPairing(null)} />}
+      {pairing && <PairingDialog key={pairing.clientId} request={pairing} onDone={() => setPairing(null)} />}
     </div>
   );
 }

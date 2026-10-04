@@ -19,6 +19,11 @@ pub fn serve(app: AppHandle, socket: PathBuf) {
     if let Some(dir) = socket.parent() {
         let _ = std::fs::create_dir_all(dir);
     }
+    // A live socket means another instance is already serving; leave it alone.
+    if UnixStream::connect(&socket).is_ok() {
+        eprintln!("lockbox: browser bridge already served by another instance");
+        return;
+    }
     // A stale socket from a previous run would make bind fail.
     let _ = std::fs::remove_file(&socket);
     let listener = match UnixListener::bind(&socket) {
@@ -29,9 +34,14 @@ pub fn serve(app: AppHandle, socket: PathBuf) {
         }
     };
     let _ = std::fs::set_permissions(&socket, std::fs::Permissions::from_mode(0o600));
-    for stream in listener.incoming().flatten() {
-        let app = app.clone();
-        std::thread::spawn(move || connection(app, stream));
+    for stream in listener.incoming() {
+        match stream {
+            Ok(stream) => {
+                let app = app.clone();
+                std::thread::spawn(move || connection(app, stream));
+            }
+            Err(_) => std::thread::sleep(Duration::from_millis(100)),
+        }
     }
 }
 

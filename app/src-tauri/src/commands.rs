@@ -140,16 +140,30 @@ pub fn connect_browsers() -> CmdResult<Vec<String>> {
         .ok_or_else(|| CmdError::new(ErrorKind::Other, "HOME is not set"))?;
     let exe =
         std::env::current_exe().map_err(|e| CmdError::new(ErrorKind::Other, e.to_string()))?;
+    if exe.to_string_lossy().contains("/AppTranslocation/") {
+        return Err(CmdError::new(
+            ErrorKind::Invalid,
+            "Move Lockbox to Applications, then try again",
+        ));
+    }
     let app_support = home.join("Library/Application Support");
     let mut done = Vec::new();
+    let mut failure = None;
     for m in lockbox_session::bridge::host::manifests(&app_support, &exe) {
-        if let Some(dir) = m.path.parent() {
-            std::fs::create_dir_all(dir)
-                .map_err(|e| CmdError::new(ErrorKind::Other, e.to_string()))?;
+        let written = match m.path.parent() {
+            Some(dir) => std::fs::create_dir_all(dir),
+            None => Ok(()),
         }
-        std::fs::write(&m.path, m.contents)
-            .map_err(|e| CmdError::new(ErrorKind::Other, e.to_string()))?;
-        done.push(m.browser.to_string());
+        .and_then(|_| std::fs::write(&m.path, m.contents));
+        match written {
+            Ok(()) => done.push(m.browser.to_string()),
+            Err(e) => failure = Some(e.to_string()),
+        }
+    }
+    if done.is_empty() {
+        if let Some(message) = failure {
+            return Err(CmdError::new(ErrorKind::Other, message));
+        }
     }
     Ok(done)
 }

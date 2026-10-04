@@ -4,7 +4,7 @@ use std::io;
 use std::net::Shutdown;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::Duration;
 
 use lockbox_session::bridge::wire::socket_path;
@@ -20,13 +20,12 @@ pub fn run() -> i32 {
         return 1;
     };
     // The framing is identical on both sides, so bytes are copied as they are.
-    let upstream = std::thread::spawn(move || {
+    std::thread::spawn(move || {
         let _ = io::copy(&mut io::stdin().lock(), &mut to_app);
         let _ = to_app.shutdown(Shutdown::Write);
     });
     let mut from_app = stream;
     let _ = io::copy(&mut from_app, &mut io::stdout().lock());
-    let _ = upstream.join();
     0
 }
 
@@ -37,6 +36,9 @@ fn connect(socket: &Path) -> io::Result<UnixStream> {
     }
     let _ = Command::new("open")
         .args(["-g", "-b", "app.lockbox.mac"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status();
     for _ in 0..60 {
         std::thread::sleep(Duration::from_millis(250));

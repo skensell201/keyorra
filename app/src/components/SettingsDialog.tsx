@@ -23,9 +23,13 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [browsers, setBrowsers] = useState<PairedBrowser[]>([]);
+  const [browsersFailed, setBrowsersFailed] = useState(false);
   const [browsersNote, setBrowsersNote] = useState("");
   useEffect(() => {
-    api.pairedBrowsers().then(setBrowsers).catch(() => setBrowsers([]));
+    api
+      .pairedBrowsers()
+      .then(setBrowsers)
+      .catch(() => setBrowsersFailed(true));
   }, []);
   async function connectBrowsers() {
     try {
@@ -203,6 +207,8 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
                 </li>
               ))}
             </ul>
+          ) : browsersFailed ? (
+            <p className="muted">Couldn't load browsers</p>
           ) : (
             <p className="muted">No browsers connected yet.</p>
           )}
