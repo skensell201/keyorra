@@ -197,7 +197,7 @@ export function ItemEditor({ item, isNew, onSave, onCancel }: Props) {
                 ) : (
                   <span />
                 )}
-                <button type="button" aria-label={`Remove ${name}`} onClick={() => removeField(index)}>
+                <button type="button" className="icon" title="Remove" aria-label={`Remove ${name}`} onClick={() => removeField(index)}>
                   <IconClose />
                 </button>
               </div>

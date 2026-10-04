@@ -231,7 +231,7 @@ h3 { font-size: 14px; letter-spacing: -0.01em; }
 fieldset.fields { border: 1px solid var(--line); border-radius: var(--r-card); padding: 16px 20px 20px; margin: 0; display: flex; flex-direction: column; gap: 10px; background: var(--surface); box-shadow: var(--shadow); }
 fieldset.fields legend { color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; padding: 0 6px; }
 fieldset.fields .reveal { align-self: flex-start; }
-.field-edit { display: grid; grid-template-columns: 130px minmax(0, 1fr) 160px auto; gap: 8px; align-items: center; animation: fade-up var(--fast) var(--ease); }
+.field-edit { display: grid; grid-template-columns: minmax(150px, 0.9fr) minmax(0, 1.2fr) 150px 30px; gap: 8px; align-items: center; animation: fade-up var(--fast) var(--ease); }
 
 /* Generator */
 .generator { background: var(--surface); border: 1px solid var(--line); border-radius: var(--r-card); padding: 20px; display: flex; flex-direction: column; gap: 14px; box-shadow: var(--shadow); animation: pop var(--med) var(--ease); }
