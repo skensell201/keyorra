@@ -72,7 +72,7 @@ test("adds a one-time password secret", async () => {
   const user = userEvent.setup();
   render(<ItemEditor item={loginItem({ sections: [] })} isNew={false} onSave={vi.fn()} onCancel={vi.fn()} />);
   await user.click(screen.getByRole("button", { name: "Add one-time password" }));
-  await user.type(screen.getByLabelText("Value of one-time password"), "JBSWY3DPEHPK3PXP");
+  await user.type(screen.getByLabelText("Value of field 1"), "JBSWY3DPEHPK3PXP");
   await user.click(screen.getByRole("button", { name: "Save" }));
   const otp = saved().fields.find((f) => f.value.type === "totp");
   expect(otp).toMatchObject({ label: "one-time password", value: { type: "totp", value: "JBSWY3DPEHPK3PXP" } });
@@ -91,11 +91,11 @@ test("edits, retypes, relabels and removes template fields", async () => {
     ],
   });
   render(<ItemEditor item={card} isNew onSave={vi.fn()} onCancel={vi.fn()} />);
-  await user.type(screen.getByLabelText("Value of number"), "4111111111111111");
-  await user.selectOptions(screen.getByLabelText("Type of cardholder name"), "concealed");
-  await user.clear(screen.getByLabelText("Label of cardholder name"));
+  await user.type(screen.getByLabelText("Value of field 2"), "4111111111111111");
+  await user.selectOptions(screen.getByLabelText("Type of field 1"), "concealed");
+  await user.clear(screen.getByLabelText("Label of field 1"));
   await user.type(screen.getByLabelText("Label of field 1"), "owner");
-  await user.click(screen.getByRole("button", { name: "Remove verification number" }));
+  await user.click(screen.getByRole("button", { name: "Remove field 3" }));
   await user.click(screen.getByRole("button", { name: "Save" }));
   expect(saved().fields).toEqual([
     { id: "cardholder", label: "owner", value: { type: "concealed", value: "" } },
@@ -110,4 +110,36 @@ test("adds a plain field", async () => {
   await user.type(screen.getByLabelText("Value of field 1"), "PIN 1234");
   await user.click(screen.getByRole("button", { name: "Save" }));
   expect(saved().fields[2]).toMatchObject({ label: "", value: { type: "text", value: "PIN 1234" } });
+});
+
+test("hidden values stay masked until the shared toggle reveals them", async () => {
+  const user = userEvent.setup();
+  const item = loginItem({
+    sections: [],
+    fields: [
+      ...loginItem().fields,
+      { id: "pin", label: "PIN", value: { type: "concealed", value: "1234" } },
+      { id: "otp-1", label: "one-time password", value: { type: "totp", value: "JBSWY3DPEHPK3PXP" } },
+    ],
+  });
+  render(<ItemEditor item={item} isNew={false} onSave={vi.fn()} onCancel={vi.fn()} />);
+  expect(screen.getByLabelText("Value of field 1")).toHaveAttribute("type", "password");
+  expect(screen.getByLabelText("Value of field 2")).toHaveAttribute("type", "password");
+  await user.click(screen.getByRole("button", { name: "Show hidden values" }));
+  expect(screen.getByLabelText("Value of field 1")).toHaveAttribute("type", "text");
+  expect(screen.getByLabelText("Value of field 2")).toHaveAttribute("type", "text");
+  await user.click(screen.getByRole("button", { name: "Hide hidden values" }));
+  expect(screen.getByLabelText("Value of field 1")).toHaveAttribute("type", "password");
+});
+
+test("a month/year field is shown read-only and saved unchanged", async () => {
+  const user = userEvent.setup();
+  const expiry = { id: "expiry", label: "expiry date", value: { type: "month_year", value: 202712 } } as const;
+  render(
+    <ItemEditor item={loginItem({ sections: [], fields: [...loginItem().fields, expiry] })} isNew={false} onSave={vi.fn()} onCancel={vi.fn()} />,
+  );
+  expect(screen.getByText("12/2027")).toBeInTheDocument();
+  expect(screen.queryByLabelText("Type of field 1")).not.toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Save" }));
+  expect(saved().fields[2]).toEqual(expiry);
 });

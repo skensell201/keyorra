@@ -88,3 +88,4 @@ fieldset.fields { border: 1px solid var(--border); border-radius: var(--radius);
 fieldset.fields legend { color: var(--muted); font-size: 12px; padding: 0 6px; }
 .field-edit { display: grid; grid-template-columns: 170px 1fr 150px auto; gap: 8px; align-items: center; }
 select { width: auto; }
+fieldset.fields .reveal { align-self: flex-start; }

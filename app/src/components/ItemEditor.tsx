@@ -25,12 +25,13 @@ function newFieldId(prefix: string): string {
   return `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
 }
 
-/** Edits the common fields; other fields and sections are passed through unchanged. */
+/** Edits the common fields and every other field; sections are passed through unchanged. */
 export function ItemEditor({ item, isNew, onSave, onCancel }: Props) {
   const [draft, setDraft] = useState<Item>(item);
   const [urls, setUrls] = useState(item.urls.join("\n"));
   const [tags, setTags] = useState(item.tags.join(", "));
   const [showPassword, setShowPassword] = useState(false);
+  const [showHidden, setShowHidden] = useState(false);
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -150,8 +151,11 @@ export function ItemEditor({ item, isNew, onSave, onCancel }: Props) {
       {custom.length > 0 && (
         <fieldset className="fields">
           <legend>Fields</legend>
+          <button type="button" className="reveal" onClick={() => setShowHidden((s) => !s)}>
+            {showHidden ? "Hide hidden values" : "Show hidden values"}
+          </button>
           {custom.map(({ field, index }, n) => {
-            const name = field.label || `field ${n + 1}`;
+            const name = `field ${n + 1}`;
             const editable = field.value.type !== "date" && field.value.type !== "month_year";
             return (
               <div className="field-edit" key={field.id}>
@@ -165,7 +169,7 @@ export function ItemEditor({ item, isNew, onSave, onCancel }: Props) {
                   <input
                     aria-label={`Value of ${name}`}
                     className={field.value.type === "text" ? undefined : "mono"}
-                    type={field.value.type === "concealed" ? "password" : "text"}
+                    type={!showHidden && (field.value.type === "concealed" || field.value.type === "totp") ? "password" : "text"}
                     placeholder={field.value.type === "totp" ? "otpauth://… or secret key" : ""}
                     value={text(index)}
                     onChange={(e) => setField(index, e.target.value)}
