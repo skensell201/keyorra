@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use lockbox_core::model::{FieldValue, Item, ItemKind, Purpose};
 use lockbox_core::store::ItemEntry;
 use lockbox_core::totp::Totp;
 use serde::{Deserialize, Serialize};
@@ -12,8 +13,10 @@ use super::Session;
 use crate::bridge::crypto::{
     self, b64, commitment, derive, nonce_of, public_from_b64, Direction, KeyPair,
 };
-use crate::bridge::protocol::{Candidate, Inbound, Outbound, Reply, Request, VERSION};
-use crate::bridge::site::{matches, Site};
+use crate::bridge::protocol::{
+    Candidate, Inbound, LookupStatus, Outbound, Reply, Request, VERSION,
+};
+use crate::bridge::site::{matches, Match, Site};
 use crate::error::{CmdError, CmdResult, ErrorKind};
 
 /// How long a pairing request waits for approval in the app.
@@ -381,7 +384,25 @@ impl Session {
                 items: self.candidates(&url),
             },
             Request::Fill { url, item_id } => self.credentials(&url, item_id, now),
-            // Served from the following tasks.
+            // Lookup and generate are not activity; a save is (via `save_item`).
+            Request::Lookup {
+                url,
+                username,
+                password,
+            } => self.lookup(&url, &username, &password),
+            Request::Save {
+                url,
+                username,
+                password,
+                item_id,
+            } => self.save_login(&url, &username, &password, item_id, now),
+            Request::Generate => match lockbox_core::generator::password(&Default::default()) {
+                Ok(generated) => Reply::Generated { generated },
+                Err(e) => Reply::Error {
+                    error: e.to_string(),
+                },
+            },
+            // Served in the next task.
             _ => Reply::Error {
                 error: "Unknown request".into(),
             },
@@ -449,6 +470,137 @@ impl Session {
         }
     }
 
+    /// Same-site logins whose username matches (case-insensitive), best match first.
+    fn same_user(&self, page: &Site, username: &str) -> Option<Item> {
+        let store = self.store.as_ref()?;
+        let entries = store.list_items(None).ok()?;
+        let mut found: Vec<(Match, Item)> = entries
+            .into_iter()
+            .filter_map(|e| match e {
+                ItemEntry::Ok(item) if item.kind == ItemKind::Login => {
+                    let m = item.urls.iter().filter_map(|u| matches(page, u)).max()?;
+                    let same = item
+                        .username()
+                        .unwrap_or_default()
+                        .eq_ignore_ascii_case(username.trim());
+                    same.then_some((m, item))
+                }
+                _ => None,
+            })
+            .collect();
+        found.sort_by_key(|(m, _)| std::cmp::Reverse(*m));
+        found.into_iter().next().map(|(_, item)| item)
+    }
+
+    /// Never returns the stored password, only whether it differs.
+    fn lookup(&self, url: &str, username: &str, password: &str) -> Reply {
+        let Some(page) = Site::of(url) else {
+            return Reply::Error {
+                error: "This page can't be saved".into(),
+            };
+        };
+        match self.same_user(&page, username) {
+            Some(item) if item.password() == Some(password) => Reply::Lookup {
+                status: LookupStatus::Same,
+                item_id: Some(item.id),
+            },
+            Some(item) => Reply::Lookup {
+                status: LookupStatus::Changed,
+                item_id: Some(item.id),
+            },
+            None => Reply::Lookup {
+                status: LookupStatus::New,
+                item_id: None,
+            },
+        }
+    }
+
+    fn save_login(
+        &mut self,
+        url: &str,
+        username: &str,
+        password: &str,
+        item_id: Option<Uuid>,
+        now: u64,
+    ) -> Reply {
+        let Some(page) = Site::of(url) else {
+            return Reply::Error {
+                error: "This page can't be saved".into(),
+            };
+        };
+        if password.is_empty() {
+            return Reply::Error {
+                error: "Nothing to save".into(),
+            };
+        }
+        let result = match item_id {
+            Some(id) => self.update_password(&page, id, username, password, now),
+            None => self.create_login(&page, username, password, now),
+        };
+        match result {
+            Ok(id) => Reply::Saved { saved: id },
+            Err(e) => Reply::Error { error: e.message },
+        }
+    }
+
+    fn update_password(
+        &mut self,
+        page: &Site,
+        id: Uuid,
+        username: &str,
+        password: &str,
+        now: u64,
+    ) -> CmdResult<Uuid> {
+        let mut item = self.item(id, now)?;
+        if item.kind != ItemKind::Login || !item.urls.iter().any(|u| matches(page, u).is_some()) {
+            return Err(CmdError::new(
+                ErrorKind::Invalid,
+                "This login doesn't belong to this site",
+            ));
+        }
+        if let Some(f) = item
+            .fields
+            .iter_mut()
+            .find(|f| f.purpose == Some(Purpose::Username))
+        {
+            if f.value.as_str().unwrap_or_default().is_empty() && !username.is_empty() {
+                f.value = FieldValue::Text(username.to_owned());
+            }
+        }
+        set_password_field(&mut item, password);
+        Ok(self.save_item(item, now)?.id)
+    }
+
+    fn create_login(
+        &mut self,
+        page: &Site,
+        username: &str,
+        password: &str,
+        now: u64,
+    ) -> CmdResult<Uuid> {
+        let vault = self
+            .vaults(now)?
+            .into_iter()
+            .next()
+            .ok_or_else(|| CmdError::new(ErrorKind::NotFound, "No vault to save into"))?;
+        let mut item = self.new_item(vault.id, ItemKind::Login, now)?;
+        item.title = page.host.clone();
+        item.urls = vec![format!(
+            "{}://{}",
+            if page.secure { "https" } else { "http" },
+            page.host_with_port()
+        )];
+        if let Some(f) = item
+            .fields
+            .iter_mut()
+            .find(|f| f.purpose == Some(Purpose::Username))
+        {
+            f.value = FieldValue::Text(username.trim().to_owned());
+        }
+        set_password_field(&mut item, password);
+        Ok(self.save_item(item, now)?.id)
+    }
+
     /// An unapproved request that timed out counts as a failure.
     /// An unapproved request that timed out counts as a failure. A clock that went backwards
     /// (`now < created_at`) also counts as expired.
@@ -494,6 +646,23 @@ impl Session {
     fn save_pairings(&mut self, all: &[Pairing]) -> CmdResult<()> {
         let json = Zeroizing::new(serde_json::to_vec(all).expect("pairings serialize"));
         Ok(self.store_mut()?.set_sealed_meta(PAIRINGS_META, &json)?)
+    }
+}
+
+/// `save_item` records the replaced password in the history.
+fn set_password_field(item: &mut Item, password: &str) {
+    match item
+        .fields
+        .iter_mut()
+        .find(|f| f.purpose == Some(Purpose::Password))
+    {
+        Some(f) => f.value = FieldValue::Concealed(password.to_owned()),
+        None => item.fields.push(lockbox_core::model::Field {
+            id: "password".into(),
+            label: "password".into(),
+            value: FieldValue::Concealed(password.to_owned()),
+            purpose: Some(Purpose::Password),
+        }),
     }
 }
 

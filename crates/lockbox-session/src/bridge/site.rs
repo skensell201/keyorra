@@ -7,6 +7,8 @@ use url::{Host, Url};
 pub struct Site {
     pub host: String,
     pub domain: String,
+    /// The explicit port, if the URL has one.
+    pub port: Option<u16>,
     /// The page was loaded over https.
     pub secure: bool,
     /// An IP address, `localhost` or `*.localhost`: exempt from the https-only rule.
@@ -33,9 +35,18 @@ impl Site {
         Some(Site {
             host,
             domain,
+            port: url.port(),
             secure: url.scheme() == "https",
             local,
         })
+    }
+
+    /// `host` or `host:port`, for building a URL.
+    pub fn host_with_port(&self) -> String {
+        match self.port {
+            Some(port) => format!("{}:{port}", self.host),
+            None => self.host.clone(),
+        }
     }
 }
 
@@ -87,6 +98,19 @@ mod tests {
         assert_eq!(site("https://GitHub.COM./login").host, "github.com");
         assert_eq!(site("http://192.168.1.10:8006/").domain, "192.168.1.10");
         assert_eq!(site("http://localhost:8765/login.html").domain, "localhost");
+    }
+
+    #[test]
+    fn host_with_port_keeps_an_explicit_port() {
+        assert_eq!(
+            site("http://localhost:8765/x").host_with_port(),
+            "localhost:8765"
+        );
+        assert_eq!(site("https://a.example/x").host_with_port(), "a.example");
+        assert_eq!(
+            site("https://a.example:443/x").host_with_port(),
+            "a.example"
+        );
     }
 
     #[test]

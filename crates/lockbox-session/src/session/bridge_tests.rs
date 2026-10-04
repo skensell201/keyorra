@@ -826,3 +826,115 @@ fn a_trashed_login_is_neither_listed_nor_filled() {
     assert!(refused["error"].is_string(), "{refused}");
     assert!(refused.get("password").is_none());
 }
+
+#[test]
+fn lookup_tells_new_changed_and_same_without_revealing_passwords() {
+    let (_dir, mut s) = unlocked_session();
+    let p = personal(&mut s);
+    let mut gh = save_login(&mut s, p, "GitHub", "ivan", "old-pass");
+    gh.urls = vec!["https://github.com".into()];
+    let gh = s.save_item(gh, 1_000).unwrap();
+    let ext = paired(&mut s);
+    let look = |s: &mut Session, user: &str, pw: &str| {
+        call(
+            s,
+            &ext,
+            json!({"op": "lookup", "url": "https://github.com/login", "username": user, "password": pw}),
+            1_000,
+        )
+    };
+    assert_eq!(
+        look(&mut s, "ivan", "old-pass"),
+        json!({"status": "same", "itemId": gh.id})
+    );
+    assert_eq!(
+        look(&mut s, "ivan", "new-pass"),
+        json!({"status": "changed", "itemId": gh.id})
+    );
+    assert_eq!(
+        look(&mut s, "someone-else", "x"),
+        json!({"status": "new", "itemId": null})
+    );
+    assert!(!look(&mut s, "ivan", "new-pass")
+        .to_string()
+        .contains("old-pass"));
+}
+
+#[test]
+fn save_creates_a_login_for_the_site_and_update_keeps_history() {
+    let (_dir, mut s) = unlocked_session();
+    let ext = paired(&mut s);
+    let created = call(
+        &mut s,
+        &ext,
+        json!({"op": "save", "url": "https://shop.example.com/signup", "username": "me@x.com", "password": "pw1", "itemId": null}),
+        2_000,
+    );
+    let id: uuid::Uuid = serde_json::from_value(created["saved"].clone()).unwrap();
+    let item = s.item(id, 2_000).unwrap();
+    assert_eq!(item.title, "shop.example.com");
+    assert_eq!(item.urls, ["https://shop.example.com"]);
+    assert_eq!(
+        (item.username(), item.password()),
+        (Some("me@x.com"), Some("pw1"))
+    );
+
+    let updated = call(
+        &mut s,
+        &ext,
+        json!({"op": "save", "url": "https://shop.example.com/account", "username": "me@x.com", "password": "pw2", "itemId": id}),
+        3_000,
+    );
+    assert_eq!(updated["saved"], json!(id));
+    let item = s.item(id, 3_000).unwrap();
+    assert_eq!(item.password(), Some("pw2"));
+    assert_eq!(item.password_history[0].value, "pw1");
+}
+
+#[test]
+fn save_refuses_other_sites_items_insecure_downgrades_and_empty_passwords() {
+    let (_dir, mut s) = unlocked_session();
+    let p = personal(&mut s);
+    let mut bank = save_login(&mut s, p, "Bank", "me", "bank-pw");
+    bank.urls = vec!["https://bank.example".into()];
+    let bank = s.save_item(bank, 1_000).unwrap();
+    let ext = paired(&mut s);
+    let r = call(
+        &mut s,
+        &ext,
+        json!({"op": "save", "url": "https://evil.example.org", "username": "me", "password": "x", "itemId": bank.id}),
+        1_000,
+    );
+    assert_eq!(r["error"], "This login doesn't belong to this site");
+    assert_eq!(s.item(bank.id, 1_000).unwrap().password(), Some("bank-pw"));
+    let r = call(
+        &mut s,
+        &ext,
+        json!({"op": "save", "url": "https://a.example", "username": "me", "password": "", "itemId": null}),
+        1_000,
+    );
+    assert_eq!(r["error"], "Nothing to save");
+    let r = call(
+        &mut s,
+        &ext,
+        json!({"op": "save", "url": "chrome://settings", "username": "me", "password": "x", "itemId": null}),
+        1_000,
+    );
+    assert_eq!(r["error"], "This page can't be saved");
+}
+
+#[test]
+fn generate_returns_a_strong_password() {
+    let (_dir, mut s) = unlocked_session();
+    let ext = paired(&mut s);
+    let a = call(&mut s, &ext, json!({"op": "generate"}), 1_000)["generated"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let b = call(&mut s, &ext, json!({"op": "generate"}), 1_000)["generated"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(a.chars().count(), 20);
+    assert_ne!(a, b);
+}
