@@ -18,8 +18,13 @@ use crate::settings::Settings;
 use crate::sleep::SleepDetector;
 use crate::throttle::UnlockThrottle;
 
+mod bridge;
+#[cfg(test)]
+mod bridge_tests;
 #[cfg(test)]
 mod tests;
+
+pub use bridge::{BridgeEvent, PairedBrowser, PairingRequest};
 
 pub const MIN_PASSWORD_LEN: usize = 10;
 const MAX_IMPORT_BYTES: u64 = 1 << 30;
@@ -46,6 +51,10 @@ pub struct Session {
     settings: Settings,
     settings_path: PathBuf,
     sleep: SleepDetector,
+    pending: Option<bridge::PendingPairing>,
+    pair_failures: u32,
+    pair_blocked_until: u64,
+    guard_path: PathBuf,
 }
 
 impl Session {
@@ -53,6 +62,8 @@ impl Session {
     pub fn new(path: PathBuf, kdf: KdfParams, now: u64) -> Self {
         let settings_path = path.with_file_name("settings.json");
         let settings = Settings::load(&settings_path);
+        let guard_path = path.with_file_name(bridge::GUARD_FILE);
+        let guard = bridge::PairGuard::load(&guard_path);
         Self {
             path,
             kdf,
@@ -64,6 +75,10 @@ impl Session {
             settings,
             settings_path,
             sleep: SleepDetector::default(),
+            pending: None,
+            pair_failures: guard.failures,
+            pair_blocked_until: guard.blocked_until,
+            guard_path,
         }
     }
 
@@ -136,6 +151,7 @@ impl Session {
     pub fn lock(&mut self) {
         self.store = None;
         self.pending_import = None;
+        self.pending = None;
     }
 
     /// Records user activity for the auto-lock timer.

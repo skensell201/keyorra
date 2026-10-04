@@ -11,5 +11,5 @@ pub mod sleep;
 pub mod throttle;
 
 pub use error::{CmdError, CmdResult, ErrorKind};
-pub use session::{Session, Status};
+pub use session::{BridgeEvent, PairedBrowser, PairingRequest, Session, Status};
 pub use settings::Settings;
