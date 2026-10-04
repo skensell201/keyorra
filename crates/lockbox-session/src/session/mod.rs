@@ -300,12 +300,29 @@ impl Session {
         // An empty one-time-password field would make every code request fail.
         item.fields
             .retain(|f| !matches!(&f.value, FieldValue::Totp(s) if s.trim().is_empty()));
+        // Only new or changed secrets are validated: imported items may carry values we can't
+        // generate codes for, and those must not block unrelated edits.
+        let known: Vec<String> = match self.store()?.get_item(item.id) {
+            Ok(old) => old
+                .fields
+                .iter()
+                .chain(old.sections.iter().flat_map(|s| s.fields.iter()))
+                .filter_map(|f| match &f.value {
+                    FieldValue::Totp(raw) => Some(raw.clone()),
+                    _ => None,
+                })
+                .collect(),
+            Err(_) => Vec::new(),
+        };
         for field in item
             .fields
             .iter()
             .chain(item.sections.iter().flat_map(|s| s.fields.iter()))
         {
             if let FieldValue::Totp(raw) = &field.value {
+                if known.contains(raw) {
+                    continue;
+                }
                 Totp::parse(raw).map_err(|e| {
                     CmdError::new(
                         ErrorKind::Invalid,

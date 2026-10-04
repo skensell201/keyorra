@@ -80,7 +80,7 @@ fn repeated_wrong_passwords_are_throttled() {
 #[test]
 fn tick_locks_after_the_idle_timeout_and_touch_postpones_it() {
     let (_dir, mut s) = unlocked_session(); // last activity: 1_000
-    let timeout = AutoLock::DEFAULT_TIMEOUT_SECS;
+    let timeout = Settings::default().auto_lock_minutes * 60;
     assert!(!s.tick(1_000 + timeout - 1));
     s.touch(1_500);
     assert!(!s.tick(1_000 + timeout));
@@ -341,7 +341,7 @@ fn totp_is_none_without_a_totp_field() {
 fn polling_totp_does_not_keep_the_vault_unlocked() {
     let (_dir, mut s) = unlocked_session();
     let item = with_totp_and_dates(&mut s);
-    let timeout = AutoLock::DEFAULT_TIMEOUT_SECS;
+    let timeout = Settings::default().auto_lock_minutes * 60;
     s.totp(item.id, 1_000 + timeout - 1).unwrap();
     assert!(s.tick(1_000 + timeout));
 }
@@ -352,7 +352,10 @@ fn copy_returns_the_value_and_arms_clipboard_clearing() {
     let item = with_totp_and_dates(&mut s);
     assert_eq!(s.copy_value(item.id, "password", 1_000).unwrap(), "hunter2");
     assert!(s.clipboard_pending());
-    assert!(s.clipboard_should_clear(1_000 + ClipboardGuard::DEFAULT_CLEAR_SECS, Some("hunter2")));
+    assert!(s.clipboard_should_clear(
+        1_000 + Settings::default().clipboard_seconds,
+        Some("hunter2")
+    ));
 }
 
 #[test]
@@ -726,4 +729,59 @@ fn tick_with_locks_on_screen_lock_and_after_sleep() {
     assert!(!s.tick_with(1_008, false));
     assert!(s.tick_with(1_008 + 300, false), "the Mac slept");
     assert!(!s.tick_with(1_400, true), "already locked");
+}
+
+fn hotp_section() -> Section {
+    Section {
+        id: "s1".into(),
+        title: "Extra".into(),
+        fields: vec![Field {
+            id: "hotp".into(),
+            label: "counter token".into(),
+            value: FieldValue::Totp("otpauth://hotp/x?secret=JBSWY3DPEHPK3PXP".into()),
+            purpose: None,
+        }],
+    }
+}
+
+#[test]
+fn unchanged_unparsable_totp_values_do_not_block_edits() {
+    let (_dir, mut s) = unlocked_session();
+    let p = personal(&mut s);
+    let mut item = save_login(&mut s, p, "GitHub", "ivan", "pw");
+    item.sections.push(hotp_section());
+    s.store.as_mut().unwrap().save_item(&item).unwrap();
+    item.title = "GitHub 2".into();
+    assert_eq!(s.save_item(item, 1_000).unwrap().title, "GitHub 2");
+}
+
+#[test]
+fn changing_a_valid_totp_to_an_invalid_one_is_refused() {
+    let (_dir, mut s) = unlocked_session();
+    let p = personal(&mut s);
+    let mut item = save_login(&mut s, p, "GitHub", "ivan", "pw");
+    item.fields.push(Field {
+        id: "otp-1".into(),
+        label: "one-time password".into(),
+        value: FieldValue::Totp(RFC_SECRET.into()),
+        purpose: None,
+    });
+    let mut item = s.save_item(item, 1_000).unwrap();
+    item.fields[2].value = FieldValue::Totp("not a secret!!".into());
+    assert_eq!(
+        s.save_item(item, 1_000).unwrap_err().kind,
+        ErrorKind::Invalid
+    );
+}
+
+#[test]
+fn a_new_unparsable_section_totp_is_refused() {
+    let (_dir, mut s) = unlocked_session();
+    let p = personal(&mut s);
+    let mut item = save_login(&mut s, p, "GitHub", "ivan", "pw");
+    item.sections.push(hotp_section());
+    assert_eq!(
+        s.save_item(item, 1_000).unwrap_err().kind,
+        ErrorKind::Invalid
+    );
 }
