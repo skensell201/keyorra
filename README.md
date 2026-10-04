@@ -36,6 +36,13 @@ cd extension && pnpm install && pnpm test && pnpm build   # dist/chromium, dist/
 3. Click the Lockbox toolbar icon → **Connect**, check the code matches in the app → **Connect**.
 4. Focus a login field → Lockbox icon → pick a login. Shortcut: set "Fill the best login"
    in `chrome://extensions/shortcuts`.
+5. After you sign in, Lockbox offers to save a new login or update a changed password
+   (the old one stays in the item's history).
+6. On sign-up and change-password forms the icon offers a strong password; Lockbox saves it
+   as a separate draft login right away, so it is never lost.
+7. Card and address fields get the icon too. Cards and addresses are offered only on https
+   pages, this Mac or the local network. Payment fields inside separate iframes (e.g. Stripe
+   Elements) are filled one field at a time.
 
 Security model: see the spec, section "Cryptography".
 
