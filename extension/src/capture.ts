@@ -4,6 +4,8 @@ import { findLoginFields, findNewPasswordFields } from "./detect";
 export interface Submission {
   username: string;
   password: string;
+  /** The form asks for the current password and sets a new one: it names no account of its own. */
+  changePassword?: boolean;
 }
 
 export interface CaptureOptions {
@@ -11,16 +13,18 @@ export interface CaptureOptions {
   trusted?: (e: Event) => boolean;
 }
 
-const SUBMIT_TEXT = /sign.?in|log.?in|continue|next|войти|далее/i;
+const SUBMIT_TEXT = /sign.?in|sign.?up|register|create|save|update|change|log.?in|continue|next|войти|далее|зарегистр|сохран/i;
 const DEDUP_MS = 2000;
 
 /** The credentials in a form (or the page if there is no form); the new password wins on sign-up/change forms. */
 function read(scope: Document | HTMLElement): Submission | null {
   const fields = findLoginFields(scope);
-  const fresh = findNewPasswordFields(scope).find((p) => p.value);
+  const news = findNewPasswordFields(scope);
+  const fresh = news.find((p) => p.value);
   const password = fresh?.value || fields.password?.value || "";
   if (!password) return null;
-  return { username: fields.username?.value ?? "", password };
+  const change = !!fresh && !!fields.password && !news.includes(fields.password);
+  return { username: fields.username?.value ?? "", password, ...(change ? { changePassword: true } : {}) };
 }
 
 function submitLike(el: HTMLElement): boolean {

@@ -99,3 +99,73 @@ test("page-controlled text is never parsed as HTML; the root is closed", () => {
   expect(root.textContent).toContain("<img");
   expect(document.querySelector("lockbox-savebar")!.shadowRoot).toBeNull();
 });
+
+test("the host is in the page only while the bar is shown", () => {
+  expect(document.querySelector("lockbox-savebar")).toBeNull();
+  bar.show({ username: "ivan", status: "new" });
+  expect(document.querySelector("lockbox-savebar")).not.toBeNull();
+  bar.hide();
+  expect(document.querySelector("lockbox-savebar")).toBeNull();
+  bar.show({ username: "ivan", status: "new" });
+  btn("Not now").click();
+  expect(document.querySelector("lockbox-savebar")).toBeNull();
+});
+
+test("the bar is an alert dialog labelled by its message", () => {
+  bar.show({ username: "ivan", status: "new" });
+  const el = root.querySelector(".bar")!;
+  expect(el.getAttribute("role")).toBe("alertdialog");
+  const label = root.getElementById?.(el.getAttribute("aria-labelledby")!) ?? root.querySelector(`#${el.getAttribute("aria-labelledby")}`);
+  expect(label?.textContent).toContain("Save login for");
+});
+
+test("Escape dismisses, but only a trusted one and only while shown", () => {
+  const esc = () => document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+  esc();
+  expect(actions.dismiss).not.toHaveBeenCalled();
+  bar.show({ username: "ivan", status: "new" });
+  trusted = false;
+  esc();
+  expect(root.querySelector(".bar")).not.toBeNull();
+  trusted = true;
+  esc();
+  expect(actions.dismiss).toHaveBeenCalledTimes(1);
+  expect(root.querySelector(".bar")).toBeNull();
+  esc();
+  expect(actions.dismiss).toHaveBeenCalledTimes(1);
+});
+
+test("hovering or focusing the bar pauses the auto-hide", () => {
+  bar.show({ username: "ivan", status: "new" });
+  const el = root.querySelector(".bar")!;
+  vi.advanceTimersByTime(20_000);
+  el.dispatchEvent(new MouseEvent("mouseenter"));
+  vi.advanceTimersByTime(60_000);
+  expect(root.querySelector(".bar")).not.toBeNull();
+  el.dispatchEvent(new MouseEvent("mouseleave"));
+  vi.advanceTimersByTime(29_000);
+  expect(root.querySelector(".bar")).not.toBeNull();
+  vi.advanceTimersByTime(1_500);
+  expect(root.querySelector(".bar")).toBeNull();
+
+  bar.show({ username: "ivan", status: "new" });
+  const again = root.querySelector(".bar")!;
+  again.dispatchEvent(new FocusEvent("focusin"));
+  vi.advanceTimersByTime(60_000);
+  expect(root.querySelector(".bar")).not.toBeNull();
+  again.dispatchEvent(new FocusEvent("focusout"));
+  vi.advanceTimersByTime(30_500);
+  expect(root.querySelector(".bar")).toBeNull();
+});
+
+test("a host moved away from <html> is refused by the default visibility check", () => {
+  const real = new SaveBar(actions, { onRoot: (r) => (root = r), trusted: () => true, settleMs: 0 });
+  real.show({ username: "ivan", status: "new" });
+  const host = document.querySelector("lockbox-savebar")!;
+  document.body.append(host);
+  btn("Save").click();
+  expect(actions.save).not.toHaveBeenCalled();
+  document.documentElement.append(host);
+  btn("Save").click();
+  expect(actions.save).toHaveBeenCalled();
+});

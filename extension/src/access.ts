@@ -5,9 +5,20 @@ import type { ToBackground } from "./messages";
 export interface Sender {
   id?: string;
   url?: string;
+  frameId?: number;
 }
 
 export type Decision = { ok: true; url: string } | { ok: false; message: string };
+
+function validPending(msg: object): boolean {
+  const m = msg as Record<string, unknown>;
+  return (
+    typeof m.username === "string" &&
+    typeof m.password === "string" &&
+    (m.itemId === null || typeof m.itemId === "string") &&
+    (m.status === "new" || m.status === "changed")
+  );
+}
 
 export function authorize(msg: ToBackground, sender: Sender, extensionId: string, extensionBase: string): Decision {
   const extPage = sender.id === extensionId && !!sender.url?.startsWith(extensionBase);
@@ -32,9 +43,13 @@ export function authorize(msg: ToBackground, sender: Sender, extensionId: string
     case "fillCard":
     case "identities":
     case "fillIdentity":
-    case "pendingSave":
-    case "takePendingSave":
       return page ? { ok: true, url: sender.url! } : refuse();
+    case "pendingSave":
+      // Only the top frame may park a login, with well-formed fields.
+      return page && sender.frameId === 0 && validPending(msg) ? { ok: true, url: sender.url! } : refuse();
+    case "takePendingSave":
+    case "clearPendingSave":
+      return page && sender.frameId === 0 ? { ok: true, url: sender.url! } : refuse();
     default:
       return { ok: false, message: "Unknown request" };
   }

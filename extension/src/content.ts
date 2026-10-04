@@ -79,13 +79,19 @@ let offer: { username: string; password: string; itemId: string | null } | null 
 
 const saveBar = new SaveBar({
   save: async () => {
-    if (!offer) return;
-    const r = await ask<string>({ type: "save", username: offer.username, password: offer.password, itemId: offer.itemId });
-    if (!r.ok) throw new Error(r.message);
-    offer = null;
+    if (!offer) throw new Error("Nothing to save");
+    const { username, password, itemId } = offer;
+    try {
+      const r = await ask<string>({ type: "save", username, password, itemId });
+      if (!r.ok) throw new Error(r.message);
+      offer = null;
+    } finally {
+      void ask({ type: "clearPendingSave" }).catch(() => {});
+    }
   },
   dismiss: () => {
     offer = null;
+    void ask({ type: "clearPendingSave" }).catch(() => {});
   },
 });
 
@@ -96,7 +102,7 @@ function showOffer(o: PendingSave): void {
 
 /** Change-password forms (current + new password) have no username field: if exactly one login matches this site, it is the account. */
 async function withUsername(s: Submission): Promise<Submission> {
-  if (s.username) return s;
+  if (s.username || !s.changePassword) return s;
   const r = await ask<Candidate[]>({ type: "list" });
   return r.ok && r.value.length === 1 ? { ...s, username: r.value[0].username } : s;
 }

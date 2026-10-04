@@ -67,12 +67,29 @@ test("save, generate, cards and identities are refused from extension pages and 
 });
 
 const pending = { type: "pendingSave", username: "u", password: "p", itemId: null, status: "new" };
+const top = { ...page, frameId: 0 };
 
 test("pending saves are page-only and use the browser's URL", () => {
-  for (const msg of [pending, { type: "takePendingSave" }]) {
-    expect(run({ ...msg, url: "https://evil.com" }, page)).toEqual({ ok: true, url: PAGE_URL });
-    expect(run(msg, ext).ok).toBe(false);
-    expect(run(msg, { id: ID, url: "file:///x" }).ok).toBe(false);
+  for (const msg of [pending, { type: "takePendingSave" }, { type: "clearPendingSave" }]) {
+    expect(run({ ...msg, url: "https://evil.com" }, top)).toEqual({ ok: true, url: PAGE_URL });
+    expect(run(msg, { ...ext, frameId: 0 }).ok).toBe(false);
+    expect(run(msg, { id: ID, url: "file:///x", frameId: 0 }).ok).toBe(false);
     expect(run(msg, {}).ok).toBe(false);
   }
+});
+
+test("pending saves are refused from subframes and from senders without a frame id", () => {
+  for (const msg of [pending, { type: "takePendingSave" }, { type: "clearPendingSave" }]) {
+    expect(run(msg, { ...page, frameId: 3 }).ok).toBe(false);
+    expect(run(msg, page).ok).toBe(false);
+  }
+});
+
+test("pendingSave validates its status and string fields", () => {
+  expect(run({ ...pending, status: "same" }, top).ok).toBe(false);
+  expect(run({ ...pending, status: undefined }, top).ok).toBe(false);
+  expect(run({ ...pending, status: "changed", itemId: "i1" }, top).ok).toBe(true);
+  expect(run({ ...pending, username: 5 }, top).ok).toBe(false);
+  expect(run({ ...pending, password: undefined }, top).ok).toBe(false);
+  expect(run({ ...pending, itemId: 7 }, top).ok).toBe(false);
 });

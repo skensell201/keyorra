@@ -87,7 +87,27 @@ test("sign-up and change forms report the new password", () => {
   fill("n", "fresh");
   fill("c", "fresh");
   submit();
-  expect(onSubmit).toHaveBeenCalledWith({ username: "", password: "fresh" });
+  expect(onSubmit).toHaveBeenCalledWith({ username: "", password: "fresh", changePassword: true });
+});
+
+test("a sign-up form with two unmarked password fields is not a change-password form", () => {
+  setup(`<form id="f"><input id="u" type="email"><input id="p" type="password"><input id="c" type="password"></form>`);
+  fill("u", "me@x.com");
+  fill("p", "secret");
+  fill("c", "secret");
+  submit();
+  expect(onSubmit).toHaveBeenCalledWith({ username: "me@x.com", password: "secret" });
+});
+
+test("sign-up style button texts count as submit buttons", () => {
+  for (const label of ["Sign up", "Register", "Create account", "Save", "Update", "Change password", "Зарегистрироваться", "Сохранить"]) {
+    vi.advanceTimersByTime(3000);
+    setup(`<form id="f"><input id="u" type="email"><input id="p" type="password"><button id="b" type="button">${label}</button></form>`);
+    fill("u", "a");
+    fill("p", "b");
+    document.getElementById("b")!.dispatchEvent(new MouseEvent("click", { bubbles: true }));
+    expect(onSubmit, label).toHaveBeenCalledTimes(1);
+  }
 });
 
 test("duplicates within 2 s are reported once, later ones again", () => {

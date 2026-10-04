@@ -76,6 +76,9 @@ async function handle(msg: ToBackground, sender: chrome.runtime.MessageSender): 
     }
     case "takePendingSave":
       return sender.tab?.id === undefined ? null : pending.take(sender.tab.id, decision.url);
+    case "clearPendingSave":
+      if (sender.tab?.id !== undefined) pending.clear(sender.tab.id);
+      return null;
   }
 }
 
