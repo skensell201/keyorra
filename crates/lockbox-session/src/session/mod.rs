@@ -166,6 +166,38 @@ impl Session {
         Ok(settings)
     }
 
+    /// Re-wraps the account key under a new master password. Wrong guesses count towards the
+    /// unlock throttle, so this form can't be used to brute-force the password.
+    pub fn change_password(&mut self, current: &str, new: &str, now: u64) -> CmdResult<()> {
+        self.touch(now);
+        self.store()?;
+        self.throttle.check(now).map_err(CmdError::throttled)?;
+        if new.chars().count() < MIN_PASSWORD_LEN {
+            return Err(CmdError::new(
+                ErrorKind::Invalid,
+                format!("Use at least {MIN_PASSWORD_LEN} characters"),
+            ));
+        }
+        if new == current {
+            return Err(CmdError::new(
+                ErrorKind::Invalid,
+                "The new password must be different",
+            ));
+        }
+        let result = self.store_mut()?.change_password(current, new);
+        match result {
+            Ok(()) => {
+                self.throttle.record_success();
+                Ok(())
+            }
+            Err(lockbox_core::Error::WrongPassword) => {
+                self.throttle.record_failure(now);
+                Err(lockbox_core::Error::WrongPassword.into())
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
     pub fn clipboard_pending(&self) -> bool {
         self.clipboard.is_pending()
     }

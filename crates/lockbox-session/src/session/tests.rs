@@ -676,3 +676,43 @@ fn invalid_settings_and_locked_sessions_are_refused() {
         ErrorKind::Locked
     );
 }
+
+#[test]
+fn change_password_then_unlock_with_the_new_one() {
+    let (_dir, mut s) = unlocked_session();
+    s.change_password(PW, "a brand new password", 1_000)
+        .unwrap();
+    s.lock();
+    assert_eq!(
+        s.unlock(PW, 1_001).unwrap_err().kind,
+        ErrorKind::WrongPassword
+    );
+    s.unlock("a brand new password", 1_002).unwrap();
+}
+
+#[test]
+fn change_password_checks_input_and_counts_wrong_guesses() {
+    let (_dir, mut s) = unlocked_session();
+    assert_eq!(
+        s.change_password(PW, "short", 1_000).unwrap_err().kind,
+        ErrorKind::Invalid
+    );
+    assert_eq!(
+        s.change_password(PW, PW, 1_000).unwrap_err().kind,
+        ErrorKind::Invalid
+    );
+    assert_eq!(
+        s.change_password("not the password", "a brand new password", 1_000)
+            .unwrap_err()
+            .kind,
+        ErrorKind::WrongPassword
+    );
+    assert_eq!(s.throttle.failures(), 1);
+    s.lock();
+    assert_eq!(
+        s.change_password(PW, "a brand new password", 1_000)
+            .unwrap_err()
+            .kind,
+        ErrorKind::Locked
+    );
+}
