@@ -830,3 +830,47 @@ fn delete_and_restore_require_unlock() {
     assert!(matches!(store.delete_item(kept.id, 20), Err(Error::Locked)));
     assert!(matches!(store.restore_item(trashed.id), Err(Error::Locked)));
 }
+
+#[test]
+fn sealed_meta_round_trips_and_needs_unlock() {
+    let (_dir, _path, mut store) = new_store();
+    assert!(store.sealed_meta("bridge.pairings").unwrap().is_none());
+    store
+        .set_sealed_meta("bridge.pairings", b"[secret]")
+        .unwrap();
+    assert_eq!(
+        &**store.sealed_meta("bridge.pairings").unwrap().unwrap(),
+        b"[secret]"
+    );
+    store.set_sealed_meta("bridge.pairings", b"[v2]").unwrap();
+    assert_eq!(
+        &**store.sealed_meta("bridge.pairings").unwrap().unwrap(),
+        b"[v2]"
+    );
+    store.lock();
+    assert!(matches!(
+        store.sealed_meta("bridge.pairings"),
+        Err(Error::Locked)
+    ));
+    assert!(matches!(
+        store.set_sealed_meta("x", b"y"),
+        Err(Error::Locked)
+    ));
+}
+
+#[test]
+fn sealed_meta_is_bound_to_its_name_and_not_plaintext() {
+    let (_dir, path, mut store) = new_store();
+    store.set_sealed_meta("a", b"TopSecretBlob").unwrap();
+    store
+        .conn
+        .execute(
+            "INSERT INTO meta (key, value) SELECT 'sealed:b', value FROM meta WHERE key = 'sealed:a'",
+            [],
+        )
+        .unwrap();
+    assert!(matches!(store.sealed_meta("b"), Err(Error::Decrypt)));
+    drop(store);
+    let bytes = std::fs::read(&path).unwrap();
+    assert!(!bytes.windows(13).any(|w| w == b"TopSecretBlob"));
+}

@@ -19,6 +19,7 @@ mod tests;
 const DB_VERSION: i64 = MIGRATIONS.len() as i64;
 const CHECK_AAD: &[u8] = b"lockbox/check/v1";
 const VAULT_META_AAD: &[u8] = b"lockbox/vault-meta/v1";
+const SEALED_META_AAD: &[u8] = b"lockbox/meta/v1\0";
 
 /// Deleted items stay restorable for 30 days, then their data is purged.
 pub const DELETED_RETENTION_SECS: i64 = 30 * 24 * 60 * 60;
@@ -171,6 +172,33 @@ impl Store {
 
     pub fn account_key(&self) -> Result<&Key> {
         self.account.as_ref().ok_or(Error::Locked)
+    }
+
+    /// A small secret blob stored next to the vault (e.g. browser pairings), sealed with the
+    /// account key and bound to its name.
+    pub fn sealed_meta(&self, name: &str) -> Result<Option<Zeroizing<Vec<u8>>>> {
+        let account = self.account_key()?;
+        let raw: Option<Vec<u8>> = self
+            .conn
+            .query_row(
+                "SELECT value FROM meta WHERE key = ?1",
+                [sealed_meta_key(name)],
+                |r| r.get(0),
+            )
+            .optional()?;
+        raw.map(|data| crypto::open(account, &data, &sealed_meta_aad(name)))
+            .transpose()
+    }
+
+    pub fn set_sealed_meta(&mut self, name: &str, value: &[u8]) -> Result<()> {
+        let account = self.account_key()?;
+        let data = crypto::seal(account, value, &sealed_meta_aad(name));
+        self.conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![sealed_meta_key(name), data],
+        )?;
+        Ok(())
     }
 
     pub fn change_password(&mut self, old: &str, new: &str) -> Result<()> {
@@ -681,4 +709,14 @@ fn claim_path(path: &Path) -> Result<()> {
         }
         Err(e) => Err(e.into()),
     }
+}
+
+fn sealed_meta_key(name: &str) -> String {
+    format!("sealed:{name}")
+}
+
+fn sealed_meta_aad(name: &str) -> Vec<u8> {
+    let mut aad = SEALED_META_AAD.to_vec();
+    aad.extend_from_slice(name.as_bytes());
+    aad
 }
