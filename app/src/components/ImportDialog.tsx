@@ -96,7 +96,7 @@ export function ImportDialog({ onClose, onImported }: { onClose: () => void; onI
         {step.kind === "done" && (
           <>
             <p>
-              Imported {step.result.items} items into {step.result.vaults} vaults ({step.result.attachments} attachments).
+              Imported {plural(step.result.items, "item")} into {plural(step.result.vaults, "vault")} ({plural(step.result.attachments, "attachment")}).
             </p>
             <p className="muted">Delete the export file now: it is not encrypted.</p>
             <button className="primary" onClick={onClose}>
@@ -117,4 +117,8 @@ export function ImportDialog({ onClose, onImported }: { onClose: () => void; onI
       </div>
     </div>
   );
+}
+
+function plural(n: number, word: string): string {
+  return `${n} ${word}${n === 1 ? "" : "s"}`;
 }

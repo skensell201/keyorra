@@ -66,3 +66,12 @@ test("Escape closes the dialog", async () => {
   await userEvent.setup().keyboard("{Escape}");
   expect(onClose).toHaveBeenCalled();
 });
+
+test("singular counts read naturally", async () => {
+  const user = userEvent.setup();
+  vi.mocked(api.importApply).mockResolvedValue({ vaults: 1, items: 1, attachments: 0 });
+  render(<ImportDialog onClose={vi.fn()} onImported={vi.fn()} />);
+  await user.click(screen.getByRole("button", { name: "Choose export file…" }));
+  await user.click(await screen.findByRole("button", { name: "Import 154 items" }));
+  expect(await screen.findByText("Imported 1 item into 1 vault (0 attachments).")).toBeInTheDocument();
+});
