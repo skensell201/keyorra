@@ -4,3 +4,4 @@ dist/
 .DS_Store
 *.db
 app/src-tauri/gen/
+extension/dist/
