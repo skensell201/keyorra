@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 import { api } from "../api";
@@ -8,7 +8,15 @@ vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
   return {
     ...actual,
-    api: { ...actual.api, settings: vi.fn(), updateSettings: vi.fn(), changePassword: vi.fn() },
+    api: {
+      ...actual.api,
+      settings: vi.fn(),
+      updateSettings: vi.fn(),
+      changePassword: vi.fn(),
+      connectBrowsers: vi.fn(),
+      pairedBrowsers: vi.fn(),
+      removePairedBrowser: vi.fn(),
+    },
   };
 });
 
@@ -16,6 +24,9 @@ beforeEach(() => {
   vi.mocked(api.settings).mockReset().mockResolvedValue({ autoLockMinutes: 10, clipboardSeconds: 90 });
   vi.mocked(api.updateSettings).mockReset().mockImplementation(async (s) => s);
   vi.mocked(api.changePassword).mockReset().mockResolvedValue(undefined);
+  vi.mocked(api.pairedBrowsers).mockReset().mockResolvedValue([{ clientId: "c1", name: "Chrome", createdAt: 1 }]);
+  vi.mocked(api.connectBrowsers).mockReset().mockResolvedValue(["Chrome", "Opera"]);
+  vi.mocked(api.removePairedBrowser).mockReset().mockResolvedValue(undefined);
 });
 
 test("loads and saves timeouts", async () => {
@@ -115,4 +126,17 @@ test("switches the theme", async () => {
   expect(document.documentElement.dataset.theme).toBe("dark");
   await user.click(screen.getByRole("button", { name: "Index" }));
   expect(document.documentElement.dataset.theme).toBe("index");
+});
+
+test("connects browsers and removes a paired one", async () => {
+  const user = userEvent.setup();
+  render(<SettingsDialog onClose={vi.fn()} />);
+  expect(await screen.findByText("Chrome")).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Connect browsers" }));
+  expect(
+    await screen.findByText("Ready in Chrome, Opera. Load the Lockbox extension there and click Connect."),
+  ).toBeInTheDocument();
+  await user.click(screen.getByRole("button", { name: "Disconnect Chrome" }));
+  expect(api.removePairedBrowser).toHaveBeenCalledWith("c1");
+  await waitFor(() => expect(screen.queryByRole("button", { name: "Disconnect Chrome" })).not.toBeInTheDocument());
 });

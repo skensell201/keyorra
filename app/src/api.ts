@@ -118,6 +118,18 @@ export interface ImportResult {
   attachments: number;
 }
 
+export interface PairingRequest {
+  clientId: string;
+  name: string;
+  code: string;
+}
+
+export interface PairedBrowser {
+  clientId: string;
+  name: string;
+  createdAt: number;
+}
+
 export const api = {
   status: () => invoke<Status>("status"),
   create: (password: string) => invoke<void>("create_vault_file", { password }),
@@ -141,5 +153,12 @@ export const api = {
   updateSettings: (settings: Settings) => invoke<Settings>("update_settings", { settings }),
   changePassword: (current: string, newPassword: string) =>
     invoke<void>("change_password", { current, newPassword }),
+  connectBrowsers: () => invoke<string[]>("connect_browsers"),
+  approvePairing: (clientId: string) => invoke<void>("approve_pairing", { clientId }),
+  denyPairing: (clientId: string) => invoke<void>("deny_pairing", { clientId }),
+  pairedBrowsers: () => invoke<PairedBrowser[]>("paired_browsers"),
+  removePairedBrowser: (clientId: string) => invoke<void>("remove_paired_browser", { clientId }),
+  onPairRequest: (callback: (request: PairingRequest) => void): Promise<UnlistenFn> =>
+    listen<PairingRequest>("pair-request", (e) => callback(e.payload)),
   onLocked: (callback: () => void): Promise<UnlistenFn> => listen("locked", () => callback()),
 };

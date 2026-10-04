@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { IconClose } from "./icons";
-import { api, errorMessage, isCmdError, type Settings } from "../api";
+import { api, errorMessage, isCmdError, type PairedBrowser, type Settings } from "../api";
 import { applyTheme, loadTheme, THEMES, type Theme } from "../theme";
 
 const LOCK_MINUTES = [1, 5, 10, 30, 60, 240];
@@ -22,6 +22,31 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const [settingsError, setSettingsError] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [browsers, setBrowsers] = useState<PairedBrowser[]>([]);
+  const [browsersNote, setBrowsersNote] = useState("");
+  useEffect(() => {
+    api.pairedBrowsers().then(setBrowsers).catch(() => setBrowsers([]));
+  }, []);
+  async function connectBrowsers() {
+    try {
+      const found = await api.connectBrowsers();
+      setBrowsersNote(
+        found.length
+          ? `Ready in ${found.join(", ")}. Load the Lockbox extension there and click Connect.`
+          : "No supported browsers found.",
+      );
+    } catch (e) {
+      setBrowsersNote(errorMessage(e));
+    }
+  }
+  async function disconnect(b: PairedBrowser) {
+    try {
+      await api.removePairedBrowser(b.clientId);
+      setBrowsers((all) => all.filter((x) => x.clientId !== b.clientId));
+    } catch (e) {
+      setBrowsersNote(errorMessage(e));
+    }
+  }
 
   useEffect(() => {
     api
@@ -164,6 +189,32 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
             </button>
           </div>
         </form>
+
+        <section className="modal-section">
+          <h3>Browsers</h3>
+          {browsers.length > 0 ? (
+            <ul className="browser-list">
+              {browsers.map((b) => (
+                <li key={b.clientId}>
+                  <span>{b.name}</span>
+                  <button className="icon" aria-label={`Disconnect ${b.name}`} title="Disconnect" onClick={() => disconnect(b)}>
+                    <IconClose />
+                  </button>
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="muted">No browsers connected yet.</p>
+          )}
+          <div className="modal-actions">
+            <span className="status" role="status" aria-label="Browsers">
+              {browsersNote}
+            </span>
+            <button className="secondary" onClick={connectBrowsers}>
+              Connect browsers
+            </button>
+          </div>
+        </section>
 
         <section className="modal-section">
           <h3>Appearance</h3>

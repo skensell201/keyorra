@@ -258,3 +258,6 @@ fieldset.fields .reveal { align-self: flex-start; }
 
 /* Invisible strip under the hidden title bar: lets the window be dragged. */
 .drag-region { position: fixed; top: 0; left: 0; right: 0; height: 30px; z-index: 50; }
+.pair-code { font-size: 34px; font-weight: 600; letter-spacing: 0.12em; text-align: center; margin: 4px 0; }
+.browser-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
+.browser-list li { display: flex; justify-content: space-between; align-items: center; padding: 6px 4px 6px 12px; background: var(--surface-2); border-radius: 12px; font-weight: 600; }

@@ -1,8 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, errorMessage, type Item, type ItemKind, type ItemSummary, type Vault } from "../api";
+import { api, errorMessage, type Item, type ItemKind, type ItemSummary, type PairingRequest, type Vault } from "../api";
 import { ImportDialog } from "./ImportDialog";
 import { ItemDetail } from "./ItemDetail";
 import { ItemEditor } from "./ItemEditor";
+import { PairingDialog } from "./PairingDialog";
 import { ItemList } from "./ItemList";
 import { TrashItem } from "./TrashItem";
 import { SettingsDialog } from "./SettingsDialog";
@@ -19,6 +20,7 @@ export function Main({ onLock }: { onLock: () => void }) {
   const [importing, setImporting] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [pairing, setPairing] = useState<PairingRequest | null>(null);
 
   const vaultsSeq = useRef(0);
   const itemsSeq = useRef(0);
@@ -61,6 +63,12 @@ export function Main({ onLock }: { onLock: () => void }) {
   }, [query, selection]);
   const refresh = useCallback(() => Promise.all([loadVaults(), loadItems()]), [loadVaults, loadItems]);
 
+  useEffect(() => {
+    const unlisten = api.onPairRequest(setPairing);
+    return () => {
+      unlisten.then((stop) => stop());
+    };
+  }, []);
   useEffect(() => {
     loadVaults();
   }, [loadVaults]);
@@ -156,6 +164,7 @@ export function Main({ onLock }: { onLock: () => void }) {
       </section>
       {importing && <ImportDialog onClose={() => setImporting(false)} onImported={refresh} />}
       {showSettings && <SettingsDialog onClose={() => setShowSettings(false)} />}
+      {pairing && <PairingDialog request={pairing} onDone={() => setPairing(null)} />}
     </div>
   );
 }

@@ -1,7 +1,7 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
-import { api, type ItemSummary } from "../api";
+import { api, type ItemSummary, type PairingRequest } from "../api";
 import { loginItem } from "../test/fixtures";
 import { Main } from "./Main";
 
@@ -21,9 +21,12 @@ vi.mock("../api", async (importOriginal) => {
       deletedItems: vi.fn(),
       restoreItem: vi.fn(),
       settings: vi.fn(),
+      onPairRequest: vi.fn(),
     },
   };
 });
+
+let pairCallback: ((r: PairingRequest) => void) | null = null;
 
 const github: ItemSummary = {
   id: "i1", vaultId: "v1", kind: "login", title: "GitHub", subtitle: "ivan",
@@ -31,6 +34,13 @@ const github: ItemSummary = {
 };
 
 beforeEach(() => {
+  pairCallback = null;
+  vi.mocked(api.onPairRequest)
+    .mockReset()
+    .mockImplementation(async (cb) => {
+      pairCallback = cb;
+      return () => {};
+    });
   vi.mocked(api.vaults).mockReset().mockResolvedValue([
     { id: "v1", name: "Personal", itemCount: 1 },
     { id: "v2", name: "Work", itemCount: 0 },
@@ -132,4 +142,11 @@ test("settings open from the sidebar", async () => {
   render(<Main onLock={vi.fn()} />);
   await user.click(await screen.findByRole("button", { name: "Settings…" }));
   expect(await screen.findByRole("dialog", { name: "Settings" })).toBeInTheDocument();
+});
+
+test("a pairing request from a browser opens the confirmation", async () => {
+  render(<Main onLock={vi.fn()} />);
+  await waitFor(() => expect(pairCallback).not.toBeNull());
+  act(() => pairCallback!({ clientId: "c1", name: "Opera", code: "123456" }));
+  expect(await screen.findByRole("dialog", { name: "Connect Opera?" })).toBeInTheDocument();
 });
