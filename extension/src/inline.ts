@@ -14,11 +14,11 @@ const STYLE = `
 * { box-sizing: border-box; font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", system-ui, sans-serif; }
 .icon { position: fixed; z-index: 2147483646; width: 24px; height: 24px; border-radius: 7px; border: 0; padding: 0;
   display: grid; place-items: center; background: #111; color: #fff; cursor: pointer; box-shadow: 0 1px 3px rgba(0,0,0,.25);
-  transition: transform 120ms cubic-bezier(.2,.8,.2,1), opacity 120ms; }
-.icon:hover { transform: scale(1.08); }
+  transition: box-shadow 120ms; }
+.icon:hover { filter: none; box-shadow: 0 1px 6px rgba(0,0,0,.35); }
 .panel { position: fixed; z-index: 2147483647; min-width: 260px; max-width: 340px; padding: 6px; border-radius: 16px;
   background: rgba(255,255,255,.96); color: #111; box-shadow: 0 12px 40px rgba(17,17,17,.2), 0 2px 6px rgba(17,17,17,.08);
-  backdrop-filter: blur(20px); animation: pop 160ms cubic-bezier(.2,.8,.2,1); font-size: 13px; }
+  animation: pop 160ms cubic-bezier(.2,.8,.2,1); font-size: 13px; }
 @media (prefers-color-scheme: dark) { .panel { background: rgba(32,32,34,.96); color: #f5f5f7; } .icon { background: #f5f5f7; color: #111; } }
 @keyframes pop { from { opacity: 0; transform: translateY(-4px) scale(.98); } to { opacity: 1; transform: none; } }
 .item, .unlock { width: 100%; display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 0; border-radius: 10px;
@@ -135,7 +135,8 @@ export class InlineMenu {
     });
   }
 
-  /** Chromium can tell whether anything covers an element (trackVisibility); elsewhere this is a no-op. */
+  /** Chromium can tell whether anything covers an element (trackVisibility); elsewhere this is a no-op.
+   * Keep the menu free of transforms, filters and backdrop-filter: they make Chromium report it invisible. */
   private observe(el: Element): void {
     if (typeof IntersectionObserver !== "function") return;
     this.observer ??= new IntersectionObserver(
