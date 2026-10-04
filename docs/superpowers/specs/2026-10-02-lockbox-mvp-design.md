@@ -191,3 +191,48 @@ Every unit in `lockbox-core` is written test-first (red → green → refactor).
 - Private repo `skensell201/lockbox`, branch `main`. Everything in the repo is in
   English (code, UI, docs, commits).
 - Bundle id `app.lockbox.mac`.
+
+---
+
+## Addendum (2026-10-04): browser extension in detail
+
+Replaces section 6 where they differ. Agreed with the user on 2026-10-04.
+
+**Browsers.** One code base for Chromium browsers (Chrome, Opera, Yandex; Arc, Brave,
+Edge, Vivaldi, Chromium work the same way) and Firefox (MV3, background script). Safari
+needs a containing macOS app and its own native bridge; it is a separate plan (3b).
+
+**Plans.** 3a: transport, pairing, popup, filling login, password and one-time code with
+an inline icon and dropdown, shortcut ⌘⇧L. 3c: saving new logins, password generator on
+sign-up forms, cards and addresses.
+
+**Transport.** Chrome-style native messaging (4-byte little-endian length + UTF-8 JSON).
+The host is the Lockbox binary itself, recognised by its launch arguments; it is a dumb
+pipe that connects to a Unix socket served by the running app
+(`~/Library/Application Support/app.lockbox.mac/bridge.sock`, mode 0600) and copies
+bytes both ways. If the app is not running, the host launches it (`open -b app.lockbox.mac`)
+and waits up to 15 s. Host manifests (`app.lockbox.bridge`) are installed by the app into
+each browser's `NativeMessagingHosts` folder that exists; Chromium manifests allow only
+the extension id `kaaofpbpmnghapcafbbhjflonijdijbj` (fixed by the manifest `key`; private
+key kept outside the repo in `~/.config/lockbox-extension/chromium-key.pem`), Firefox
+only `lockbox@lockbox.app`.
+
+**Pairing.** Extension sends its X25519 public key; the app answers with its own and
+shows "Connect Chrome? Code 123 456". Both sides derive
+`key = SHA-256("lockbox-bridge-v1/key" ‖ shared ‖ clientPub ‖ serverPub)` and
+`code = BE-u32(SHA-256("lockbox-bridge-v1/code" ‖ shared ‖ clientPub ‖ serverPub)[0..4]) mod 10^6`.
+Pairing is possible only while the vault is unlocked and needs approval in the app.
+Pairings are stored sealed with the account key in the vault (`meta`), listed in Settings
+and removable there.
+
+**Messages.** Plaintext envelope `{kind}`: `status`, `show`, `pair`, `pairStatus`, `call`.
+A `call` carries `box = base64(nonce ‖ XChaCha20-Poly1305(key, nonce, aad, json))` with
+`aad = "lockbox-bridge-v1/<clientId>/req"` (`/res` for replies). Requests: `list {url}` →
+items for the page's site (title, username, hasTotp; no secrets), `fill {url, itemId}` →
+username, password, current one-time code. While locked every call answers plaintext
+`{kind:"locked"}`.
+
+**Release rules.** Site match = same registrable domain (eTLD+1 via the Public Suffix
+List); exact host first. `fill` re-checks that the item matches the URL of the frame that
+asked (taken from the browser, not from the page). The extension asks for a fill only
+after a click or the shortcut.
