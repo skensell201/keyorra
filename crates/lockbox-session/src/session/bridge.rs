@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-use super::Session;
+use super::{Session, DEFAULT_VAULT};
 use crate::bridge::crypto::{
     self, b64, commitment, derive, nonce_of, public_from_b64, Direction, KeyPair,
 };
@@ -25,6 +25,11 @@ pub const PAIRING_TTL_SECS: u64 = 300;
 /// Unapproved pairings allowed before `pair` is refused for a while.
 pub const MAX_PAIR_FAILURES: u32 = 5;
 pub const PAIR_COOLDOWN_SECS: u64 = 600;
+/// Lookups allowed per browser in the window.
+const MAX_LOOKUPS: usize = 10;
+const LOOKUP_WINDOW_SECS: u64 = 60;
+/// Longest username or password the extension may send.
+const MAX_INPUT_BYTES: usize = 4096;
 const PAIRINGS_META: &str = "bridge.pairings";
 pub(super) const GUARD_FILE: &str = "pairing-guard.json";
 
@@ -361,7 +366,7 @@ impl Session {
             return error("Message did not authenticate");
         };
         let reply = match serde_json::from_slice::<Request>(&plain) {
-            Ok(request) => self.serve_request(request, now),
+            Ok(request) => self.serve_request(client_id, request, now),
             Err(_) => Reply::Error {
                 error: "Unknown request".into(),
             },
@@ -377,7 +382,7 @@ impl Session {
         }
     }
 
-    fn serve_request(&mut self, request: Request, now: u64) -> Reply {
+    fn serve_request(&mut self, client_id: &str, request: Request, now: u64) -> Reply {
         match request {
             Request::Ping => Reply::Pong { pong: true },
             // Not activity: the extension may list on its own; only a fill keeps the vault open.
@@ -390,7 +395,15 @@ impl Session {
                 url,
                 username,
                 password,
-            } => self.lookup(&url, &username, &password),
+            } => {
+                if self.lookup_limited(client_id, now) {
+                    Reply::Error {
+                        error: "Too many requests".into(),
+                    }
+                } else {
+                    self.lookup(&url, &username, &password)
+                }
+            }
             Request::Save {
                 url,
                 username,
@@ -498,6 +511,17 @@ impl Session {
         found.into_iter().next().map(|(_, item)| item)
     }
 
+    /// At most `MAX_LOOKUPS` per `LOOKUP_WINDOW_SECS` for each browser.
+    fn lookup_limited(&mut self, client_id: &str, now: u64) -> bool {
+        let times = self.lookups.entry(client_id.to_owned()).or_default();
+        times.retain(|t| *t <= now && now - *t < LOOKUP_WINDOW_SECS);
+        if times.len() >= MAX_LOOKUPS {
+            return true;
+        }
+        times.push(now);
+        false
+    }
+
     /// Never returns the stored password, only whether it differs.
     fn lookup(&self, url: &str, username: &str, password: &str) -> Reply {
         let Some(page) = Site::of(url) else {
@@ -505,6 +529,11 @@ impl Session {
                 error: "This page can't be saved".into(),
             };
         };
+        if username.len() > MAX_INPUT_BYTES || password.len() > MAX_INPUT_BYTES {
+            return Reply::Error {
+                error: "Input too long".into(),
+            };
+        }
         match self.same_user(&page, username) {
             Some(item) if item.password() == Some(password) => Reply::Lookup {
                 status: LookupStatus::Same,
@@ -534,11 +563,16 @@ impl Session {
                 error: "This page can't be saved".into(),
             };
         };
-        if password.is_empty() {
+        if password.is_empty()
+            || username.len() > MAX_INPUT_BYTES
+            || password.len() > MAX_INPUT_BYTES
+        {
             return Reply::Error {
                 error: "Nothing to save".into(),
             };
         }
+        // Saving the same sign-up twice must not create a second login.
+        let item_id = item_id.or_else(|| self.same_user(&page, username).map(|i| i.id));
         let result = match item_id {
             Some(id) => self.update_password(&page, id, username, password, now),
             None => self.create_login(&page, username, password, now),
@@ -557,8 +591,14 @@ impl Session {
         password: &str,
         now: u64,
     ) -> CmdResult<Uuid> {
-        let mut item = self.item(id, now)?;
-        if item.kind != ItemKind::Login || !item.urls.iter().any(|u| matches(page, u).is_some()) {
+        // Validated before `save_item` records activity.
+        let mut item = self.store()?.get_item(id)?;
+        let username = username.trim();
+        let stored = item.username().unwrap_or_default();
+        if item.kind != ItemKind::Login
+            || !item.urls.iter().any(|u| matches(page, u).is_some())
+            || (!stored.is_empty() && !stored.eq_ignore_ascii_case(username))
+        {
             return Err(CmdError::new(
                 ErrorKind::Invalid,
                 "This login doesn't belong to this site",
@@ -584,13 +624,18 @@ impl Session {
         password: &str,
         now: u64,
     ) -> CmdResult<Uuid> {
-        let vault = self
-            .vaults(now)?
-            .into_iter()
-            .next()
+        let vaults = self.store()?.vaults()?;
+        let vault = vaults
+            .iter()
+            .find(|v| v.name == DEFAULT_VAULT)
+            .or_else(|| vaults.first())
             .ok_or_else(|| CmdError::new(ErrorKind::NotFound, "No vault to save into"))?;
         let mut item = self.new_item(vault.id, ItemKind::Login, now)?;
-        item.title = page.host.clone();
+        item.title = if page.local {
+            page.host_with_port()
+        } else {
+            page.host.clone()
+        };
         item.urls = vec![format!(
             "{}://{}",
             if page.secure { "https" } else { "http" },
@@ -608,7 +653,7 @@ impl Session {
     }
 
     fn secure_page(url: &str) -> bool {
-        Site::of(url).is_some_and(|s| s.secure || s.local)
+        Site::of(url).is_some_and(|s| s.secure || s.private_or_loopback())
     }
 
     fn items_of(&self, kind: ItemKind) -> Vec<Item> {
@@ -640,7 +685,11 @@ impl Session {
                     .chars()
                     .filter(char::is_ascii_digit)
                     .collect();
-                let last4 = digits[digits.len().saturating_sub(4)..].iter().collect();
+                let last4 = if digits.len() >= 8 {
+                    digits[digits.len() - 4..].iter().collect()
+                } else {
+                    String::new()
+                };
                 CardSummary {
                     id: item.id,
                     title: item.title,
@@ -656,7 +705,10 @@ impl Session {
                 error: "Cards are only filled on secure pages".into(),
             };
         }
-        let item = match self.item(id, now) {
+        let item = match self
+            .store()
+            .and_then(|s| s.get_item(id).map_err(Into::into))
+        {
             Ok(item) if item.kind == ItemKind::CreditCard => item,
             Ok(_) => {
                 return Reply::Error {
@@ -665,6 +717,7 @@ impl Session {
             }
             Err(e) => return Reply::Error { error: e.message },
         };
+        self.touch(now);
         let (exp_month, exp_year) = split_expiry(&field_text(&item, CARD_EXPIRY));
         Reply::Card {
             card: CardFill {
@@ -713,10 +766,16 @@ impl Session {
                 error: "Addresses are only filled on secure pages".into(),
             };
         }
-        match self.item(id, now) {
-            Ok(item) if item.kind == ItemKind::Identity => Reply::Identity {
-                identity: identity_fill(&item),
-            },
+        match self
+            .store()
+            .and_then(|s| s.get_item(id).map_err(Into::into))
+        {
+            Ok(item) if item.kind == ItemKind::Identity => {
+                self.touch(now);
+                Reply::Identity {
+                    identity: identity_fill(&item),
+                }
+            }
             Ok(_) => Reply::Error {
                 error: "Not an identity".into(),
             },
@@ -773,7 +832,7 @@ impl Session {
 }
 
 /// First non-empty value among fields whose id or lowercase label is in `names`.
-fn field_text(item: &Item, names: &[&str]) -> String {
+pub(super) fn field_text(item: &Item, names: &[&str]) -> String {
     item.fields
         .iter()
         .chain(item.sections.iter().flat_map(|s| s.fields.iter()))
@@ -781,7 +840,9 @@ fn field_text(item: &Item, names: &[&str]) -> String {
             names.contains(&f.id.as_str()) || names.contains(&f.label.to_lowercase().as_str())
         })
         .find_map(|f| match &f.value {
-            FieldValue::MonthYear(ym) => Some(format!("{:02}/{}", ym % 100, ym / 100)),
+            FieldValue::MonthYear(ym) => (1..=12)
+                .contains(&(ym % 100))
+                .then(|| format!("{:02}/{}", ym % 100, ym / 100)),
             v => v
                 .as_str()
                 .map(str::to_owned)
@@ -792,24 +853,39 @@ fn field_text(item: &Item, names: &[&str]) -> String {
 
 const CARD_NAME: &[&str] = &["cardholder", "cardholder name", "name on card"];
 const CARD_NUMBER: &[&str] = &["number", "ccnum", "card number"];
-const CARD_EXPIRY: &[&str] = &["expiry", "expiry date", "expiration date", "expires"];
+pub(super) const CARD_EXPIRY: &[&str] = &["expiry", "expiry date", "expiration date", "expires"];
 const CARD_CVC: &[&str] = &["cvv", "cvc", "verification number", "security code"];
 
 /// "12/27", "12/2027", "2027-12", "122027" -> ("12", "2027").
-fn split_expiry(raw: &str) -> (String, String) {
+pub(super) fn split_expiry(raw: &str) -> (String, String) {
     let digits: Vec<&str> = raw
         .split(|c: char| !c.is_ascii_digit())
         .filter(|s| !s.is_empty())
         .collect();
     let (m, y) = match digits.as_slice() {
-        [a, b] if a.len() == 4 => (b.to_string(), a.to_string()),
-        [a, b] => (a.to_string(), b.to_string()),
-        [one] if one.len() == 6 => (one[..2].to_string(), one[2..].to_string()),
-        [one] if one.len() == 4 => (one[..2].to_string(), one[2..].to_string()),
-        _ => (String::new(), String::new()),
+        [a, b] if a.len() == 4 => (*b, *a),
+        [a, b] => (*a, *b),
+        // YYYYMM, or MMYYYY.
+        [one]
+            if one.len() == 6
+                && (one.starts_with("19") || one.starts_with("20"))
+                && one[4..].parse::<u32>().is_ok_and(|m| (1..=12).contains(&m)) =>
+        {
+            (&one[4..], &one[..4])
+        }
+        [one] if one.len() == 6 => (&one[..2], &one[2..]),
+        [one] if one.len() == 4 => (&one[..2], &one[2..]),
+        _ => ("", ""),
     };
-    let year = if y.len() == 2 { format!("20{y}") } else { y };
-    (format!("{m:0>2}"), year)
+    let year = match y.len() {
+        2 => format!("20{y}"),
+        4 => y.to_owned(),
+        _ => String::new(),
+    };
+    match m.parse::<u32>() {
+        Ok(month) if (1..=12).contains(&month) && !year.is_empty() => (format!("{month:02}"), year),
+        _ => (String::new(), String::new()),
+    }
 }
 
 fn identity_fill(item: &Item) -> IdentityFill {

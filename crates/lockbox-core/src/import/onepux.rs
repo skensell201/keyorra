@@ -295,6 +295,19 @@ fn convert_field(field: &Value) -> Vec<Field> {
         }
         return out;
     }
+    if kind == "address" {
+        // Parts stay separate so autofill can map them to form fields.
+        let parts: Vec<Field> = ["street", "city", "state", "zip", "country"]
+            .iter()
+            .filter_map(|k| {
+                let v = raw[*k].as_str().filter(|v| !v.is_empty())?;
+                Some(make(k, k, FieldValue::Text(v.to_owned())))
+            })
+            .collect();
+        if !parts.is_empty() {
+            return parts;
+        }
+    }
     let value = match kind.as_str() {
         "concealed" | "creditCardNumber" => text(raw).map(FieldValue::Concealed),
         "totp" => text(raw).map(FieldValue::Totp),

@@ -55,6 +55,8 @@ pub struct Session {
     pair_failures: u32,
     pair_blocked_until: u64,
     guard_path: PathBuf,
+    /// Recent `lookup` times per paired browser, for rate limiting.
+    lookups: std::collections::HashMap<String, Vec<u64>>,
 }
 
 impl Session {
@@ -79,6 +81,7 @@ impl Session {
             pair_failures: guard.failures,
             pair_blocked_until: guard.blocked_until,
             guard_path,
+            lookups: std::collections::HashMap::new(),
         }
     }
 

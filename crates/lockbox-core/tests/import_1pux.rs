@@ -167,9 +167,23 @@ fn imports_other_categories() {
         *section_value(identity, "birth date"),
         FieldValue::Date(631152000)
     );
-    assert_eq!(
-        *section_value(identity, "address"),
-        FieldValue::Text("Main st 1, Hanoi, vn".into())
+    for (label, want) in [
+        ("street", "Main st 1"),
+        ("city", "Hanoi"),
+        ("country", "vn"),
+    ] {
+        assert_eq!(
+            *section_value(identity, label),
+            FieldValue::Text(want.into())
+        );
+    }
+    assert!(
+        identity
+            .sections
+            .iter()
+            .flat_map(|s| s.fields.iter())
+            .all(|f| f.label != "zip" && f.label != "address"),
+        "empty parts are dropped and the joined text is gone"
     );
     assert_eq!(
         *section_value(identity, "phone"),

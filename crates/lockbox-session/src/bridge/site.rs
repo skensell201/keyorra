@@ -41,6 +41,18 @@ impl Site {
         })
     }
 
+    /// Loopback or private-network host: where plain http is acceptable for cards and addresses.
+    pub fn private_or_loopback(&self) -> bool {
+        let bare = self.host.trim_start_matches('[').trim_end_matches(']');
+        match bare.parse::<std::net::IpAddr>() {
+            Ok(std::net::IpAddr::V4(ip)) => ip.is_loopback() || ip.is_private(),
+            Ok(std::net::IpAddr::V6(ip)) => {
+                ip.is_loopback() || (ip.segments()[0] & 0xfe00) == 0xfc00
+            }
+            Err(_) => self.host == "localhost" || self.host.ends_with(".localhost"),
+        }
+    }
+
     /// `host` or `host:port`, for building a URL.
     pub fn host_with_port(&self) -> String {
         match self.port {
@@ -111,6 +123,33 @@ mod tests {
             site("https://a.example:443/x").host_with_port(),
             "a.example"
         );
+    }
+
+    #[test]
+    fn private_or_loopback_hosts() {
+        for url in [
+            "http://localhost/",
+            "http://a.localhost/",
+            "http://127.0.0.1/",
+            "http://127.9.9.9/",
+            "http://[::1]/",
+            "http://10.0.0.1/",
+            "http://172.16.5.5/",
+            "http://172.31.5.5/",
+            "http://192.168.0.1/",
+            "http://[fd12::1]/",
+        ] {
+            assert!(site(url).private_or_loopback(), "{url}");
+        }
+        for url in [
+            "http://203.0.113.5/",
+            "http://172.32.0.1/",
+            "http://8.8.8.8/",
+            "http://example.com/",
+            "http://[2001:db8::1]/",
+        ] {
+            assert!(!site(url).private_or_loopback(), "{url}");
+        }
     }
 
     #[test]

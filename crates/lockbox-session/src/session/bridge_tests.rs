@@ -1,4 +1,4 @@
-use super::bridge::{PAIRING_TTL_SECS, PAIR_COOLDOWN_SECS};
+use super::bridge::{field_text, split_expiry, CARD_EXPIRY, PAIRING_TTL_SECS, PAIR_COOLDOWN_SECS};
 use super::tests::{personal, save_login, unlocked_session, PW};
 use super::*;
 use crate::bridge::crypto::{
@@ -1100,4 +1100,189 @@ fn identities_are_listed_and_filled() {
         filled["identity"],
         json!({"givenName": "Ivan", "familyName": "K", "email": "ivan@example.com", "phone": "+84 1", "street": "Main st 1", "city": "Hanoi", "postalCode": "100000", "country": "VN"})
     );
+}
+
+#[test]
+fn cards_and_identities_need_https_or_a_private_or_loopback_host() {
+    let (_dir, mut s) = unlocked_session();
+    let visa = card(&mut s, "Visa", "4111 1111 1111 1111", "12/27");
+    let ext = paired(&mut s);
+    for (url, ok) in [
+        ("http://203.0.113.5/pay", false),
+        ("http://shop.example/", false),
+        ("http://127.0.0.1:8080/", true),
+        ("http://192.168.1.10/", true),
+        ("http://10.1.2.3/", true),
+        ("http://172.16.0.1/", true),
+        ("http://[::1]:3000/", true),
+        ("http://app.localhost/", true),
+        ("https://203.0.113.5/", true),
+    ] {
+        let r = call(&mut s, &ext, json!({"op": "cards", "url": url}), 1_000);
+        assert_eq!(
+            r["cards"].as_array().unwrap().len(),
+            usize::from(ok),
+            "{url}"
+        );
+        let r = call(
+            &mut s,
+            &ext,
+            json!({"op": "fillCard", "url": url, "itemId": visa.id}),
+            1_000,
+        );
+        assert_eq!(r.get("card").is_some(), ok, "{url}");
+    }
+}
+
+#[test]
+fn update_requires_the_same_username_and_a_secure_page_for_https_logins() {
+    let (_dir, mut s) = unlocked_session();
+    let p = personal(&mut s);
+    let mut bank = save_login(&mut s, p, "Bank", "me", "bank-pw");
+    bank.urls = vec!["https://bank.example".into()];
+    let bank = s.save_item(bank, 1_000).unwrap();
+    let ext = paired(&mut s);
+    let r = call(
+        &mut s,
+        &ext,
+        json!({"op": "save", "url": "https://bank.example", "username": "other", "password": "x", "itemId": bank.id}),
+        1_000,
+    );
+    assert_eq!(r["error"], "This login doesn't belong to this site");
+    let r = call(
+        &mut s,
+        &ext,
+        json!({"op": "save", "url": "http://bank.example", "username": "me", "password": "x", "itemId": bank.id}),
+        1_000,
+    );
+    assert!(r["error"].is_string(), "{r}");
+    let r = call(
+        &mut s,
+        &ext,
+        json!({"op": "save", "url": "https://bank.example", "username": " ME ", "password": "new", "itemId": bank.id}),
+        1_000,
+    );
+    assert_eq!(r["saved"], json!(bank.id));
+    assert_eq!(s.item(bank.id, 1_000).unwrap().password(), Some("new"));
+}
+
+#[test]
+fn lookups_are_rate_limited_per_client() {
+    let (_dir, mut s) = unlocked_session();
+    let ext = paired(&mut s);
+    let look = |s: &mut Session, now| {
+        call(
+            s,
+            &ext,
+            json!({"op": "lookup", "url": "https://a.example", "username": "u", "password": "p"}),
+            now,
+        )
+    };
+    for _ in 0..10 {
+        assert_eq!(look(&mut s, 5_000)["status"], "new");
+    }
+    assert_eq!(look(&mut s, 5_000)["error"], "Too many requests");
+    assert_eq!(look(&mut s, 5_059)["error"], "Too many requests");
+    assert_eq!(look(&mut s, 5_061)["status"], "new");
+}
+
+#[test]
+fn split_expiry_cases() {
+    let e = |raw: &str| {
+        let (m, y) = split_expiry(raw);
+        (m, y)
+    };
+    let pair = |m: &str, y: &str| (m.to_owned(), y.to_owned());
+    assert_eq!(e(""), pair("", ""));
+    assert_eq!(e("12/"), pair("", ""));
+    assert_eq!(e("3/28"), pair("03", "2028"));
+    assert_eq!(e("202803"), pair("03", "2028"));
+    assert_eq!(e("122027"), pair("12", "2027"));
+    assert_eq!(e("13/27"), pair("", ""));
+    assert_eq!(e("12/27"), pair("12", "2027"));
+    assert_eq!(e("2027-12"), pair("12", "2027"));
+}
+
+#[test]
+fn bad_month_year_is_skipped_and_short_numbers_are_not_masked_out() {
+    let (_dir, mut s) = unlocked_session();
+    let p = personal(&mut s);
+    let mut item = Item::new(p, ItemKind::CreditCard, "Odd", 1_000);
+    let f = |id: &str, value| Field {
+        id: id.into(),
+        label: id.into(),
+        value,
+        purpose: None,
+    };
+    item.fields = vec![
+        f("number", FieldValue::Concealed("1234567".into())),
+        f("expiry", FieldValue::MonthYear(202813)),
+    ];
+    let item = s.save_item(item, 1_000).unwrap();
+    assert_eq!(field_text(&item, CARD_EXPIRY), "");
+    let ext = paired(&mut s);
+    let r = call(
+        &mut s,
+        &ext,
+        json!({"op": "cards", "url": "https://x.example"}),
+        1_000,
+    );
+    assert_eq!(r["cards"][0]["last4"], "");
+}
+
+#[test]
+fn oversized_input_is_refused() {
+    let (_dir, mut s) = unlocked_session();
+    let ext = paired(&mut s);
+    let big = "x".repeat(4097);
+    let r = call(
+        &mut s,
+        &ext,
+        json!({"op": "save", "url": "https://a.example", "username": big, "password": "p", "itemId": null}),
+        1_000,
+    );
+    assert_eq!(r["error"], "Nothing to save");
+    let r = call(
+        &mut s,
+        &ext,
+        json!({"op": "lookup", "url": "https://a.example", "username": "u", "password": big}),
+        1_000,
+    );
+    assert!(r["error"].is_string(), "{r}");
+}
+
+#[test]
+fn saving_twice_does_not_duplicate_and_new_logins_use_the_personal_vault() {
+    let (_dir, mut s) = unlocked_session();
+    s.create_vault("Aardvark", 1_000).unwrap();
+    let ext = paired(&mut s);
+    let save = |s: &mut Session, pw: &str| {
+        call(
+            s,
+            &ext,
+            json!({"op": "save", "url": "http://localhost:8765/signup", "username": "me", "password": pw, "itemId": null}),
+            1_000,
+        )
+    };
+    let first = save(&mut s, "pw1");
+    assert_eq!(save(&mut s, "pw1"), first);
+    assert_eq!(save(&mut s, "pw2"), first);
+    let id: uuid::Uuid = serde_json::from_value(first["saved"].clone()).unwrap();
+    let item = s.item(id, 1_000).unwrap();
+    assert_eq!(item.password(), Some("pw2"));
+    assert_eq!(item.title, "localhost:8765");
+    assert_eq!(item.urls, ["http://localhost:8765"]);
+    let personal_id = personal_vault(&mut s);
+    assert_eq!(item.vault_id, personal_id);
+    let all = s.items(&Default::default(), 1_000).unwrap();
+    assert_eq!(all.len(), 1);
+}
+
+fn personal_vault(s: &mut Session) -> uuid::Uuid {
+    s.vaults(1_000)
+        .unwrap()
+        .into_iter()
+        .find(|v| v.name == crate::session::DEFAULT_VAULT)
+        .unwrap()
+        .id
 }
