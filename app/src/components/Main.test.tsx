@@ -20,6 +20,7 @@ vi.mock("../api", async (importOriginal) => {
       createVault: vi.fn(),
       deletedItems: vi.fn(),
       restoreItem: vi.fn(),
+      settings: vi.fn(),
     },
   };
 });
@@ -42,6 +43,7 @@ beforeEach(() => {
   vi.mocked(api.createVault).mockReset().mockResolvedValue({ id: "v3", name: "Home", itemCount: 0 });
   vi.mocked(api.deletedItems).mockReset().mockResolvedValue([{ ...github, id: "d1", title: "Old forum" }]);
   vi.mocked(api.restoreItem).mockReset().mockResolvedValue(undefined);
+  vi.mocked(api.settings).mockReset().mockResolvedValue({ autoLockMinutes: 10, clipboardSeconds: 90 });
 });
 
 const lastFilter = () => vi.mocked(api.items).mock.lastCall![0];
@@ -123,4 +125,11 @@ test("recently deleted lists deleted items and restores one", async () => {
   expect(api.restoreItem).toHaveBeenCalledWith("d1");
   await waitFor(() => expect(api.deletedItems).toHaveBeenCalledTimes(2));
   expect(screen.getByRole("button", { name: "+ New" })).toBeDisabled();
+});
+
+test("settings open from the sidebar", async () => {
+  const user = userEvent.setup();
+  render(<Main onLock={vi.fn()} />);
+  await user.click(await screen.findByRole("button", { name: "Settings…" }));
+  expect(await screen.findByRole("dialog", { name: "Settings" })).toBeInTheDocument();
 });

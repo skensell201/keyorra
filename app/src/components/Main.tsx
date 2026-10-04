@@ -5,6 +5,7 @@ import { ItemDetail } from "./ItemDetail";
 import { ItemEditor } from "./ItemEditor";
 import { ItemList } from "./ItemList";
 import { TrashItem } from "./TrashItem";
+import { SettingsDialog } from "./SettingsDialog";
 import { Sidebar, type Selection } from "./Sidebar";
 
 type Pane = { mode: "empty" } | { mode: "view"; id: string } | { mode: "edit"; item: Item; isNew: boolean };
@@ -16,7 +17,7 @@ export function Main({ onLock }: { onLock: () => void }) {
   const [items, setItems] = useState<ItemSummary[]>([]);
   const [pane, setPane] = useState<Pane>({ mode: "empty" });
   const [importing, setImporting] = useState(false);
-  const [, setShowSettings] = useState(false);
+  const [showSettings, setShowSettings] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const vaultsSeq = useRef(0);
@@ -154,6 +155,7 @@ export function Main({ onLock }: { onLock: () => void }) {
         )}
       </section>
       {importing && <ImportDialog onClose={() => setImporting(false)} onImported={refresh} />}
+      {showSettings && <SettingsDialog onClose={() => setShowSettings(false)} />}
     </div>
   );
 }
