@@ -497,3 +497,73 @@ fn unlock_with_a_missing_database_is_not_a_wrong_password() {
     assert_ne!(err.kind, ErrorKind::WrongPassword);
     assert_eq!(s.throttle.failures(), 0);
 }
+
+fn field_ids(item: &Item) -> Vec<&str> {
+    item.fields.iter().map(|f| f.id.as_str()).collect()
+}
+
+#[test]
+fn new_items_get_templates_per_kind() {
+    let (_dir, mut s) = unlocked_session();
+    let p = personal(&mut s);
+    let card = s.new_item(p, ItemKind::CreditCard, 1_000).unwrap();
+    assert_eq!(field_ids(&card), ["cardholder", "number", "expiry", "cvv"]);
+    assert!(matches!(card.fields[1].value, FieldValue::Concealed(_)));
+    let id = s.new_item(p, ItemKind::Identity, 1_000).unwrap();
+    assert_eq!(
+        field_ids(&id),
+        ["first-name", "last-name", "email", "phone"]
+    );
+    assert!(matches!(id.fields[2].value, FieldValue::Email(_)));
+    let api = s.new_item(p, ItemKind::ApiCredential, 1_000).unwrap();
+    assert_eq!(field_ids(&api), ["username", "credential", "hostname"]);
+    assert!(api.fields.iter().all(|f| f.purpose.is_none()));
+}
+
+#[test]
+fn saving_a_valid_totp_secret_enables_codes() {
+    let (_dir, mut s) = unlocked_session();
+    let p = personal(&mut s);
+    let mut item = save_login(&mut s, p, "GitHub", "ivan", "pw");
+    item.fields.push(Field {
+        id: "otp-1".into(),
+        label: "one-time password".into(),
+        value: FieldValue::Totp(RFC_SECRET.into()),
+        purpose: None,
+    });
+    let saved = s.save_item(item, 1_000).unwrap();
+    assert_eq!(s.totp(saved.id, 59).unwrap().unwrap().code, "287082");
+}
+
+#[test]
+fn saving_an_invalid_totp_secret_is_refused() {
+    let (_dir, mut s) = unlocked_session();
+    let p = personal(&mut s);
+    let mut item = save_login(&mut s, p, "GitHub", "ivan", "pw");
+    item.fields.push(Field {
+        id: "otp-1".into(),
+        label: "one-time password".into(),
+        value: FieldValue::Totp("not a secret!!".into()),
+        purpose: None,
+    });
+    assert_eq!(
+        s.save_item(item, 1_000).unwrap_err().kind,
+        ErrorKind::Invalid
+    );
+}
+
+#[test]
+fn empty_totp_fields_are_dropped_on_save() {
+    let (_dir, mut s) = unlocked_session();
+    let p = personal(&mut s);
+    let mut item = save_login(&mut s, p, "GitHub", "ivan", "pw");
+    item.fields.push(Field {
+        id: "otp-1".into(),
+        label: "one-time password".into(),
+        value: FieldValue::Totp("   ".into()),
+        purpose: None,
+    });
+    let saved = s.save_item(item, 1_000).unwrap();
+    assert_eq!(saved.totp(), None);
+    assert_eq!(saved.fields.len(), 2);
+}

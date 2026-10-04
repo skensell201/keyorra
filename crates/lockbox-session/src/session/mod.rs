@@ -217,14 +217,7 @@ impl Session {
             ));
         }
         let mut item = Item::new(vault_id, kind, "", now as i64);
-        match kind {
-            ItemKind::Login => {
-                item.fields.push(purpose_field(Purpose::Username));
-                item.fields.push(purpose_field(Purpose::Password));
-            }
-            ItemKind::Password => item.fields.push(purpose_field(Purpose::Password)),
-            _ => {}
-        }
+        item.fields = template_fields(kind);
         Ok(item)
     }
 
@@ -233,6 +226,23 @@ impl Session {
     pub fn save_item(&mut self, mut item: Item, now: u64) -> CmdResult<Item> {
         self.touch(now);
         item.title = item.title.trim().to_owned();
+        // An empty one-time-password field would make every code request fail.
+        item.fields
+            .retain(|f| !matches!(&f.value, FieldValue::Totp(s) if s.trim().is_empty()));
+        for field in item
+            .fields
+            .iter()
+            .chain(item.sections.iter().flat_map(|s| s.fields.iter()))
+        {
+            if let FieldValue::Totp(raw) = &field.value {
+                Totp::parse(raw).map_err(|e| {
+                    CmdError::new(
+                        ErrorKind::Invalid,
+                        format!("One-time password \"{}\": {e}", field.label),
+                    )
+                })?;
+            }
+        }
         if item.title.is_empty() {
             return Err(CmdError::new(ErrorKind::Invalid, "Title is required"));
         }
@@ -387,6 +397,46 @@ fn entry_vault(entry: &ItemEntry) -> Uuid {
     match entry {
         ItemEntry::Ok(item) => item.vault_id,
         ItemEntry::Damaged { vault_id, .. } => *vault_id,
+    }
+}
+
+fn field(id: &str, label: &str, value: FieldValue) -> Field {
+    Field {
+        id: id.into(),
+        label: label.into(),
+        value,
+        purpose: None,
+    }
+}
+
+/// Built-in fields a new item of this kind starts with.
+fn template_fields(kind: ItemKind) -> Vec<Field> {
+    let text = |id: &str, label: &str| field(id, label, FieldValue::Text(String::new()));
+    let hidden = |id: &str, label: &str| field(id, label, FieldValue::Concealed(String::new()));
+    match kind {
+        ItemKind::Login => vec![
+            purpose_field(Purpose::Username),
+            purpose_field(Purpose::Password),
+        ],
+        ItemKind::Password => vec![purpose_field(Purpose::Password)],
+        ItemKind::CreditCard => vec![
+            text("cardholder", "cardholder name"),
+            hidden("number", "number"),
+            text("expiry", "expiry date"),
+            hidden("cvv", "verification number"),
+        ],
+        ItemKind::Identity => vec![
+            text("first-name", "first name"),
+            text("last-name", "last name"),
+            field("email", "email", FieldValue::Email(String::new())),
+            field("phone", "phone", FieldValue::Phone(String::new())),
+        ],
+        ItemKind::ApiCredential => vec![
+            text("username", "username"),
+            hidden("credential", "credential"),
+            text("hostname", "hostname"),
+        ],
+        ItemKind::SecureNote => Vec::new(),
     }
 }
 
