@@ -49,6 +49,8 @@ new MutationObserver((mutations) => {
   }, 300);
 }).observe(document.documentElement, { childList: true, subtree: true });
 scan();
+// A field can gain focus before the mutation scan ran (or be shown without any mutation).
+document.addEventListener("focusin", (e) => e.target instanceof HTMLInputElement && scan(), true);
 
 chrome.runtime.onMessage.addListener((msg: ToContent, _sender, respond) => {
   (async () => {

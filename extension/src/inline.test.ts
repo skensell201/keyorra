@@ -96,3 +96,54 @@ test("a failing list shows a reload hint; Escape closes the panel", async () => 
   document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
   expect(shadow().querySelector(".panel")).toBeNull();
 });
+
+test("a host with a tabindex does nothing", async () => {
+  menu.watch(field);
+  field.dispatchEvent(new FocusEvent("focus"));
+  document.querySelector("lockbox-inline")!.setAttribute("tabindex", "0");
+  shadow().querySelector<HTMLButtonElement>("button.icon")!.click();
+  await Promise.resolve();
+  expect(actions.list).not.toHaveBeenCalled();
+});
+
+test("a transformed or blended host does nothing", async () => {
+  menu.watch(field);
+  field.dispatchEvent(new FocusEvent("focus"));
+  const host = document.querySelector<HTMLElement>("lockbox-inline")!;
+  host.style.setProperty("mix-blend-mode", "difference", "important");
+  shadow().querySelector<HTMLButtonElement>("button.icon")!.click();
+  await Promise.resolve();
+  expect(actions.list).not.toHaveBeenCalled();
+});
+
+test("an inverting page filter (dark mode extensions) is allowed", async () => {
+  menu.watch(field);
+  field.dispatchEvent(new FocusEvent("focus"));
+  document.documentElement.style.filter = "invert(1) hue-rotate(180deg)";
+  shadow().querySelector<HTMLButtonElement>("button.icon")!.click();
+  await vi.waitFor(() => expect(actions.list).toHaveBeenCalled());
+  document.documentElement.style.filter = "";
+});
+
+test("an obscured element reported by IntersectionObserver is refused", async () => {
+  let report: (entries: any[]) => void = () => {};
+  vi.stubGlobal("IntersectionObserver", class { constructor(cb: any) { report = cb; } observe() {} unobserve() {} });
+  const watchful = new InlineMenu(actions, { onRoot: (r) => (root = r), trusted: () => true, settleMs: 0 });
+  watchful.watch(field);
+  field.dispatchEvent(new FocusEvent("focus"));
+  const icon = shadow().querySelector<HTMLButtonElement>("button.icon")!;
+  report([{ target: icon, isVisible: false }]);
+  icon.click();
+  await Promise.resolve();
+  expect(actions.list).not.toHaveBeenCalled();
+  report([{ target: icon, isVisible: true }]);
+  icon.click();
+  await vi.waitFor(() => expect(actions.list).toHaveBeenCalled());
+  vi.unstubAllGlobals();
+});
+
+test("a field that is already focused when watched shows the icon", () => {
+  field.focus();
+  menu.watch(field);
+  expect(shadow().querySelector<HTMLButtonElement>("button.icon")!.hidden).toBe(false);
+});

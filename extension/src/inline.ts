@@ -38,23 +38,46 @@ export interface MenuOptions {
   /** Whether an event comes from the user. Defaults to `isTrusted`. */
   trusted?: (e: Event) => boolean;
   /** Whether the menu is really visible to the user (anti-clickjacking). */
-  visible?: (e: MouseEvent, host: HTMLElement) => boolean;
+  visible?: (e: MouseEvent, host: HTMLElement, target: HTMLElement) => boolean;
   /** Item clicks sooner than this after the panel opened are ignored. */
   settleMs?: number;
 }
 
-/** A click only counts if the user could see the menu: not hidden, faded, filtered or covered. */
-function defaultVisible(e: MouseEvent, host: HTMLElement): boolean {
-  if (host.checkVisibility?.({ opacityProperty: true, visibilityProperty: true } as any) === false) return false;
-  for (const el of [host, document.documentElement, document.body]) {
-    if (!el) continue;
-    const cs = getComputedStyle(el);
-    if (parseFloat(cs.opacity) < 0.9) return false;
-    if (cs.filter && cs.filter !== "none") return false;
+/** True for filters that hide or wash out the page; invert() (Dark Reader) and the like are fine. */
+function hidingFilter(filter: string): boolean {
+  if (!filter || filter === "none") return false;
+  if (/opacity\(/.test(filter)) return true;
+  for (const m of filter.matchAll(/(brightness|contrast)\(\s*([\d.]+)(%?)/g)) {
+    const v = parseFloat(m[2]) / (m[3] ? 100 : 1);
+    if (v < 0.5) return true;
   }
-  if (e.detail > 0 && typeof document.elementFromPoint === "function") {
-    const hit = document.elementFromPoint(e.clientX, e.clientY);
-    if (hit && hit !== host) return false;
+  return false;
+}
+
+function plain(v: string): boolean {
+  return !v || v === "none";
+}
+
+/** A click only counts if the user could see the menu: not hidden, faded, masked, clipped, filtered or covered. */
+function defaultVisible(_e: MouseEvent, host: HTMLElement, target: HTMLElement): boolean {
+  if (host.hasAttribute("tabindex")) return false;
+  if (host.checkVisibility?.({ opacityProperty: true, visibilityProperty: true } as any) === false) return false;
+  const hs = getComputedStyle(host);
+  const ds = getComputedStyle(document.documentElement);
+  for (const cs of [hs, ds]) {
+    if (parseFloat(cs.opacity) < 0.9) return false;
+    if (hidingFilter(cs.filter)) return false;
+    if (!plain(cs.getPropertyValue("mask-image")) || !plain(cs.getPropertyValue("-webkit-mask-image"))) return false;
+    if (!plain(cs.getPropertyValue("clip-path"))) return false;
+    const blend = cs.getPropertyValue("mix-blend-mode");
+    if (blend && blend !== "normal") return false;
+  }
+  if (!plain(hs.transform)) return false;
+  // Hit-test the centre of the activated button: whatever is on top there must be our host.
+  const r = target.getBoundingClientRect();
+  if (r.width > 0 && r.height > 0 && typeof document.elementFromPoint === "function") {
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2);
+    if (hit !== host) return false;
   }
   return true;
 }
@@ -68,7 +91,9 @@ export class InlineMenu {
   private field: HTMLInputElement | null = null;
   private watched = new WeakSet<HTMLInputElement>();
   private trusted: (e: Event) => boolean;
-  private visible: (e: MouseEvent, host: HTMLElement) => boolean;
+  private visible: (e: MouseEvent, host: HTMLElement, target: HTMLElement) => boolean;
+  private seen = new Map<Element, boolean | undefined>();
+  private observer: IntersectionObserver | null = null;
   private settleMs: number;
 
   constructor(
@@ -92,6 +117,7 @@ export class InlineMenu {
     this.icon.innerHTML = KEYHOLE;
     this.icon.hidden = true;
     this.icon.addEventListener("mousedown", (e) => e.preventDefault());
+    this.observe(this.icon);
     this.icon.addEventListener("click", (e) => {
       if (this.allowed(e)) void this.open();
     });
@@ -109,18 +135,49 @@ export class InlineMenu {
     });
   }
 
+  /** Chromium can tell whether anything covers an element (trackVisibility); elsewhere this is a no-op. */
+  private observe(el: Element): void {
+    if (typeof IntersectionObserver !== "function") return;
+    this.observer ??= new IntersectionObserver(
+      (entries) => {
+        for (const entry of entries) this.seen.set(entry.target, "isVisible" in entry ? (entry as any).isVisible === true : undefined);
+      },
+      { trackVisibility: true, delay: 100, threshold: [1] } as IntersectionObserverInit,
+    );
+    this.observer.observe(el);
+  }
+
   private allowed(e: MouseEvent): boolean {
-    return this.trusted(e) && this.visible(e, this.host);
+    const target = e.currentTarget as HTMLElement;
+    if (!this.trusted(e) || !this.visible(e, this.host, target)) return false;
+    if (!this.observer) return true;
+    // The icon and the panel (which holds the items) must both have been reported fully visible, if the browser says.
+    const watched = target === this.icon ? [target] : [target, this.panel];
+    return watched.every((el) => !el || this.seen.get(el) !== false);
+  }
+
+  /** In a modal <dialog> only the dialog's subtree is interactive, so the host has to live there. */
+  private attach(field: HTMLInputElement): void {
+    let parent: HTMLElement = document.documentElement;
+    try {
+      parent = field.closest<HTMLElement>("dialog:modal") ?? parent;
+    } catch {
+      /* :modal unsupported */
+    }
+    if (this.host.parentNode !== parent) parent.append(this.host);
   }
 
   watch(field: HTMLInputElement): void {
     if (this.watched.has(field)) return;
     this.watched.add(field);
-    field.addEventListener("focus", () => {
+    const show = () => {
       this.field = field;
+      this.attach(field);
       this.icon.hidden = false;
       this.place();
-    });
+    };
+    field.addEventListener("focus", show);
+    if (document.activeElement === field) show();
     field.addEventListener("blur", () => setTimeout(() => !this.panel && (this.icon.hidden = true), 150));
   }
 
@@ -132,6 +189,7 @@ export class InlineMenu {
     panel.append(note("Loading…"));
     this.root.append(panel);
     this.panel = panel;
+    this.observe(panel);
     this.openedAt = Date.now();
     this.place();
     let result: { state: State; items: Candidate[] };
@@ -169,6 +227,10 @@ export class InlineMenu {
   }
 
   close(): void {
+    if (this.panel) {
+      this.observer?.unobserve(this.panel);
+      this.seen.delete(this.panel);
+    }
     this.panel?.remove();
     this.panel = null;
   }

@@ -108,3 +108,19 @@ test("non-web tabs get a hint instead of a list", async () => {
   await renderPopup(app(), deps);
   expect(app().textContent).toContain("Open a website to fill a login.");
 });
+
+test("pairing without a stored code says it is waiting; a vanished pairing returns to Connect", async () => {
+  let state = "pairing";
+  vi.mocked(deps.ask).mockImplementation(async (m: any) => {
+    if (m.type === "state") return { ok: true, value: state };
+    if (m.type === "pairingCode") return { ok: true, value: null };
+    if (m.type === "pairStatus") {
+      state = "unpaired";
+      return { ok: true, value: "none" };
+    }
+    return { ok: true, value: [] };
+  });
+  const done = renderPopup(app(), deps);
+  await vi.waitFor(() => expect(app().textContent).toContain("Connect this browser to Lockbox"));
+  await done;
+});

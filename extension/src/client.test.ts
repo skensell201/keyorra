@@ -155,3 +155,14 @@ test("a denied pending pairing ends as unpaired; nothing pending is reported as 
   expect(await client.state()).toBe("unpaired");
   expect(await client.pairingCode()).toBeNull();
 });
+
+test("a locked app keeps the pending pairing; a request resolves a pending pairing first", async () => {
+  await client.startPairing("Chrome");
+  const real = app.send.bind(app);
+  app.send = async (m: any) => (m.kind === "pairStatus" ? { kind: "locked" } : real(m));
+  expect(await client.pairingResult()).toBe("waiting");
+  expect(await client.pairingCode()).not.toBeNull();
+  app.send = real;
+  app.approved = true;
+  expect(await client.list("https://github.com")).toEqual(app.items);
+});

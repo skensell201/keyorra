@@ -93,7 +93,8 @@ export class Client {
     const pending = await this.store.getPending();
     if (!pending) return "none";
     const res = await this.transport({ kind: "pairStatus", clientId: pending.clientId });
-    if (res.kind === "pairPending") return "waiting";
+    // A locked app can still approve later: keep the pending pairing.
+    if (res.kind === "pairPending" || res.kind === "locked") return "waiting";
     await this.store.setPending(null);
     if (res.kind === "paired") {
       await this.store.set({ clientId: pending.clientId, key: pending.key });
@@ -124,7 +125,11 @@ export class Client {
   }
 
   private async request(req: object): Promise<any> {
-    const pairing = await this.store.get();
+    let pairing = await this.store.get();
+    if (!pairing && (await this.store.getPending())) {
+      await this.pairingResult();
+      pairing = await this.store.get();
+    }
     if (!pairing) throw new UnpairedError();
     const key = fromB64(pairing.key);
     const requestBox = seal(key, pairing.clientId, "req", req);

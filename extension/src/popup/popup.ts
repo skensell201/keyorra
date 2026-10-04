@@ -56,14 +56,21 @@ async function pair(root: HTMLElement, deps: PopupDeps): Promise<void> {
 }
 
 async function waitForApproval(root: HTMLElement, deps: PopupDeps, rawCode: string | null): Promise<void> {
-  if (rawCode) {
+  if (!rawCode) {
+    shell(root, el("p", { textContent: "Waiting for approval in the Lockbox app…" }));
+  } else {
     const code = `${rawCode.slice(0, 3)} ${rawCode.slice(3)}`;
     shell(root, el("p", { textContent: "Confirm this code in the Lockbox app:" }), el("div", { className: "code", textContent: code }));
   }
   for (let i = 0; i < 120; i++) {
     const s = await deps.ask<"none" | "waiting" | "paired" | "denied">({ type: "pairStatus" });
     if (s.ok && s.value === "paired") return showLogins(root, deps);
-    if (!s.ok || s.value === "denied" || s.value === "none") {
+    if (!s.ok) {
+      shell(root, el("p", { textContent: "Lockbox isn't running." }));
+      return;
+    }
+    if (s.value === "none") return renderPopup(root, deps);
+    if (s.value === "denied") {
       shell(root, el("p", { textContent: "Connection was declined." }));
       return;
     }
