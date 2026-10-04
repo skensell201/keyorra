@@ -619,3 +619,60 @@ fn trash_requires_unlock() {
         ErrorKind::Locked
     );
 }
+
+use crate::settings::Settings;
+
+#[test]
+fn settings_persist_and_apply() {
+    let (dir, mut s) = unlocked_session();
+    assert_eq!(s.settings(), Settings::default());
+    let new = Settings {
+        auto_lock_minutes: 1,
+        clipboard_seconds: 30,
+    };
+    assert_eq!(s.update_settings(new, 1_000).unwrap(), new);
+    assert!(!s.tick(1_059));
+    assert!(s.tick(1_060), "1-minute auto-lock applies immediately");
+
+    let path = dir.path().join("Application Support").join("lockbox.db");
+    let reopened = Session::new(path, KdfParams::INSECURE_FAST, 5_000);
+    assert_eq!(reopened.settings(), new);
+}
+
+#[test]
+fn clipboard_timeout_follows_settings() {
+    let (_dir, mut s) = unlocked_session();
+    let p = personal(&mut s);
+    let item = save_login(&mut s, p, "GitHub", "ivan", "hunter2");
+    s.update_settings(
+        Settings {
+            auto_lock_minutes: 10,
+            clipboard_seconds: 30,
+        },
+        1_000,
+    )
+    .unwrap();
+    s.copy_value(item.id, "password", 1_000).unwrap();
+    assert!(!s.clipboard_should_clear(1_029, Some("hunter2")));
+    assert!(s.clipboard_should_clear(1_030, Some("hunter2")));
+}
+
+#[test]
+fn invalid_settings_and_locked_sessions_are_refused() {
+    let (_dir, mut s) = unlocked_session();
+    let bad = Settings {
+        auto_lock_minutes: 0,
+        clipboard_seconds: 90,
+    };
+    assert_eq!(
+        s.update_settings(bad, 1_000).unwrap_err().kind,
+        ErrorKind::Invalid
+    );
+    s.lock();
+    assert_eq!(
+        s.update_settings(Settings::default(), 1_000)
+            .unwrap_err()
+            .kind,
+        ErrorKind::Locked
+    );
+}

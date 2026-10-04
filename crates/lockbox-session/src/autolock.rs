@@ -15,6 +15,10 @@ impl AutoLock {
         }
     }
 
+    pub fn set_timeout(&mut self, timeout_secs: u64) {
+        self.timeout_secs = timeout_secs;
+    }
+
     pub fn touch(&mut self, now: u64) {
         self.last_activity = self.last_activity.max(now);
     }
@@ -46,6 +50,14 @@ mod tests {
             "an older timestamp must not shorten the timer"
         );
         assert!(lock.is_due(1_110));
+    }
+
+    #[test]
+    fn timeout_can_change() {
+        let mut lock = AutoLock::new(60, 1_000);
+        lock.set_timeout(300);
+        assert!(!lock.is_due(1_299));
+        assert!(lock.is_due(1_300));
     }
 
     #[test]

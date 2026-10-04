@@ -14,6 +14,7 @@ use crate::dto::{ImportPreview, ImportResult, ItemFilter, ItemSummary, TotpCode,
 use crate::autolock::AutoLock;
 use crate::clipboard::ClipboardGuard;
 use crate::error::{CmdError, CmdResult, ErrorKind};
+use crate::settings::Settings;
 use crate::throttle::UnlockThrottle;
 
 #[cfg(test)]
@@ -41,19 +42,25 @@ pub struct Session {
     throttle: UnlockThrottle,
     clipboard: ClipboardGuard,
     pending_import: Option<ImportPlan>,
+    settings: Settings,
+    settings_path: PathBuf,
 }
 
 impl Session {
     /// `kdf` is `KdfParams::DEFAULT` in the app; tests pass cheap parameters.
     pub fn new(path: PathBuf, kdf: KdfParams, now: u64) -> Self {
+        let settings_path = path.with_file_name("settings.json");
+        let settings = Settings::load(&settings_path);
         Self {
             path,
             kdf,
             store: None,
-            autolock: AutoLock::new(AutoLock::DEFAULT_TIMEOUT_SECS, now),
+            autolock: AutoLock::new(settings.auto_lock_minutes * 60, now),
             throttle: UnlockThrottle::default(),
             clipboard: ClipboardGuard::default(),
             pending_import: None,
+            settings,
+            settings_path,
         }
     }
 
@@ -141,6 +148,22 @@ impl Session {
         } else {
             false
         }
+    }
+
+    pub fn settings(&self) -> Settings {
+        self.settings
+    }
+
+    /// Validates, persists and applies new settings. Only while unlocked, so the lock screen
+    /// can't be used to weaken them.
+    pub fn update_settings(&mut self, settings: Settings, now: u64) -> CmdResult<Settings> {
+        self.touch(now);
+        self.store()?;
+        settings.validate()?;
+        settings.save(&self.settings_path)?;
+        self.settings = settings;
+        self.autolock.set_timeout(settings.auto_lock_minutes * 60);
+        Ok(settings)
     }
 
     pub fn clipboard_pending(&self) -> bool {
@@ -336,7 +359,7 @@ impl Session {
     }
 
     /// Text to put on the clipboard for one field (`"totp"` = the current one-time code), and
-    /// arms clearing it after `ClipboardGuard::DEFAULT_CLEAR_SECS`.
+    /// arms clearing it after the configured clipboard timeout.
     pub fn copy_value(&mut self, id: Uuid, field_id: &str, now: u64) -> CmdResult<String> {
         self.touch(now);
         let item = self.store()?.get_item(id)?;
@@ -358,7 +381,7 @@ impl Session {
             return Err(CmdError::new(ErrorKind::Invalid, "Nothing to copy"));
         }
         self.clipboard
-            .copied(&text, now, ClipboardGuard::DEFAULT_CLEAR_SECS);
+            .copied(&text, now, self.settings.clipboard_seconds);
         Ok(text)
     }
 
