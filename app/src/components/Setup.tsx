@@ -1,3 +1,4 @@
+import { Keyhole } from "./Keyhole";
 import { useState, type FormEvent } from "react";
 import { api, errorMessage } from "../api";
 
@@ -30,6 +31,9 @@ export function Setup({ onDone }: { onDone: () => void }) {
   return (
     <div className="center">
       <form className="card auth" onSubmit={submit}>
+        <div className="logo">
+          <Keyhole width={24} height={24} />
+        </div>
         <h1>Create your Lockbox</h1>
         <p className="muted">
           Your master password encrypts everything. It can't be recovered, so write it down and keep it somewhere safe.

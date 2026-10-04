@@ -1,3 +1,4 @@
+import { Keyhole } from "./Keyhole";
 import { useEffect, useState, type FormEvent } from "react";
 import { api, errorMessage, isCmdError } from "../api";
 
@@ -42,6 +43,9 @@ export function Unlock({ onUnlocked }: { onUnlocked: () => void }) {
   return (
     <div className="center">
       <form className="card auth" onSubmit={submit}>
+        <div className="logo">
+          <Keyhole width={24} height={24} />
+        </div>
         <h1>Lockbox is locked</h1>
         <label>
           Master password

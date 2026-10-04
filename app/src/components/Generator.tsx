@@ -100,7 +100,7 @@ export function Generator({ onUse }: { onUse: (value: string) => void }) {
         <button type="button" onClick={regenerate}>
           Regenerate
         </button>
-        <button type="button" className="primary" disabled={!value} onClick={() => onUse(value)}>
+        <button type="button" disabled={!value} onClick={() => onUse(value)}>
           Use
         </button>
       </div>

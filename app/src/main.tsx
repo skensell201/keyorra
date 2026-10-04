@@ -1,3 +1,5 @@
+import "@fontsource-variable/onest";
+import "@fontsource/geist-mono/400.css";
 import "./styles.css";
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";

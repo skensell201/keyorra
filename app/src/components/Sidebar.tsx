@@ -1,3 +1,4 @@
+import { Keyhole } from "./Keyhole";
 import { useState, type FormEvent } from "react";
 import type { Vault } from "../api";
 
@@ -31,7 +32,10 @@ export function Sidebar({ vaults, selection, onSelect, onNewVault, onImport, onL
 
   return (
     <nav className="sidebar" aria-label="Vaults">
-      <div className="brand">Lockbox</div>
+      <div className="brand">
+        <Keyhole />
+        Lockbox
+      </div>
       <button className="nav" aria-current={isCurrent({ kind: "all" })} onClick={() => onSelect({ kind: "all" })}>
         <span>All items</span>
         <span className="muted">{total}</span>
