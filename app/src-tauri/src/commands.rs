@@ -6,7 +6,7 @@ use lockbox_core::model::{Item, ItemKind};
 use lockbox_session::dto::{
     GeneratorRequest, ImportPreview, ImportResult, ItemFilter, ItemSummary, TotpCode, VaultDto,
 };
-use lockbox_session::{CmdError, CmdResult, ErrorKind, Settings, Status};
+use lockbox_session::{CmdError, CmdResult, ErrorKind, PairedBrowser, Settings, Status};
 use tauri::{AppHandle, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use uuid::Uuid;
@@ -131,4 +131,46 @@ pub fn change_password(
     new_password: String,
 ) -> CmdResult<()> {
     lock_session(&state).change_password(&current, &new_password, now())
+}
+
+#[tauri::command(async)]
+pub fn connect_browsers() -> CmdResult<Vec<String>> {
+    let home = std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .ok_or_else(|| CmdError::new(ErrorKind::Other, "HOME is not set"))?;
+    let exe =
+        std::env::current_exe().map_err(|e| CmdError::new(ErrorKind::Other, e.to_string()))?;
+    let app_support = home.join("Library/Application Support");
+    let mut done = Vec::new();
+    for m in lockbox_session::bridge::host::manifests(&app_support, &exe) {
+        if let Some(dir) = m.path.parent() {
+            std::fs::create_dir_all(dir)
+                .map_err(|e| CmdError::new(ErrorKind::Other, e.to_string()))?;
+        }
+        std::fs::write(&m.path, m.contents)
+            .map_err(|e| CmdError::new(ErrorKind::Other, e.to_string()))?;
+        done.push(m.browser.to_string());
+    }
+    Ok(done)
+}
+
+#[tauri::command(async)]
+pub fn approve_pairing(state: State<'_, AppState>, client_id: String) -> CmdResult<()> {
+    lock_session(&state).approve_pairing(&client_id, now())
+}
+
+#[tauri::command(async)]
+pub fn deny_pairing(state: State<'_, AppState>, client_id: String) -> CmdResult<()> {
+    lock_session(&state).deny_pairing(&client_id);
+    Ok(())
+}
+
+#[tauri::command(async)]
+pub fn paired_browsers(state: State<'_, AppState>) -> CmdResult<Vec<PairedBrowser>> {
+    lock_session(&state).paired_browsers()
+}
+
+#[tauri::command(async)]
+pub fn remove_paired_browser(state: State<'_, AppState>, client_id: String) -> CmdResult<()> {
+    lock_session(&state).remove_paired_browser(&client_id)
 }

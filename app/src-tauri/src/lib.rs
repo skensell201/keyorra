@@ -1,4 +1,6 @@
+mod bridge;
 mod commands;
+pub mod native_host;
 mod screen;
 
 use std::sync::{Mutex, MutexGuard};
@@ -38,6 +40,11 @@ pub fn run() {
             ))));
             let handle = app.handle().clone();
             std::thread::spawn(move || housekeeping(handle));
+            if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
+                let socket = lockbox_session::bridge::wire::socket_path(&home);
+                let bridge_app = app.handle().clone();
+                std::thread::spawn(move || bridge::serve(bridge_app, socket));
+            }
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -62,6 +69,11 @@ pub fn run() {
             commands::settings,
             commands::update_settings,
             commands::change_password,
+            commands::connect_browsers,
+            commands::approve_pairing,
+            commands::deny_pairing,
+            commands::paired_browsers,
+            commands::remove_paired_browser,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Lockbox");
