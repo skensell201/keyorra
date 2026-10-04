@@ -1,12 +1,14 @@
 // Talks to the Lockbox app: pairing, then sealed list/fill calls. Transport and storage are injected.
 import { commitment, derive, fromB64, newKeyPair, openReply, seal, toB64 } from "./crypto";
 
-export type State = "noApp" | "unpaired" | "locked" | "ready";
+export type State = "noApp" | "unpaired" | "pairing" | "locked" | "ready";
 
 export interface Pairing {
   clientId: string;
   /** base64 session key */
   key: string;
+  /** the confirmation code, kept with a pending pairing so the popup can show it again */
+  code?: string;
 }
 
 export interface PairingStore {
@@ -49,7 +51,13 @@ export class Client {
     } catch {
       return "noApp";
     }
-    if (!(await this.store.get())) return "unpaired";
+    if (!(await this.store.get())) {
+      if (!(await this.store.getPending())) return "unpaired";
+      // The popup may have been closed while the user approved in the app.
+      const result = await this.pairingResult();
+      if (result === "waiting") return "pairing";
+      if (result !== "paired") return "unpaired";
+    }
     if (status?.locked) return "locked";
     try {
       await this.request({ op: "ping" });
@@ -72,18 +80,23 @@ export class Client {
     if (revealed.kind === "locked") throw new LockedError();
     if (revealed.kind !== "pairPending") throw new Error(revealed.message ?? "Pairing failed");
     const { key, code } = derive(keys, serverPub, keys.public, serverPub);
-    await this.store.setPending({ clientId: res.clientId, key: toB64(key) });
+    await this.store.setPending({ clientId: res.clientId, key: toB64(key), code });
     return { code };
   }
 
-  async pairingResult(): Promise<"waiting" | "paired" | "denied"> {
+  /** The code of the pairing in progress, if any. */
+  async pairingCode(): Promise<string | null> {
+    return (await this.store.getPending())?.code ?? null;
+  }
+
+  async pairingResult(): Promise<"none" | "waiting" | "paired" | "denied"> {
     const pending = await this.store.getPending();
-    if (!pending) return "denied";
+    if (!pending) return "none";
     const res = await this.transport({ kind: "pairStatus", clientId: pending.clientId });
     if (res.kind === "pairPending") return "waiting";
     await this.store.setPending(null);
     if (res.kind === "paired") {
-      await this.store.set(pending);
+      await this.store.set({ clientId: pending.clientId, key: pending.key });
       return "paired";
     }
     return "denied";

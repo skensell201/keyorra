@@ -32,16 +32,57 @@ const STYLE = `
 @media (prefers-reduced-motion: reduce) { .panel { animation: none; } .icon { transition: none; } }
 `;
 
+export interface MenuOptions {
+  /** Receives the (closed) shadow root; for tests only. */
+  onRoot?: (root: ShadowRoot) => void;
+  /** Whether an event comes from the user. Defaults to `isTrusted`. */
+  trusted?: (e: Event) => boolean;
+  /** Whether the menu is really visible to the user (anti-clickjacking). */
+  visible?: (e: MouseEvent, host: HTMLElement) => boolean;
+  /** Item clicks sooner than this after the panel opened are ignored. */
+  settleMs?: number;
+}
+
+/** A click only counts if the user could see the menu: not hidden, faded, filtered or covered. */
+function defaultVisible(e: MouseEvent, host: HTMLElement): boolean {
+  if (host.checkVisibility?.({ opacityProperty: true, visibilityProperty: true } as any) === false) return false;
+  for (const el of [host, document.documentElement, document.body]) {
+    if (!el) continue;
+    const cs = getComputedStyle(el);
+    if (parseFloat(cs.opacity) < 0.9) return false;
+    if (cs.filter && cs.filter !== "none") return false;
+  }
+  if (e.detail > 0 && typeof document.elementFromPoint === "function") {
+    const hit = document.elementFromPoint(e.clientX, e.clientY);
+    if (hit && hit !== host) return false;
+  }
+  return true;
+}
+
 export class InlineMenu {
   private host: HTMLElement;
   private root: ShadowRoot;
   private icon: HTMLButtonElement;
   private panel: HTMLDivElement | null = null;
+  private openedAt = 0;
   private field: HTMLInputElement | null = null;
+  private watched = new WeakSet<HTMLInputElement>();
+  private trusted: (e: Event) => boolean;
+  private visible: (e: MouseEvent, host: HTMLElement) => boolean;
+  private settleMs: number;
 
-  constructor(private actions: MenuActions) {
+  constructor(
+    private actions: MenuActions,
+    options: MenuOptions = {},
+  ) {
+    this.trusted = options.trusted ?? ((e) => e.isTrusted);
+    this.visible = options.visible ?? defaultVisible;
+    this.settleMs = options.settleMs ?? 300;
     this.host = document.createElement("lockbox-inline");
-    this.root = this.host.attachShadow({ mode: "open" });
+    this.host.style.setProperty("opacity", "1", "important");
+    // Closed: page scripts cannot reach in and click the buttons.
+    this.root = this.host.attachShadow({ mode: "closed" });
+    options.onRoot?.(this.root);
     const style = document.createElement("style");
     style.textContent = STYLE;
     this.icon = document.createElement("button");
@@ -51,19 +92,30 @@ export class InlineMenu {
     this.icon.innerHTML = KEYHOLE;
     this.icon.hidden = true;
     this.icon.addEventListener("mousedown", (e) => e.preventDefault());
-    this.icon.addEventListener("click", () => this.open());
+    this.icon.addEventListener("click", (e) => {
+      if (this.allowed(e)) void this.open();
+    });
     this.root.append(style, this.icon);
     document.documentElement.append(this.host);
     window.addEventListener("scroll", () => this.place(), true);
     window.addEventListener("resize", () => this.place());
     document.addEventListener("mousedown", (e) => {
-      if (!e.composedPath().includes(this.host)) this.close();
+      if (e.composedPath().includes(this.host)) return;
+      this.close();
+      if (this.field !== document.activeElement) this.icon.hidden = true;
+    });
+    document.addEventListener("keydown", (e) => {
+      if (e.key === "Escape" && this.panel) this.close();
     });
   }
 
+  private allowed(e: MouseEvent): boolean {
+    return this.trusted(e) && this.visible(e, this.host);
+  }
+
   watch(field: HTMLInputElement): void {
-    if (field.dataset.lockbox) return;
-    field.dataset.lockbox = "1";
+    if (this.watched.has(field)) return;
+    this.watched.add(field);
     field.addEventListener("focus", () => {
       this.field = field;
       this.icon.hidden = false;
@@ -76,24 +128,43 @@ export class InlineMenu {
     this.close();
     const panel = document.createElement("div");
     panel.className = "panel";
-    panel.setAttribute("role", "listbox");
+    panel.setAttribute("role", "menu");
     panel.append(note("Loading…"));
     this.root.append(panel);
     this.panel = panel;
+    this.openedAt = Date.now();
     this.place();
-    const { state, items } = await this.actions.list();
+    let result: { state: State; items: Candidate[] };
+    try {
+      result = await this.actions.list();
+    } catch {
+      if (this.panel === panel) panel.replaceChildren(note("Lockbox was updated — reload the page."));
+      return;
+    }
     if (this.panel !== panel) return;
+    const { state, items } = result;
     panel.replaceChildren();
+    const unlock = (label: string) =>
+      button("unlock", label, (e) => {
+        if (this.allowed(e)) void this.actions.unlock().catch(() => {});
+      });
     if (state === "locked") {
-      panel.append(note("Lockbox is locked"), button("unlock", "Unlock Lockbox", () => this.actions.unlock()));
-    } else if (state === "unpaired") {
+      panel.append(note("Lockbox is locked"), unlock("Unlock Lockbox"));
+    } else if (state === "unpaired" || state === "pairing") {
       panel.append(note("Connect this browser: open the Lockbox extension in the toolbar."));
     } else if (state === "noApp") {
-      panel.append(note("Lockbox isn't running."), button("unlock", "Open Lockbox", () => this.actions.unlock()));
+      panel.append(note("Lockbox isn't running."), unlock("Open Lockbox"));
     } else if (items.length === 0) {
       panel.append(note("No logins for this site"));
     } else {
-      for (const item of items) panel.append(entry(item, () => this.choose(item.id)));
+      for (const item of items) {
+        panel.append(
+          entry(item, (e) => {
+            if (!this.allowed(e) || Date.now() - this.openedAt < this.settleMs) return;
+            void this.choose(item.id);
+          }),
+        );
+      }
     }
   }
 
@@ -105,7 +176,11 @@ export class InlineMenu {
   private async choose(itemId: string): Promise<void> {
     this.close();
     this.icon.hidden = true;
-    await this.actions.fill(itemId);
+    try {
+      await this.actions.fill(itemId);
+    } catch {
+      /* the page was reloaded or the extension updated */
+    }
   }
 
   private place(): void {
@@ -127,7 +202,7 @@ function note(text: string): HTMLElement {
   return el;
 }
 
-function button(className: string, text: string, onClick: () => void): HTMLButtonElement {
+function button(className: string, text: string, onClick: (e: MouseEvent) => void): HTMLButtonElement {
   const b = document.createElement("button");
   b.type = "button";
   b.className = className;
@@ -136,9 +211,9 @@ function button(className: string, text: string, onClick: () => void): HTMLButto
   return b;
 }
 
-function entry(item: Candidate, onClick: () => void): HTMLButtonElement {
+function entry(item: Candidate, onClick: (e: MouseEvent) => void): HTMLButtonElement {
   const b = button("item", "", onClick);
-  b.setAttribute("role", "option");
+  b.setAttribute("role", "menuitem");
   const mono = document.createElement("span");
   mono.className = "mono";
   mono.textContent = item.title.match(/[\p{L}\p{N}]/u)?.[0] ?? "•";

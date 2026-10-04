@@ -137,3 +137,21 @@ test("a denied pairing is reported and cleared", async () => {
   expect(await store.getPending()).toBeNull();
   expect(store.pairing).toBeNull();
 });
+
+test("a pairing in progress survives the popup closing", async () => {
+  const { code } = await client.startPairing("Chrome");
+  expect(await client.pairingCode()).toBe(code);
+  expect(await client.state()).toBe("pairing");
+  app.approved = true;
+  expect(await client.state()).toBe("ready");
+  expect(await client.pairingCode()).toBeNull();
+  expect(store.pairing).not.toHaveProperty("code");
+});
+
+test("a denied pending pairing ends as unpaired; nothing pending is reported as none", async () => {
+  expect(await client.pairingResult()).toBe("none");
+  await client.startPairing("Chrome");
+  app.send = async (m: any) => (m.kind === "pairStatus" ? { kind: "pairDenied" } : { kind: "status", locked: false });
+  expect(await client.state()).toBe("unpaired");
+  expect(await client.pairingCode()).toBeNull();
+});

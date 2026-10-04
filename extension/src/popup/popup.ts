@@ -3,7 +3,7 @@ import type { Candidate, Result, State, ToBackground, ToContent } from "../messa
 export interface PopupDeps {
   ask<T>(msg: ToBackground): Promise<Result<T>>;
   activeTab(): Promise<{ id?: number; url?: string }>;
-  fillInTab(tabId: number, itemId: string): Promise<void>;
+  fillInTab(tabId: number, itemId: string): Promise<{ filled?: number; error?: string } | void>;
   close(): void;
   sleep(ms: number): Promise<void>;
 }
@@ -30,12 +30,17 @@ export async function renderPopup(root: HTMLElement, deps: PopupDeps): Promise<v
     shell(root, el("p", { textContent: "Lockbox isn't running." }), el("button", { className: "primary", textContent: "Open Lockbox", onclick: () => deps.ask({ type: "show" }) }));
   } else if (value === "locked") {
     shell(root, el("p", { textContent: "Lockbox is locked." }), el("button", { className: "primary", textContent: "Unlock", onclick: () => deps.ask({ type: "show" }) }));
+  } else if (value === "pairing") {
+    // The popup was closed while the user was approving in the app: show the code again and keep waiting.
+    const c = await deps.ask<string | null>({ type: "pairingCode" });
+    await waitForApproval(root, deps, c.ok ? c.value : null);
   } else if (value === "unpaired") {
-    shell(
-      root,
-      el("p", { textContent: "Connect this browser to Lockbox. You'll confirm a code in the app." }),
-      el("button", { className: "primary", textContent: "Connect", onclick: () => pair(root, deps) }),
-    );
+    const connect = el("button", { className: "primary", textContent: "Connect" });
+    connect.onclick = () => {
+      connect.disabled = true;
+      void pair(root, deps);
+    };
+    shell(root, el("p", { textContent: "Connect this browser to Lockbox. You'll confirm a code in the app." }), connect);
   } else {
     await showLogins(root, deps);
   }
@@ -47,12 +52,18 @@ async function pair(root: HTMLElement, deps: PopupDeps): Promise<void> {
     shell(root, el("p", { textContent: r.error === "locked" ? "Unlock Lockbox first, then try again." : r.message }));
     return;
   }
-  const code = `${r.value.code.slice(0, 3)} ${r.value.code.slice(3)}`;
-  shell(root, el("p", { textContent: "Confirm this code in the Lockbox app:" }), el("div", { className: "code", textContent: code }));
+  await waitForApproval(root, deps, r.value.code);
+}
+
+async function waitForApproval(root: HTMLElement, deps: PopupDeps, rawCode: string | null): Promise<void> {
+  if (rawCode) {
+    const code = `${rawCode.slice(0, 3)} ${rawCode.slice(3)}`;
+    shell(root, el("p", { textContent: "Confirm this code in the Lockbox app:" }), el("div", { className: "code", textContent: code }));
+  }
   for (let i = 0; i < 120; i++) {
-    const s = await deps.ask<"waiting" | "paired" | "denied">({ type: "pairStatus" });
+    const s = await deps.ask<"none" | "waiting" | "paired" | "denied">({ type: "pairStatus" });
     if (s.ok && s.value === "paired") return showLogins(root, deps);
-    if (!s.ok || s.value === "denied") {
+    if (!s.ok || s.value === "denied" || s.value === "none") {
       shell(root, el("p", { textContent: "Connection was declined." }));
       return;
     }
@@ -64,6 +75,10 @@ async function pair(root: HTMLElement, deps: PopupDeps): Promise<void> {
 async function showLogins(root: HTMLElement, deps: PopupDeps): Promise<void> {
   const tab = await deps.activeTab();
   const host = safeHost(tab.url);
+  if (!/^https?:/.test(tab.url ?? "")) {
+    shell(root, el("p", { textContent: "Open a website to fill a login." }));
+    return;
+  }
   const r = await deps.ask<Candidate[]>({ type: "list", url: tab.url });
   const items = r.ok ? r.value : [];
   if (items.length === 0) {
@@ -73,8 +88,18 @@ async function showLogins(root: HTMLElement, deps: PopupDeps): Promise<void> {
   const list = el("ul");
   for (const item of items) {
     const button = el("button", { className: "item", onclick: async () => {
-      if (tab.id !== undefined) await deps.fillInTab(tab.id, item.id);
-      deps.close();
+      let outcome: { filled?: number; error?: string } | void = undefined;
+      if (tab.id !== undefined) {
+        try {
+          outcome = await deps.fillInTab(tab.id, item.id);
+        } catch {
+          shell(root, el("p", { textContent: "Reload this page to fill." }));
+          return;
+        }
+      }
+      if (outcome && outcome.error) shell(root, el("p", { textContent: outcome.error }));
+      else if (outcome && outcome.filled === 0) shell(root, el("p", { textContent: "No login fields found on this page." }));
+      else deps.close();
     } });
     const text = el("span", { className: "text" }, el("span", { textContent: item.title }), el("span", { className: "sub", textContent: item.username }));
     button.append(el("span", { className: "mono", textContent: item.title.match(/[\p{L}\p{N}]/u)?.[0] ?? "•" }), text);
@@ -97,7 +122,7 @@ if (typeof chrome !== "undefined" && chrome.runtime?.id && document.getElementBy
     ask: (msg) => chrome.runtime.sendMessage(msg),
     activeTab: async () => (await chrome.tabs.query({ active: true, currentWindow: true }))[0] ?? {},
     fillInTab: async (tabId, itemId) => {
-      await chrome.tabs.sendMessage(tabId, { type: "fill-item", itemId } satisfies ToContent, { frameId: 0 });
+      return await chrome.tabs.sendMessage(tabId, { type: "fill-item", itemId } satisfies ToContent, { frameId: 0 });
     },
     close: () => window.close(),
     sleep: (ms) => new Promise((r) => setTimeout(r, ms)),

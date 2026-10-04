@@ -9,14 +9,18 @@ async function list(): Promise<{ state: State; items: Candidate[] }> {
   return { state: r.error === "other" ? "ready" : r.error, items: [] };
 }
 
-async function fillItem(itemId: string): Promise<void> {
+/** Fills the page's fields; returns how many were filled. */
+async function fillItem(itemId: string): Promise<number> {
   const r = await ask<Credentials>({ type: "fill", itemId });
-  if (r.ok) fillLogin(findLoginFields(document), r.value);
+  if (!r.ok) throw new Error(r.message);
+  return fillLogin(findLoginFields(document), r.value);
 }
 
 const menu = new InlineMenu({
   list,
-  fill: fillItem,
+  fill: async (itemId) => {
+    await fillItem(itemId);
+  },
   unlock: async () => {
     await ask({ type: "show" });
   },
@@ -27,20 +31,33 @@ function scan(): void {
   for (const field of [f.username, f.password, f.totp]) if (field) menu.watch(field);
 }
 
+function addsInput(m: MutationRecord): boolean {
+  for (const n of m.addedNodes) {
+    if (n instanceof HTMLInputElement) return true;
+    if (n instanceof Element && n.querySelector("input")) return true;
+  }
+  return false;
+}
+
+// At most one scan per 300 ms: a pending timer is never pushed back, so busy pages still get scanned.
 let timer: number | undefined;
-new MutationObserver(() => {
-  clearTimeout(timer);
-  timer = window.setTimeout(scan, 300);
+new MutationObserver((mutations) => {
+  if (timer !== undefined || !mutations.some(addsInput)) return;
+  timer = window.setTimeout(() => {
+    timer = undefined;
+    scan();
+  }, 300);
 }).observe(document.documentElement, { childList: true, subtree: true });
 scan();
 
 chrome.runtime.onMessage.addListener((msg: ToContent, _sender, respond) => {
   (async () => {
-    if (msg.type === "fill-item") await fillItem(msg.itemId);
+    if (msg.type === "fill-item") return { filled: await fillItem(msg.itemId) };
     if (msg.type === "fill-best") {
       const { items } = await list();
-      if (items[0]) await fillItem(items[0].id);
+      return { filled: items[0] ? await fillItem(items[0].id) : 0 };
     }
-  })().then(() => respond({}), () => respond({}));
+    return { filled: 0 };
+  })().then(respond, (e) => respond({ error: e instanceof Error ? e.message : String(e) }));
   return true;
 });

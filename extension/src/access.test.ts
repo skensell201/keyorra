@@ -8,7 +8,7 @@ const page = { id: ID, url: "https://github.com/login" };
 const run = (msg: any, sender: any) => authorize(msg, sender, ID, BASE);
 
 test("pairing only from the extension's own pages", () => {
-  for (const type of ["pair", "pairStatus"]) {
+  for (const type of ["pair", "pairStatus", "pairingCode"]) {
     expect(run({ type }, ext).ok).toBe(true);
     expect(run({ type }, page).ok).toBe(false);
     expect(run({ type }, {}).ok).toBe(false);

@@ -19,6 +19,7 @@ export function authorize(msg: ToBackground, sender: Sender, extensionId: string
       return extPage || page ? { ok: true, url: "" } : refuse();
     case "pair":
     case "pairStatus":
+    case "pairingCode":
       return extPage ? { ok: true, url: "" } : refuse();
     case "list":
       if (page) return { ok: true, url: sender.url! };

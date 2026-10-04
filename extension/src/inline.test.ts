@@ -3,6 +3,7 @@ import { InlineMenu, type MenuActions } from "./inline";
 
 let actions: MenuActions;
 let menu: InlineMenu;
+let root: ShadowRoot;
 let field: HTMLInputElement;
 
 beforeEach(() => {
@@ -15,10 +16,10 @@ beforeEach(() => {
     fill: vi.fn().mockResolvedValue(undefined),
     unlock: vi.fn().mockResolvedValue(undefined),
   };
-  menu = new InlineMenu(actions);
+  menu = new InlineMenu(actions, { onRoot: (r) => (root = r), trusted: () => true, settleMs: 0 });
 });
 
-const shadow = () => document.querySelector("lockbox-inline")!.shadowRoot!;
+const shadow = () => root;
 
 test("focusing a field shows the icon; clicking it lists logins; picking one fills", async () => {
   menu.watch(field);
@@ -52,4 +53,46 @@ test("no logins for the site", async () => {
   field.dispatchEvent(new FocusEvent("focus"));
   shadow().querySelector<HTMLButtonElement>("button.icon")!.click();
   await vi.waitFor(() => expect(shadow().textContent).toContain("No logins for this site"));
+});
+
+test("the shadow root is closed to the page", () => {
+  expect(document.querySelector("lockbox-inline")!.shadowRoot).toBeNull();
+});
+
+test("untrusted (script-made) clicks do nothing", async () => {
+  const strict = new InlineMenu(actions, { onRoot: (r) => (root = r) });
+  strict.watch(field);
+  field.dispatchEvent(new FocusEvent("focus"));
+  shadow().querySelector<HTMLButtonElement>("button.icon")!.click();
+  await Promise.resolve();
+  expect(actions.list).not.toHaveBeenCalled();
+});
+
+test("a click on a hidden host does nothing", async () => {
+  menu.watch(field);
+  field.dispatchEvent(new FocusEvent("focus"));
+  document.querySelector<HTMLElement>("lockbox-inline")!.style.setProperty("opacity", "0", "important");
+  shadow().querySelector<HTMLButtonElement>("button.icon")!.click();
+  await Promise.resolve();
+  expect(actions.list).not.toHaveBeenCalled();
+});
+
+test("item clicks right after the panel opens are ignored", async () => {
+  const quick = new InlineMenu(actions, { onRoot: (r) => (root = r), trusted: () => true, settleMs: 60_000 });
+  quick.watch(field);
+  field.dispatchEvent(new FocusEvent("focus"));
+  shadow().querySelector<HTMLButtonElement>("button.icon")!.click();
+  await vi.waitFor(() => expect(shadow().querySelector(".item")).not.toBeNull());
+  (shadow().querySelector(".item") as HTMLButtonElement).click();
+  expect(actions.fill).not.toHaveBeenCalled();
+});
+
+test("a failing list shows a reload hint; Escape closes the panel", async () => {
+  vi.mocked(actions.list).mockRejectedValue(new Error("Extension context invalidated"));
+  menu.watch(field);
+  field.dispatchEvent(new FocusEvent("focus"));
+  shadow().querySelector<HTMLButtonElement>("button.icon")!.click();
+  await vi.waitFor(() => expect(shadow().textContent).toContain("reload the page"));
+  document.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+  expect(shadow().querySelector(".panel")).toBeNull();
 });

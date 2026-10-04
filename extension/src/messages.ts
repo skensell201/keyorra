@@ -5,6 +5,7 @@ export type ToBackground =
   | { type: "state" }
   | { type: "pair" }
   | { type: "pairStatus" }
+  | { type: "pairingCode" }
   | { type: "show" }
   | { type: "list"; url?: string }
   | { type: "fill"; itemId: string };

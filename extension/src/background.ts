@@ -41,6 +41,8 @@ async function handle(msg: ToBackground, sender: chrome.runtime.MessageSender): 
       return client.startPairing(browserName());
     case "pairStatus":
       return client.pairingResult();
+    case "pairingCode":
+      return client.pairingCode();
     case "show":
       return client.show();
     case "list":
