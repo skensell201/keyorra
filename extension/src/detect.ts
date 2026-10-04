@@ -8,13 +8,25 @@ export interface LoginFields {
 
 const USER_HINT = /user|login|email|e-mail|account|phone|ident|логин|почт/i;
 const TOTP_HINT = /otp|totp|2fa|mfa|one.?time|verification|auth.?code|security.?code|код/i;
+const NOT_USERNAME = /search|query|^q$/i;
 const TEXTISH = new Set(["text", "email", "tel", "number", ""]);
 
 function usable(el: HTMLInputElement): boolean {
   if (el.disabled || el.readOnly || el.type === "hidden") return false;
-  for (let n: HTMLElement | null = el; n; n = n.parentElement) {
-    const s = getComputedStyle(n);
-    if (n.hidden || s.display === "none" || s.visibility === "hidden") return false;
+  if (el.closest('[aria-hidden="true"]')) return false;
+  if (typeof el.checkVisibility === "function") {
+    if (!el.checkVisibility({ opacityProperty: true, visibilityProperty: true, contentVisibilityAuto: true })) return false;
+  } else {
+    // Fallback (jsdom): walk the style chain.
+    for (let n: HTMLElement | null = el; n; n = n.parentElement) {
+      const s = getComputedStyle(n);
+      if (n.hidden || s.display === "none" || s.visibility === "hidden" || s.opacity === "0") return false;
+    }
+  }
+  // Zero-size fields are hidden too, but only where there is layout at all.
+  if (document.documentElement.getBoundingClientRect().width > 0) {
+    const r = el.getBoundingClientRect();
+    if (r.width === 0 || r.height === 0) return false;
   }
   return true;
 }
@@ -38,8 +50,13 @@ export function findLoginFields(root: Document | HTMLElement): LoginFields {
     inputs.find((i) => i.type === "password" && i.autocomplete !== "new-password") ??
     null;
   const totp = inputs.find((i) => i !== password && isTotp(i)) ?? null;
-  const candidates = inputs.filter((i) => i !== totp && TEXTISH.has(i.type) && i.type !== "number");
-  const scope = password ? candidates.filter((i) => i.compareDocumentPosition(password) & Node.DOCUMENT_POSITION_FOLLOWING) : candidates;
+  const candidates = inputs.filter(
+    (i) => i !== totp && TEXTISH.has(i.type) && i.type !== "number" && !NOT_USERNAME.test(i.name) && !NOT_USERNAME.test(i.id),
+  );
+  const before = (i: HTMLInputElement) => !!(i.compareDocumentPosition(password!) & Node.DOCUMENT_POSITION_FOLLOWING);
+  // Prefer fields in the password's own form; fall back to the whole document.
+  const own = password?.form ? candidates.filter((i) => i.form === password.form && before(i)) : [];
+  const scope = password ? (own.length ? own : candidates.filter(before)) : candidates;
   const username =
     scope.find((i) => i.autocomplete === "username" || i.autocomplete === "email") ??
     (password ? scope[scope.length - 1] : scope.find((i) => i.type === "email" || USER_HINT.test(hints(i)))) ??

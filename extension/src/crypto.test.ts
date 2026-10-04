@@ -52,3 +52,9 @@ test("base64 round trip", () => {
   const bytes = new Uint8Array([0, 1, 254, 255]);
   expect(fromB64(toB64(bytes))).toEqual(bytes);
 });
+
+test("a low-order peer key does not yield a key", () => {
+  const client = newKeyPair(new Uint8Array(32).fill(1));
+  const zero = new Uint8Array(32);
+  expect(() => derive(client, zero, client.public, zero)).toThrow();
+});

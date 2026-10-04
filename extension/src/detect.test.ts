@@ -42,3 +42,20 @@ test("ignores hidden, disabled and sign-up password fields", () => {
   page(`<input type="password" name="h" style="display:none"><input type="password" name="d" disabled><input type="password" autocomplete="new-password" name="n">`);
   expect(findLoginFields(document).password).toBeNull();
 });
+
+test("ignores fields that are invisible by opacity or aria-hidden", () => {
+  page(`<input type="password" name="o" style="opacity:0"><div aria-hidden="true"><input type="password" name="a"></div>`);
+  expect(findLoginFields(document).password).toBeNull();
+});
+
+test("a search box outside the password's form is not the username", () => {
+  page(`<input type="text" name="q"><form><input type="password" name="pw"></form>`);
+  const f = findLoginFields(document);
+  expect(f.password?.name).toBe("pw");
+  expect(f.username).toBeNull();
+});
+
+test("the username comes from the password's own form first", () => {
+  page(`<input type="email" name="other"><form><input type="text" name="user"><input type="password" name="pw"></form>`);
+  expect(findLoginFields(document).username?.name).toBe("user");
+});
