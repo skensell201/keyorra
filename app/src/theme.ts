@@ -36,12 +36,20 @@ let stopFollowing: (() => void) | null = null;
 export function applyTheme(theme: Theme): void {
   stopFollowing?.();
   stopFollowing = null;
-  paint(resolve(theme));
-  if (theme === "system" && typeof window.matchMedia === "function") {
-    const query = window.matchMedia(DARK_QUERY);
-    const onChange = () => paint(resolve("system"));
-    query.addEventListener?.("change", onChange);
-    stopFollowing = () => query.removeEventListener?.("change", onChange);
+  if (theme === "system") {
+    // Let the window follow macOS again, so prefers-color-scheme reports the real appearance.
+    setWindowTheme(null);
+    paint(resolve("system"));
+    if (typeof window.matchMedia === "function") {
+      const query = window.matchMedia(DARK_QUERY);
+      const onChange = () => paint(resolve("system"));
+      query.addEventListener?.("change", onChange);
+      stopFollowing = () => query.removeEventListener?.("change", onChange);
+    }
+  } else {
+    paint(theme);
+    // The window's vibrancy material follows the window appearance, so keep it in step.
+    setWindowTheme(theme === "light" ? "light" : "dark");
   }
   try {
     localStorage.setItem(KEY, theme);
@@ -52,10 +60,11 @@ export function applyTheme(theme: Theme): void {
 
 function paint(resolved: Resolved): void {
   document.documentElement.dataset.theme = resolved;
-  // The window's vibrancy material follows the window appearance, so keep it in step.
-  if ("__TAURI_INTERNALS__" in window) {
-    import("@tauri-apps/api/window")
-      .then(({ getCurrentWindow }) => getCurrentWindow().setTheme(resolved === "light" ? "light" : "dark"))
-      .catch(() => {});
-  }
+}
+
+function setWindowTheme(theme: "light" | "dark" | null): void {
+  if (!("__TAURI_INTERNALS__" in window)) return;
+  import("@tauri-apps/api/window")
+    .then(({ getCurrentWindow }) => getCurrentWindow().setTheme(theme))
+    .catch(() => {});
 }
