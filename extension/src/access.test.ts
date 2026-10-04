@@ -39,3 +39,29 @@ test("another extension and unknown types are refused", () => {
   expect(run({ type: "nope" }, ext).ok).toBe(false);
   expect(run(undefined, ext).ok).toBe(false);
 });
+
+const PAGE_URL = "https://github.com/login";
+const pageOnly: any[] = [
+  { type: "lookup", username: "u", password: "p" },
+  { type: "save", username: "u", password: "p", itemId: null },
+  { type: "generate" },
+  { type: "cards" },
+  { type: "fillCard", itemId: "i" },
+  { type: "identities" },
+  { type: "fillIdentity", itemId: "i" },
+];
+
+test("save, generate, cards and identities are for http(s) pages and use the browser's URL", () => {
+  for (const msg of pageOnly) {
+    expect(run({ ...msg, url: "https://evil.com" }, page)).toEqual({ ok: true, url: PAGE_URL });
+    expect(run(msg, { id: ID, url: "file:///x" }).ok).toBe(false);
+    expect(run(msg, {}).ok).toBe(false);
+  }
+});
+
+test("save, generate, cards and identities are refused from extension pages and other extensions", () => {
+  for (const msg of pageOnly) {
+    expect(run({ ...msg, url: "https://github.com" }, ext).ok).toBe(false);
+    expect(run(msg, { id: "other", url: "chrome-extension://other/x.html" }).ok).toBe(false);
+  }
+});

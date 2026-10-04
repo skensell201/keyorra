@@ -32,6 +32,39 @@ export interface Credentials {
   totp: string | null;
 }
 
+export interface CardSummary {
+  id: string;
+  title: string;
+  last4: string;
+}
+
+export interface CardFill {
+  name: string;
+  number: string;
+  expMonth: string;
+  expYear: string;
+  cvc: string;
+}
+
+export interface IdentitySummary {
+  id: string;
+  title: string;
+  detail: string;
+}
+
+export interface IdentityFill {
+  givenName: string;
+  familyName: string;
+  email: string;
+  phone: string;
+  street: string;
+  city: string;
+  postalCode: string;
+  country: string;
+}
+
+export type LookupStatus = "new" | "changed" | "same";
+
 export type Send = (msg: object) => Promise<any>;
 
 export class LockedError extends Error {}
@@ -110,6 +143,36 @@ export class Client {
   async fill(url: string, itemId: string): Promise<Credentials> {
     const r = await this.request({ op: "fill", url, itemId });
     return { username: r.username, password: r.password, totp: r.totp ?? null };
+  }
+
+  async lookup(url: string, username: string, password: string): Promise<{ status: LookupStatus; itemId: string | null }> {
+    const r = await this.request({ op: "lookup", url, username, password });
+    return { status: r.status, itemId: r.itemId ?? null };
+  }
+
+  /** Returns the id of the saved item; the app never sends secrets back. */
+  async save(url: string, username: string, password: string, itemId: string | null): Promise<string> {
+    return (await this.request({ op: "save", url, username, password, itemId })).saved;
+  }
+
+  async generate(): Promise<string> {
+    return (await this.request({ op: "generate" })).generated;
+  }
+
+  async cards(url: string): Promise<CardSummary[]> {
+    return (await this.request({ op: "cards", url })).cards;
+  }
+
+  async fillCard(url: string, itemId: string): Promise<CardFill> {
+    return (await this.request({ op: "fillCard", url, itemId })).card;
+  }
+
+  async identities(url: string): Promise<IdentitySummary[]> {
+    return (await this.request({ op: "identities", url })).identities;
+  }
+
+  async fillIdentity(url: string, itemId: string): Promise<IdentityFill> {
+    return (await this.request({ op: "fillIdentity", url, itemId })).identity;
   }
 
   async show(): Promise<void> {

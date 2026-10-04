@@ -25,6 +25,13 @@ export function authorize(msg: ToBackground, sender: Sender, extensionId: string
       if (page) return { ok: true, url: sender.url! };
       return extPage && msg.url ? { ok: true, url: msg.url } : refuse();
     case "fill":
+    case "lookup":
+    case "save":
+    case "generate":
+    case "cards":
+    case "fillCard":
+    case "identities":
+    case "fillIdentity":
       return page ? { ok: true, url: sender.url! } : refuse();
     default:
       return { ok: false, message: "Unknown request" };

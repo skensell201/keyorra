@@ -13,6 +13,7 @@ class FakeApp {
   code = "";
   /** Answer calls with a reply bound to some other request. */
   replayReply = false;
+  requests: any[] = [];
   items = [{ id: "i1", title: "GitHub", username: "ivan", hasTotp: false }];
 
   async send(msg: any): Promise<any> {
@@ -43,7 +44,21 @@ class FakeApp {
         const key = this.keys.get(msg.clientId);
         if (!key) return { kind: "unknownClient" };
         const req = open<any>(key, msg.clientId, "req", msg.box)!;
-        const reply = req.op === "ping" ? { pong: true } : req.op === "list" ? { items: this.items } : { username: "ivan", password: "pw", totp: null };
+        this.requests.push(req);
+        const replies: Record<string, object> = {
+          ping: { pong: true },
+          list: { items: this.items },
+          lookup: { status: "changed", itemId: "i1" },
+          save: { saved: "i2" },
+          generate: { generated: "Gen-pw-1" },
+          cards: { cards: [{ id: "c9", title: "Visa", last4: "1111" }] },
+          fillCard: { card: { name: "IVAN", number: "4111111111111111", expMonth: "12", expYear: "2027", cvc: "123" } },
+          identities: { identities: [{ id: "n1", title: "Home", detail: "Hanoi" }] },
+          fillIdentity: {
+            identity: { givenName: "Ivan", familyName: "K", email: "i@x.io", phone: "1", street: "S", city: "Hanoi", postalCode: "10", country: "VN" },
+          },
+        };
+        const reply = replies[req.op] ?? { username: "ivan", password: "pw", totp: null };
         const requestNonce = this.replayReply ? new Uint8Array(24).fill(9) : nonceOf(msg.box)!;
         return { kind: "reply", box: seal(key, msg.clientId, { requestNonce }, reply) };
       }
@@ -165,4 +180,29 @@ test("a locked app keeps the pending pairing; a request resolves a pending pairi
   app.send = real;
   app.approved = true;
   expect(await client.list("https://github.com")).toEqual(app.items);
+});
+
+test("save, generate, cards and identities send the right op and return the inner value", async () => {
+  await client.startPairing("Chrome");
+  app.approved = true;
+  await client.pairingResult();
+  const url = "https://github.com/login";
+
+  expect(await client.lookup(url, "ivan", "pw")).toEqual({ status: "changed", itemId: "i1" });
+  expect(await client.save(url, "ivan", "pw", null)).toBe("i2");
+  expect(await client.generate()).toBe("Gen-pw-1");
+  expect(await client.cards(url)).toEqual([{ id: "c9", title: "Visa", last4: "1111" }]);
+  expect((await client.fillCard(url, "c9")).number).toBe("4111111111111111");
+  expect(await client.identities(url)).toEqual([{ id: "n1", title: "Home", detail: "Hanoi" }]);
+  expect((await client.fillIdentity(url, "n1")).givenName).toBe("Ivan");
+
+  expect(app.requests).toEqual([
+    { op: "lookup", url, username: "ivan", password: "pw" },
+    { op: "save", url, username: "ivan", password: "pw", itemId: null },
+    { op: "generate" },
+    { op: "cards", url },
+    { op: "fillCard", url, itemId: "c9" },
+    { op: "identities", url },
+    { op: "fillIdentity", url, itemId: "n1" },
+  ]);
 });

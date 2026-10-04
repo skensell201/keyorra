@@ -49,6 +49,20 @@ async function handle(msg: ToBackground, sender: chrome.runtime.MessageSender): 
       return client.list(decision.url);
     case "fill":
       return client.fill(decision.url, msg.itemId);
+    case "lookup":
+      return client.lookup(decision.url, msg.username, msg.password);
+    case "save":
+      return client.save(decision.url, msg.username, msg.password, msg.itemId);
+    case "generate":
+      return client.generate();
+    case "cards":
+      return client.cards(decision.url);
+    case "fillCard":
+      return client.fillCard(decision.url, msg.itemId);
+    case "identities":
+      return client.identities(decision.url);
+    case "fillIdentity":
+      return client.fillIdentity(decision.url, msg.itemId);
   }
 }
 
