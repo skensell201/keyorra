@@ -14,7 +14,8 @@ use crate::bridge::crypto::{
     self, b64, commitment, derive, nonce_of, public_from_b64, Direction, KeyPair,
 };
 use crate::bridge::protocol::{
-    Candidate, Inbound, LookupStatus, Outbound, Reply, Request, VERSION,
+    Candidate, CardFill, CardSummary, IdentityFill, IdentitySummary, Inbound, LookupStatus,
+    Outbound, Reply, Request, VERSION,
 };
 use crate::bridge::site::{matches, Match, Site};
 use crate::error::{CmdError, CmdResult, ErrorKind};
@@ -402,10 +403,15 @@ impl Session {
                     error: e.to_string(),
                 },
             },
-            // Served in the next task.
-            _ => Reply::Error {
-                error: "Unknown request".into(),
+            // Lists are not activity; a fill is (via `item`).
+            Request::Cards { url } => Reply::Cards {
+                cards: self.cards(&url),
             },
+            Request::FillCard { url, item_id } => self.card(&url, item_id, now),
+            Request::Identities { url } => Reply::Identities {
+                identities: self.identities(&url),
+            },
+            Request::FillIdentity { url, item_id } => self.identity(&url, item_id, now),
         }
     }
 
@@ -601,6 +607,123 @@ impl Session {
         Ok(self.save_item(item, now)?.id)
     }
 
+    fn secure_page(url: &str) -> bool {
+        Site::of(url).is_some_and(|s| s.secure || s.local)
+    }
+
+    fn items_of(&self, kind: ItemKind) -> Vec<Item> {
+        let Some(store) = self.store.as_ref() else {
+            return Vec::new();
+        };
+        let mut items: Vec<Item> = store
+            .list_items(None)
+            .unwrap_or_default()
+            .into_iter()
+            .filter_map(|e| match e {
+                ItemEntry::Ok(item) if item.kind == kind => Some(item),
+                _ => None,
+            })
+            .collect();
+        items.sort_by_key(|i| i.title.to_lowercase());
+        items
+    }
+
+    /// Title and last four digits only.
+    fn cards(&self, url: &str) -> Vec<CardSummary> {
+        if !Self::secure_page(url) {
+            return Vec::new();
+        }
+        self.items_of(ItemKind::CreditCard)
+            .into_iter()
+            .map(|item| {
+                let digits: Vec<char> = field_text(&item, CARD_NUMBER)
+                    .chars()
+                    .filter(char::is_ascii_digit)
+                    .collect();
+                let last4 = digits[digits.len().saturating_sub(4)..].iter().collect();
+                CardSummary {
+                    id: item.id,
+                    title: item.title,
+                    last4,
+                }
+            })
+            .collect()
+    }
+
+    fn card(&mut self, url: &str, id: Uuid, now: u64) -> Reply {
+        if !Self::secure_page(url) {
+            return Reply::Error {
+                error: "Cards are only filled on secure pages".into(),
+            };
+        }
+        let item = match self.item(id, now) {
+            Ok(item) if item.kind == ItemKind::CreditCard => item,
+            Ok(_) => {
+                return Reply::Error {
+                    error: "Not a card".into(),
+                }
+            }
+            Err(e) => return Reply::Error { error: e.message },
+        };
+        let (exp_month, exp_year) = split_expiry(&field_text(&item, CARD_EXPIRY));
+        Reply::Card {
+            card: CardFill {
+                name: field_text(&item, CARD_NAME),
+                number: field_text(&item, CARD_NUMBER)
+                    .chars()
+                    .filter(char::is_ascii_digit)
+                    .collect(),
+                exp_month,
+                exp_year,
+                cvc: field_text(&item, CARD_CVC),
+            },
+        }
+    }
+
+    fn identities(&self, url: &str) -> Vec<IdentitySummary> {
+        if !Self::secure_page(url) {
+            return Vec::new();
+        }
+        self.items_of(ItemKind::Identity)
+            .into_iter()
+            .map(|item| {
+                let f = identity_fill(&item);
+                let join = |parts: &[&str], sep: &str| {
+                    parts
+                        .iter()
+                        .filter(|s| !s.is_empty())
+                        .copied()
+                        .collect::<Vec<_>>()
+                        .join(sep)
+                };
+                let name = join(&[&f.given_name, &f.family_name], " ");
+                let detail = join(&[&name, &f.city], " · ");
+                IdentitySummary {
+                    id: item.id,
+                    title: item.title,
+                    detail,
+                }
+            })
+            .collect()
+    }
+
+    fn identity(&mut self, url: &str, id: Uuid, now: u64) -> Reply {
+        if !Self::secure_page(url) {
+            return Reply::Error {
+                error: "Addresses are only filled on secure pages".into(),
+            };
+        }
+        match self.item(id, now) {
+            Ok(item) if item.kind == ItemKind::Identity => Reply::Identity {
+                identity: identity_fill(&item),
+            },
+            Ok(_) => Reply::Error {
+                error: "Not an identity".into(),
+            },
+            Err(e) => Reply::Error { error: e.message },
+        }
+    }
+
     /// An unapproved request that timed out counts as a failure.
     /// An unapproved request that timed out counts as a failure. A clock that went backwards
     /// (`now < created_at`) also counts as expired.
@@ -646,6 +769,59 @@ impl Session {
     fn save_pairings(&mut self, all: &[Pairing]) -> CmdResult<()> {
         let json = Zeroizing::new(serde_json::to_vec(all).expect("pairings serialize"));
         Ok(self.store_mut()?.set_sealed_meta(PAIRINGS_META, &json)?)
+    }
+}
+
+/// First non-empty value among fields whose id or lowercase label is in `names`.
+fn field_text(item: &Item, names: &[&str]) -> String {
+    item.fields
+        .iter()
+        .chain(item.sections.iter().flat_map(|s| s.fields.iter()))
+        .filter(|f| {
+            names.contains(&f.id.as_str()) || names.contains(&f.label.to_lowercase().as_str())
+        })
+        .find_map(|f| match &f.value {
+            FieldValue::MonthYear(ym) => Some(format!("{:02}/{}", ym % 100, ym / 100)),
+            v => v
+                .as_str()
+                .map(str::to_owned)
+                .filter(|s| !s.trim().is_empty()),
+        })
+        .unwrap_or_default()
+}
+
+const CARD_NAME: &[&str] = &["cardholder", "cardholder name", "name on card"];
+const CARD_NUMBER: &[&str] = &["number", "ccnum", "card number"];
+const CARD_EXPIRY: &[&str] = &["expiry", "expiry date", "expiration date", "expires"];
+const CARD_CVC: &[&str] = &["cvv", "cvc", "verification number", "security code"];
+
+/// "12/27", "12/2027", "2027-12", "122027" -> ("12", "2027").
+fn split_expiry(raw: &str) -> (String, String) {
+    let digits: Vec<&str> = raw
+        .split(|c: char| !c.is_ascii_digit())
+        .filter(|s| !s.is_empty())
+        .collect();
+    let (m, y) = match digits.as_slice() {
+        [a, b] if a.len() == 4 => (b.to_string(), a.to_string()),
+        [a, b] => (a.to_string(), b.to_string()),
+        [one] if one.len() == 6 => (one[..2].to_string(), one[2..].to_string()),
+        [one] if one.len() == 4 => (one[..2].to_string(), one[2..].to_string()),
+        _ => (String::new(), String::new()),
+    };
+    let year = if y.len() == 2 { format!("20{y}") } else { y };
+    (format!("{m:0>2}"), year)
+}
+
+fn identity_fill(item: &Item) -> IdentityFill {
+    IdentityFill {
+        given_name: field_text(item, &["first-name", "firstname", "first name"]),
+        family_name: field_text(item, &["last-name", "lastname", "last name"]),
+        email: field_text(item, &["email", "e-mail"]),
+        phone: field_text(item, &["phone", "cell", "mobile", "telephone"]),
+        street: field_text(item, &["street", "address", "address line 1"]),
+        city: field_text(item, &["city", "town"]),
+        postal_code: field_text(item, &["zip", "postal code", "postcode"]),
+        country: field_text(item, &["country"]),
     }
 }
 

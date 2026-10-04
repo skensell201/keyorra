@@ -5,6 +5,7 @@ use crate::bridge::crypto::{
     self, b64, commitment, derive, nonce_of, public_from_b64, Direction, KeyPair,
 };
 use crate::bridge::protocol::{Inbound, Outbound};
+use lockbox_core::model::{Field, FieldValue, Item, ItemKind, Section};
 use serde_json::{json, Value};
 
 /// Plays the extension's side.
@@ -937,4 +938,166 @@ fn generate_returns_a_strong_password() {
         .to_owned();
     assert_eq!(a.chars().count(), 20);
     assert_ne!(a, b);
+}
+
+fn card(s: &mut Session, title: &str, number: &str, expiry: &str) -> Item {
+    let p = personal(s);
+    let mut item = s.new_item(p, ItemKind::CreditCard, 1_000).unwrap();
+    item.title = title.into();
+    for f in &mut item.fields {
+        match f.id.as_str() {
+            "cardholder" => f.value = FieldValue::Text("IVAN K".into()),
+            "number" => f.value = FieldValue::Concealed(number.into()),
+            "expiry" => f.value = FieldValue::Text(expiry.into()),
+            "cvv" => f.value = FieldValue::Concealed("123".into()),
+            _ => {}
+        }
+    }
+    s.save_item(item, 1_000).unwrap()
+}
+
+#[test]
+fn cards_are_listed_masked_and_filled_on_secure_pages_only() {
+    let (_dir, mut s) = unlocked_session();
+    let visa = card(&mut s, "Visa", "4111 1111 1111 1111", "12/27");
+    let ext = paired(&mut s);
+    let list = call(
+        &mut s,
+        &ext,
+        json!({"op": "cards", "url": "https://shop.example"}),
+        1_000,
+    );
+    assert_eq!(
+        list,
+        json!({"cards": [{"id": visa.id, "title": "Visa", "last4": "1111"}]})
+    );
+    let filled = call(
+        &mut s,
+        &ext,
+        json!({"op": "fillCard", "url": "https://shop.example", "itemId": visa.id}),
+        1_000,
+    );
+    assert_eq!(
+        filled,
+        json!({"card": {"name": "IVAN K", "number": "4111111111111111", "expMonth": "12", "expYear": "2027", "cvc": "123"}})
+    );
+    let insecure = call(
+        &mut s,
+        &ext,
+        json!({"op": "cards", "url": "http://shop.example"}),
+        1_000,
+    );
+    assert_eq!(insecure, json!({"cards": []}));
+    let refused = call(
+        &mut s,
+        &ext,
+        json!({"op": "fillCard", "url": "http://shop.example", "itemId": visa.id}),
+        1_000,
+    );
+    assert_eq!(refused["error"], "Cards are only filled on secure pages");
+}
+
+#[test]
+fn imported_cards_with_month_year_and_labels_work() {
+    // 1Password imports put card fields in a section with labels and a MonthYear expiry.
+    let (_dir, mut s) = unlocked_session();
+    let p = personal(&mut s);
+    let mut item = Item::new(p, ItemKind::CreditCard, "Imported", 1_000);
+    item.sections.push(Section {
+        id: "s".into(),
+        title: String::new(),
+        fields: vec![
+            Field {
+                id: "ccnum".into(),
+                label: "number".into(),
+                value: FieldValue::Concealed("5500000000000004".into()),
+                purpose: None,
+            },
+            Field {
+                id: "expiry".into(),
+                label: "expiry date".into(),
+                value: FieldValue::MonthYear(202803),
+                purpose: None,
+            },
+            Field {
+                id: "cvv".into(),
+                label: "verification number".into(),
+                value: FieldValue::Concealed("999".into()),
+                purpose: None,
+            },
+            Field {
+                id: "cardholder".into(),
+                label: "cardholder name".into(),
+                value: FieldValue::Text("A B".into()),
+                purpose: None,
+            },
+        ],
+    });
+    let item = s.save_item(item, 1_000).unwrap();
+    let ext = paired(&mut s);
+    let filled = call(
+        &mut s,
+        &ext,
+        json!({"op": "fillCard", "url": "https://x.example", "itemId": item.id}),
+        1_000,
+    );
+    assert_eq!(
+        filled["card"],
+        json!({"name": "A B", "number": "5500000000000004", "expMonth": "03", "expYear": "2028", "cvc": "999"})
+    );
+}
+
+#[test]
+fn identities_are_listed_and_filled() {
+    let (_dir, mut s) = unlocked_session();
+    let p = personal(&mut s);
+    let mut id = s.new_item(p, ItemKind::Identity, 1_000).unwrap();
+    id.title = "Home".into();
+    for f in &mut id.fields {
+        match f.id.as_str() {
+            "first-name" => f.value = FieldValue::Text("Ivan".into()),
+            "last-name" => f.value = FieldValue::Text("K".into()),
+            "email" => f.value = FieldValue::Email("ivan@example.com".into()),
+            "phone" => f.value = FieldValue::Phone("+84 1".into()),
+            _ => {}
+        }
+    }
+    let text = |id: &str, value: &str| Field {
+        id: id.into(),
+        label: id.into(),
+        value: FieldValue::Text(value.into()),
+        purpose: None,
+    };
+    id.sections.push(Section {
+        id: "addr".into(),
+        title: "Address".into(),
+        fields: vec![
+            text("street", "Main st 1"),
+            text("city", "Hanoi"),
+            text("zip", "100000"),
+            text("country", "VN"),
+        ],
+    });
+    let id = s.save_item(id, 1_000).unwrap();
+    let ext = paired(&mut s);
+    let list = call(
+        &mut s,
+        &ext,
+        json!({"op": "identities", "url": "https://shop.example"}),
+        1_000,
+    );
+    assert_eq!(
+        list,
+        json!({"identities": [{"id": id.id, "title": "Home", "detail": "Ivan K · Hanoi"}]})
+    );
+    let filled = call(
+        &mut s,
+        &ext,
+        json!({"op": "fillIdentity", "url": "https://shop.example", "itemId": id.id}),
+        1_000,
+    );
+    assert_eq!(
+        filled["identity"],
+        json!({"givenName": "Ivan", "familyName": "K", "email": "ivan@example.com", "phone": "+84 1", "street": "Main st 1", "city": "Hanoi", "postalCode": "100000", "country": "VN"})
+    );
 }
