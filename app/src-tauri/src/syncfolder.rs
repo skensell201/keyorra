@@ -423,6 +423,18 @@ mod tests {
         assert!(err.to_string().contains("panicked"));
     }
 
+    /// Review A2 I5: no command runs on the main thread (a sync round may hold the session).
+    #[test]
+    fn every_command_runs_off_the_main_thread() {
+        let source = include_str!("commands.rs");
+        assert_eq!(
+            source.matches("#[tauri::command]").count(),
+            0,
+            "commands are #[tauri::command(async)]"
+        );
+        assert!(include_str!("tray.rs").contains("std::thread::spawn"));
+    }
+
     #[test]
     fn a_round_is_due_on_a_change_or_every_minute() {
         let flag = Arc::new(AtomicBool::new(false));

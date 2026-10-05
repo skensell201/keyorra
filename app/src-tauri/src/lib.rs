@@ -43,14 +43,11 @@ pub fn run() {
             session.set_keyring(Box::new(touchid::MacKeyring));
             // Sync over iCloud Drive (plan A2; A3 lets the user pick another synced folder).
             let changed = Arc::new(AtomicBool::new(false));
-            let mut watcher = None;
-            if let Some(place) = syncfolder::icloud_place() {
+            let place = syncfolder::icloud_place();
+            if let Some(place) = place.clone() {
                 let temp = app.path().app_data_dir()?.join("sync-tmp");
-                // Nothing is created in iCloud Drive before sync is turned on; once the
-                // folder exists, changes are noticed from the next launch (and polled).
-                if place.is_dir() {
-                    watcher = syncfolder::Watcher::start(&place, changed.clone());
-                }
+                // Nothing is created in iCloud Drive before sync is turned on; the watcher
+                // starts once the folder exists (housekeeping, review A2 M3).
                 session.set_sync_link(Box::new(syncfolder::FolderLink::new(
                     place,
                     temp,
@@ -69,7 +66,7 @@ pub fn run() {
                 eprintln!("keyorra: quick search unavailable: {e}");
             }
             let handle = app.handle().clone();
-            std::thread::spawn(move || housekeeping(handle, changed, watcher));
+            std::thread::spawn(move || housekeeping(handle, changed, place));
             if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
                 let socket = keyorra_session::bridge::wire::socket_path(&home);
                 let bridge_app = app.handle().clone();
@@ -141,12 +138,20 @@ pub fn run() {
 
 /// Every two seconds: lock when idle (and tell the window), clear the clipboard once our copy
 /// has expired — but only if it still holds our copy.
-fn housekeeping(app: AppHandle, changed: Arc<AtomicBool>, _watcher: Option<syncfolder::Watcher>) {
+fn housekeeping(app: AppHandle, changed: Arc<AtomicBool>, place: Option<std::path::PathBuf>) {
     // `Instant` does not advance while the Mac sleeps (CLOCK_UPTIME_RAW), unlike wall time.
     let start = Instant::now();
-    let mut schedule = syncfolder::Schedule::new(changed);
+    let mut schedule = syncfolder::Schedule::new(changed.clone());
+    let mut watcher: Option<syncfolder::Watcher> = None;
     loop {
         std::thread::sleep(Duration::from_secs(2));
+        // Changes are watched as soon as the sync place exists (sync turned on here or on
+        // another Mac), not only from the next launch.
+        if watcher.is_none() {
+            if let Some(p) = place.as_ref().filter(|p| p.is_dir()) {
+                watcher = syncfolder::Watcher::start(p, changed.clone());
+            }
+        }
         let state = app.state::<AppState>();
         // Read the flag before taking the lock. Sleep is detected from wall time vs the
         // monotonic `start` clock, so a command holding the lock for a long time (both clocks

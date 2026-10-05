@@ -4,6 +4,7 @@
 
 import CoreServices
 import Foundation
+import SystemConfiguration
 
 // Status codes; keep in sync with src/syncfolder.rs.
 private let SF_READY: Int32 = 0
@@ -70,6 +71,8 @@ private final class Watch {
     let notify: @convention(c) (UnsafeMutableRawPointer?) -> Void
     let ctx: UnsafeMutableRawPointer?
     var stream: FSEventStreamRef?
+    /// Callbacks run here, one at a time; stopping drains it (review A2 M3).
+    let queue = DispatchQueue(label: "app.keyorra.sync-watch")
     init(notify: @escaping @convention(c) (UnsafeMutableRawPointer?) -> Void, ctx: UnsafeMutableRawPointer?) {
         self.notify = notify
         self.ctx = ctx
@@ -95,13 +98,13 @@ public func ks_watch_start(
     let paths = [String(cString: path)] as CFArray
     guard let stream = FSEventStreamCreate(
         nil, callback, &context, paths, FSEventStreamEventId(kFSEventStreamEventIdSinceNow), 2.0,
-        FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents))
+        FSEventStreamCreateFlags(kFSEventStreamCreateFlagFileEvents | kFSEventStreamCreateFlagWatchRoot))
     else {
         Unmanaged<Watch>.fromOpaque(info).release()
         return nil
     }
     watch.stream = stream
-    FSEventStreamSetDispatchQueue(stream, DispatchQueue.global(qos: .utility))
+    FSEventStreamSetDispatchQueue(stream, watch.queue)
     FSEventStreamStart(stream)
     return info
 }
@@ -113,14 +116,23 @@ public func ks_watch_stop(_ handle: UnsafeMutableRawPointer?) {
     if let stream = watch.stream {
         FSEventStreamStop(stream)
         FSEventStreamInvalidate(stream)
+        // No callback runs after this returns: the context can go.
+        watch.queue.sync {}
         FSEventStreamRelease(stream)
     }
 }
 
-/// This Mac's name as the user set it (System Settings → General → Sharing).
+/// This Mac's name as the user set it (System Settings → General → Sharing), without a
+/// network lookup (review A2 M4). Writes at most `cap` bytes; returns how many.
 @_cdecl("ks_computer_name")
 public func ks_computer_name(_ out: UnsafeMutablePointer<UInt8>, _ cap: Int) -> Int {
-    let name = Array((Host.current().localizedName ?? "Mac").utf8.prefix(cap))
-    name.withUnsafeBufferPointer { out.update(from: $0.baseAddress!, count: name.count) }
-    return name.count
+    guard cap > 0 else { return 0 }
+    let name = (SCDynamicStoreCopyComputerName(nil, nil) as String?) ?? "Mac"
+    let bytes = Array(name.utf8.prefix(cap))
+    bytes.withUnsafeBufferPointer { buf in
+        if let base = buf.baseAddress, !buf.isEmpty {
+            out.update(from: base, count: buf.count)
+        }
+    }
+    return bytes.count
 }

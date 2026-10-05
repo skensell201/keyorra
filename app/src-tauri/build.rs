@@ -41,6 +41,7 @@ fn build_touch_id() {
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-lib=static=keyorra_touchid");
     println!("cargo:rustc-link-lib=framework=CoreServices");
+    println!("cargo:rustc-link-lib=framework=SystemConfiguration");
     let swiftc = xcrun(&["--find", "swiftc"]);
     let toolchain = Path::new(&swiftc).parent().unwrap().parent().unwrap();
     println!(

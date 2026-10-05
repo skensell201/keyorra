@@ -754,6 +754,34 @@ device learns a stream's head from the header of its newest segment file only; i
 is not on this Mac, the rollback check of that stream waits for a later round
 (`HeadUnknown`).
 
+### 5.4a Hardening and known leftovers (review of A2)
+
+- The transport never follows a symlink below the account folder: listings skip symlinks,
+  writes and deletes refuse a symlinked directory on the way, a symlinked file is never read
+  (`O_NOFOLLOW`), and files are read only up to the largest valid size of their kind
+  (segment, snapshot, header, chunk, `root.head` 4 KiB). Directories with more than 200 000
+  entries are an error.
+- A round's time budget starts and ends with the round (`begin_round`/`end_round` around
+  `Synced::round`); work between rounds has none.
+- Joining takes only a folder named after the account its header gives for the Secret Key
+  id; exactly one such folder may open with the password; header files still downloading
+  are a retryable error; looking at folders creates nothing in them.
+- A name for content (chunk, snapshot) that is taken by other bytes is reported, not taken
+  as stored. Temp files older than an hour are removed when a folder opens. Where the file
+  system cannot rename without replacing (SMB, NFS), a hard link and an unlink do it.
+- Chunks can be left without a record: a round that fails after storing chunks seals them
+  again next time (new key, new names); a removed attachment's chunks stay; a device that
+  was cut can still read chunks it knew of. They are collected with the rest in C1.
+- On a case-insensitive volume a planted file whose name differs only in case occupies our
+  name: the exclusive rename fails and the occupant is compared like any other (a conflict,
+  handled as a squatter).
+- A planted `.<name>.icloud` placeholder for a file that never comes makes readers wait for
+  it (`Pending`): a denial of service only; A3 reports a stream or attachment that waits
+  for more than 24 hours.
+- A round runs on the app's housekeeping thread holding the session (commands run off the
+  main thread and wait); its file I/O is bounded by the round budget and the size limits.
+  Moving rounds off the session lock is left for later if it is felt.
+
 ### 5.5 What someone with folder access learns
 
 Can see: the number of devices (stream directories), the number, timing (mtimes) and
