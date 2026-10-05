@@ -47,7 +47,7 @@ Two non-negotiables, set by the user:
 | Local state | A deterministic **fold** over accepted entries; independent of delivery order |
 | Conflicts | Keep all: the visible sibling stays, every other differing sibling becomes a copy "X (conflict from <device>)" whose id derives from that sibling's own version |
 | Edit vs delete | Edit wins (decided) |
-| Device trust | A device counts only if endorsed by a live device (first device = root). Server approval *is* that endorsement. Self-join with the Emergency Kit works but raises an alarm on every other device |
+| Device trust | Root-only authority (decided after the second trust review): the main device (root, where sync was turned on) alone approves and removes devices. Server approval *is* that endorsement. Self-join with the Emergency Kit works but counts for nobody until the main device approves it; others see an alarm. A stolen main device: start a new account from another device |
 | Secret Key | Required for sync (decided). Mixed into the key that wraps the account key in the folder/server; the local vault keeps unlocking with the master password alone |
 | Server auth | Token derived from master password + Secret Key + account id under its own HKDF label; server stores only its hash. No SRP/OPAQUE (§6.3) |
 | Rollback / fork | Hash chains + Ed25519 signatures + cross-checkpoints; clone detection on every append |
@@ -414,55 +414,56 @@ remote head:
 | device key missing from the Keychain | database restored or copied to another Mac | **retire** |
 
 Retiring: local unsynced edits are kept in the outbox; the device generates a new id and
-key and rejoins (§7.3: approval by a live device, or self-join with alarm); its first
-entries are `Revoke {old id, last_valid_seq = last remote head}` (if the old id is still
-live) and then the queued edits as new versions. Nothing written under the old id after
-the cut is accepted.
+key and rejoins (§7.3: approval by the main device, or self-join pending its approval); its
+first entries are the queued edits as new versions. Only the main device removes the old id
+(the app asks it to); until then the old id simply stays silent. (A retiring main device:
+plan A1c-2.)
 
-### 4.3 Endorsement and liveness
+### 4.3 Approval: the main device decides (root-only authority)
+
+Decided by the user after the second trust review: **the main device ("Главный Mac", the
+root, where sync was turned on) is the only device that approves or removes devices.** No
+other device's approvals or removals count; there is nothing to resolve between devices.
 
 - The **root** is the first device: its stream starts with `Genesis`, and every account
-  header names `root_device`.
-- **Endorse**: an approving device writes `Endorse {device_id, device_pk, statement_sig}`
-  with `statement_sig = Ed25519(approver_sk, "keyorra/sync/v1/endorse\0" ‖ account_id ‖
-  device_id ‖ device_pk)`. The same signature is what the server checks when a device is
-  approved (§6.4): server approval and log endorsement are one act.
-- **SelfJoin**: a device that joins with the Emergency Kit and no approver writes
-  `SelfJoin` as the first entry of its own stream, signed by itself. It proves knowledge
-  of AK (the segment is sealed with `K_seg`) and nothing more. Never valid in the root's
-  stream.
-- **Powers** (trust redesign after the A1c-1 review): only the root and devices endorsed by
-  a device with powers have **powers**: they may endorse and revoke others. A self-joined
-  device may read and write records but has no powers: its endorsements and its revocations
-  of others are ignored. Every other device **pauses with a red alarm** ("New device
-  'MacBook Air' joined with the Emergency Kit and was not approved by any of your devices")
-  until the user approves it (an `Endorse`, which gives it powers) or removes it; either
-  resolves the alarm on every device once the entry arrives. Powers are not retroactive:
-  an endorsement or revocation counts only if its author, by its own earlier checkpoints,
-  had already received an endorsement of itself (the root needs none).
-- **Key conflicts**: one id endorsed with two different keys, both by counting
-  endorsements, is **quarantined**: not introduced, alarm, no stream rejected. An
-  endorsement beats a `SelfJoin` of the same id with another key, in any arrival order (a
-  reader never verifies a stream with a self-certified key while any trust entry is still
-  waiting to be applied).
-- **Root pinning**: a device that joins by pairing learns the root's key from the pairing
-  (A1c-2 binds it in the account header); a `Genesis` with another key is ignored.
-- **Which revocations count**: a `Revoke` of another device counts if its author is
-  introduced, had powers when writing it (above), and wrote it at a position that counts
-  (not after its own cut). A self-revocation counts if written before any cut set by
-  others. Since cuts depend on which revocations count, the result is a deterministic
-  fixpoint over all trust entries: revocations that count even under every candidate cut
-  certainly count; the remaining ones (devices removing each other at the same time) are
-  decided by distance from the root along endorsements, closest first, so a device closer
-  to the root wins; equally close devices removing each other are both removed (fail-safe).
-  The result depends only on the set of trust entries, never on arrival order.
-- **Cuts** come only from revocations that count: a device's cut is the lowest one set by
-  others; a self-revocation cuts at the entry before it and only if nobody else cut the
-  device (it never lowers someone else's cut). A cut is never below the target's position
-  that the revoker had listed in its own checkpoints before the `Revoke`: a revocation cannot
-  erase history the revoker had seen.
-- A device that is not introduced yet reads but does not write; a removed device does not
-  write any more.
+  header names `root_device`. Its **key is pinned**: a joining device learns it from the
+  account header (A1c-2) or the setup code, never from the store's streams; a `Genesis`
+  with another key is ignored, and the root's stream is verified only with the pinned key.
+- **Trust is the root's stream read in order.** `Endorse` and `Revoke` count only there;
+  in any other stream they are ignored (Sync log entry). No fixpoint, no ordering between
+  devices, no mutual removal.
+- **Endorse** (root only): `Endorse {device_id, device_pk, statement_sig}` with
+  `statement_sig = Ed25519(root_sk, "keyorra/sync/v1/endorse\0" ‖ account_id ‖ device_id ‖
+  device_pk)`; the same signature is what the server checks when a device is approved
+  (§6.4). The approved device's stream is verified only with that key. The first decision
+  about an id is final: a second `Endorse` of it (another key), or one after its removal, is
+  ignored, so keys never change under a reader.
+- **SelfJoin**: a device that joins with the Emergency Kit writes `SelfJoin` as the first
+  entry of its own stream, signed by itself (never valid in the root's stream). It proves
+  knowledge of AK and nothing more, so **nothing it writes counts for anybody until the root
+  approves it**: it can read, and its own writes stay pending (visible only on itself). Other
+  devices learn of it from that first entry (checked against the key it carries, used for
+  nothing else) and show one aggregated alarm, "N devices joined with the Emergency Kit and
+  were not approved by the main device", which pauses nothing. The root approves it (an
+  `Endorse` with the key from its `SelfJoin`; its pending records then count from its first
+  entry) or removes it (nothing of it ever counts).
+- **Revoke** (root only): removing an approved device cuts its stream at `last_valid_seq`,
+  the root's received head of it, with `last_valid_hash` its chain hash: a reader whose chain
+  has another hash there raises a fork alarm. The cut is never below the device's position
+  in the root's own latest checkpoint before the `Revoke`, counted only where that position
+  matches the reader's chain. Removing a device that was never approved means none of its
+  entries count. A cut is set once and never moves.
+- **The root cannot be removed.** Its own `Revoke` of itself is ignored (shutting the account
+  down or handing the role to another device is out of scope). **A stolen or lost root** is
+  answered by starting over: from any device, with the Emergency Kit and the master
+  password, "Start a new account from this device and carry the data over" creates a new
+  account (new AK, new root = this device) from that device's current state, and the old
+  folder or server account is abandoned. UX hook in A1d/A3; the full flow is key rotation
+  (C1, after phase B). Until then the remedy is stated plainly in the UI and the threat
+  model.
+- A device not approved yet reads but does not write (or writes pending, after a
+  `SelfJoin`); a removed device does not write any more. A non-root device leaves by being
+  removed from the root (or simply stopping); it cannot remove itself.
 
 Stated plainly, in the protocol doc and in the UI: every device holds AK. Endorsements and
 signatures let devices attribute changes and reject *writes* from revoked or unendorsed
@@ -475,25 +476,27 @@ An entry `e` at position `(D, seq)` is **accepted** iff:
 
 1. its segment verifies: shape, AEAD under `K_seg`, chain linkage from the previous
    accepted head (or a snapshot frontier, §4.8), Ed25519 signature with D's key;
-2. D is introduced (§4.3) and not quarantined;
+2. D is the root or approved by the root (§4.3);
 3. `seq` is not after D's cut;
 4. **causal delivery, per record**: a received segment advances its stream at once; each of
    its entries is then applied as soon as what it needs is there: a `Put` waits for a vault
    key that opens it and for the earlier versions of other devices that its vector counts
-   (§3.3); entries of one stream keep their order per record (trust entries in one lane).
+   (§3.3); entries of one stream keep their order per record; the root's trust entries are
+   applied at once, in its stream's order.
    Independent records keep flowing. Checkpoints serve detection (§4.5), not delivery;
 5. the validations of §3.3 pass for every `Put`.
 
-**Only admitted positions affect anything** (trust redesign): checkpoints are evaluated
-only at positions that count; vault keys come only from admitted vault versions (a body that
-none of them opens waits, it never rejects the stream); a conflict copy written past a cut is
-never taken as content (§4.6). Trust questions never reject a stream: an invalid trust entry
-is ignored and reported.
+**Only admitted positions affect anything**: checkpoints are evaluated only at positions
+that count; a conflict copy written past a cut is never taken as content (§4.6). A vault's
+key is fixed by its earliest admitted version (no rotation before C1): new records are
+sealed with it and new vault versions carry it, whatever later versions say; a body opens
+with any key of a retained version of its vault (safe: the stream's signature vouches for
+the record, not the key) and otherwise waits, never rejecting the stream. Trust questions
+never reject a stream: an invalid trust entry is ignored and reported.
 
 When trust changes, the records are **re-folded** from the retained versions (§3.4).
-Records written past a stream's cut are not read at all (their ids are noted, §4.6); trust
-entries and checkpoints past it are still read, and the records are read again if the cut
-moves. A checkpoint claim of a position that has not arrived for 24 h produces a warning
+Records written past a stream's cut are not applied (their ids are noted, §4.6); since a cut
+never moves, they are never needed. A checkpoint claim of a position that has not arrived for 24 h produces a warning
 naming the device whose changes are missing.
 
 ### 4.5 Rollback, fork and withholding detection
@@ -505,28 +508,30 @@ oldest one drives the withholding warning). Rollback is noticed by comparing the
 head of a stream (`Transport::head`, from file names or server metadata) with the received
 head before reading, and the store's head of the own stream with the last confirmed own
 position before writing; a head that cannot be read is reported, never silently taken as
-fine. A `Revoke` names the chain hash at its cut, checked like a checkpoint claim.
+fine. A `Revoke` names the chain hash at its cut, checked like a checkpoint claim. A chain
+hash seen again for a known position is compared (another hash: a fork).
 
-Alarms (rollback, fork, self-joined device, key conflict) form a queue; each is decided
-separately. While any is open, records are not applied and nothing is materialised; trust
-entries are still applied (so approving or removing a device on one Mac resolves the alarm
-everywhere) and the user's own changes are still pushed, unless the alarm concerns this
-device's own stream. Two histories of a removed device past its cut raise nothing: neither
-counts.
+**Alarms are scoped.** A rollback or a fork pauses only the stream concerned (records of it
+wait; for the own stream, nothing is pushed) until the user accepts it; every other stream
+keeps flowing and a sync round does not fail. Repeated rollbacks of one stream are one
+alarm. A fork claimed by another device's checkpoint is a **dispute** naming that device
+(either side may be lying: only the main device's word pauses a stream), pausing nothing.
+Self-joined devices make one aggregated alarm (§4.3), pausing nothing. Two histories of a
+removed device past its cut raise nothing: neither counts.
 
 | Attack by folder/server | Detected by | Reaction |
 |---|---|---|
 | Tamper with a segment, snapshot, header or chunk | AEAD, signature, chunk hash | Ignore, red Sync log entry |
 | Inject versions or devices | Needs AK **and** a live device key | Impossible without them |
 | Replay an old version as current | Version vectors + `body_aad` | Dominated, no effect |
-| Roll a stream back | Head regression vs `sync_heads` | Sync paused, alarm |
-| Fork (different segment n to different readers) | Same seq, other hash, seen directly or via a checkpoint | Sync paused, alarm |
+| Roll a stream back | Head regression vs `sync_heads` | That stream paused, alarm |
+| Fork (different segment n to different readers) | Same seq, other hash, seen directly or via the root's checkpoint | That stream paused, alarm (via another device's checkpoint: a dispute, no pause) |
 | Withhold a stream | Checkpoints claim heads we cannot fetch; causal buffer stalls | Warning after 24 h, names the device |
 | Roll back the account header | Epoch regression | Ignored, warning |
 | Restore an old copy of a device's database | Own-stream check before append (§4.2) | Device retires and rejoins |
 
-Alarm UI: sync pauses with a plain explanation and two actions: **Restore from this Mac**
-and **Stop syncing**. Nothing is silently "fixed".
+Alarm UI: the affected device's changes pause with a plain explanation and two actions:
+**Restore from this Mac** and **Stop syncing**. Nothing is silently "fixed".
 
 **Restore** (after a rollback): the device publishes a fresh snapshot (§4.8) of its full
 fold with its frontier (including its own stream at the local head), then continues its
@@ -541,11 +546,10 @@ first honest crossing exposes it. Withholding cannot be prevented, only reported
 
 ### 4.6 Revocation
 
-`Revoke {device_id, last_valid_seq, last_valid_hash}` by a device with powers (or by the
-device itself); `last_valid_seq` is the newest head of that device the revoker has seen, and
-`last_valid_hash` its chain hash (a mismatch with what a reader received is a fork). Entries
-after the cut are not accepted; affected records are re-folded. Which revocations count and
-where cuts fall: §4.3.
+`Revoke {device_id, last_valid_seq, last_valid_hash}` by the root only (§4.3);
+`last_valid_seq` is the newest head of that device the root has seen, and `last_valid_hash`
+its chain hash (a mismatch with what a reader received is a fork). Entries after the cut
+are not accepted; affected records are re-folded.
 
 Limit, found while planning A1c-1: devices that received the removed device's later
 versions *before* they heard of the revocation may have written on top of them (a
@@ -555,9 +559,7 @@ had written, of a version that still counts, is written again by a device that m
 Only the copy's record id is taken from what the removed device wrote: it must be the copy
 id derived from an admitted version, and the content is made again from that version
 (protocol §10.4), so a removed device can at worst make old content reappear as a copy,
-never bring in its own. The server additionally disables the device's token. If two
-equally close devices revoke each other concurrently, both revocations apply (rare;
-deliberately not automated beyond that).
+never bring in its own. The server additionally disables the device's token.
 
 ### 4.7 Account headers
 
@@ -866,9 +868,9 @@ The Ed25519 device key is in the Keychain (§4.2). The Secret Key is sealed unde
    **setup code** (`KY1-<account_id>-<secret key>[-<pin>]`) shown by a device that is
    already set up, or type account id and Secret Key from the Emergency Kit.
 2. Master password → `KEK_sync` → AK from the highest-epoch header (§4.7).
-3. Approval: with another live device available, the commitment exchange of §6.4 runs
-   through the transport (server) or through `join/` request files in the folder (same
-   messages, same code). Without one: SelfJoin with alarm.
+3. Approval: with the main device available, the commitment exchange of §6.4 runs through
+   the transport (server) or through `join/` request files in the folder (same messages,
+   same code). Without it: SelfJoin, pending until the main device approves it.
 4. Local data:
    - no local vault → build it from the fold; a local header is created from the same
      master password with a fresh salt;
@@ -885,8 +887,8 @@ The Ed25519 device key is in the Keychain (§4.2). The Secret Key is sealed unde
 
 ### 7.4 Leaving
 
-- **Turn off sync on this Mac**: writes a self-`Revoke`, keeps the local vault as a normal
-  local vault, drops the sync tables except the record ids (so a later rejoin merges by
+- **Turn off sync on this Mac**: stops syncing (the main device removes the id; a device
+  cannot remove itself), keeps the local vault as a normal local vault, drops the sync tables except the record ids (so a later rejoin merges by
   id).
 - **Delete synced data**: offered only on the last live device, after typing the account
   id. Folder: removes the Keyorra folder contents. Server: deletes the account.
@@ -948,7 +950,8 @@ items inside are purged first, as today. Concurrent additions undo it.
 
 ### 8.3 Device removal
 
-Sync screen → device → **Remove**: writes `Revoke`, disables the server token. The dialog
+Sync screen (on the main device) → device → **Remove**: writes `Revoke`, disables the
+server token. The dialog
 says what it does and does not do (§4.3) and, once C1 exists, offers **Remove and rotate
 keys**.
 
@@ -1021,8 +1024,10 @@ reveals (§5.5). Export to CSV/zip is left out of v1.
 | Stolen locked Mac | Get the local database | Unlock without the master password (Argon2 as today); use its device key (Keychain, this device only) | |
 | Restored/cloned Mac database | Hold an old copy | Write under the old device id | §4.2 |
 | Stolen unlocked Mac / malware | Everything that device can see | — | Remove device, rotate keys (C1) |
-| Holder of AK + Secret Key + password (e.g. Emergency Kit thief) | Read everything they can reach; self-join | Join silently: every device raises an alarm | §4.3 |
+| Holder of AK + Secret Key + password (e.g. Emergency Kit thief) | Read everything they can reach; self-join | Join silently (every device shows an alarm); have anything count before the main device approves it; approve or remove anyone | §4.3 |
+| Stolen approved (non-main) device, until removed | Read; write records that count until the main device removes it; claim false forks (shown as disputes naming it) | Approve or remove any device; erase its earlier history; pause other devices' streams | §4.3, §4.5 |
 | Revoked device | Read data it can still reach until rotation | Have new writes accepted; use the server | §4.6 |
+| Stolen main device (root), unlocked | Everything a device can do, plus approve and remove devices | — | Start a new account from another device with the Emergency Kit and carry the data over (§4.3); key rotation (C1) |
 | Lost all devices **and** the Emergency Kit | — | — | Unrecoverable; stated at setup |
 | Older app version | Read records of its format | Damage newer records (read-only on them, unknown fields kept) | §3.6 |
 | Clock skew | Make its edits win concurrent conflicts | Lose an edit (loser kept as copy); push others' clocks forward | §3.3 |

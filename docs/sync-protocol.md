@@ -284,95 +284,79 @@ statement = "keyorra/sync/v1/endorse\0" ‖ account_id ‖ device ‖ key
 ```
 
 An entry is a map with exactly one key; an unknown key is "unsupported" (a newer app wrote
-it: the stream waits, nothing is rejected). `endorse.sig` is the endorsing device's Ed25519
-signature over the statement for the endorsed device; `self_join.sig` the joining device's
-own signature over the statement for itself. `checkpoint` lists, for other streams, the
+it: the stream waits, nothing is rejected). `endorse.sig` is the root's Ed25519 signature
+over the statement for the approved device; `self_join.sig` the joining device's own
+signature over the statement for itself. `checkpoint` lists, for other streams, the
 position (sequence number and chain hash of the last entry received) that the writer had
 received when it wrote the entries that follow. `revoke.last_valid_hash` is the chain hash
-of the revoked stream at `last_valid_seq`, as the revoker received it (for a
-self-revocation: its own entry before the `revoke`). A writer adds a checkpoint before the first
+of the revoked stream at `last_valid_seq`, as the root received it. A writer adds a checkpoint before the first
 entry it writes after what it has received changed, and a device that only reads writes one
 at least every hour while its received positions change. `put.version.author` must be the
 stream's device.
 
-### 10.2 Trust
+### 10.2 Trust: root-only authority
 
-The account header names the **root** device; a device that joined by pairing may also know
-(pin) the root's key. Trust is derived from all recorded `genesis`, `self_join`, `endorse`
-and `revoke` entries as a set, so it does not depend on arrival order. Each recorded entry
-keeps what its author had received before it: the highest position per device in the
-author's earlier checkpoints (`seen`).
+The account header (or the setup code) names the **root** device and its key; a device never
+learns the root's key from the store's streams. Only the root approves and removes devices:
+trust is the root's stream applied in order.
 
-1. **Validity of single entries** (an invalid one is ignored, the stream is not rejected):
-   `genesis` only as entry 1 of the root's stream, with this account's id, the key that signs
-   the stream and, if pinned, the pinned key. `self_join` only as entry 1 of a stream that is
-   not the root's, with the key that signs the stream and a valid signature. An `endorse`
-   must verify with the key of the stream that carries it.
-2. **Introductions**, given the cuts: the root by `genesis` (powers); a device endorsed, at a
-   position that counts, by a device that had powers then (powers); a device that only has
-   its own `self_join` (no powers), unless it is endorsed. An author "had powers" for an
-   entry if it is the root, or it has powers and its `seen` reaches a counting endorsement of
-   itself. An id endorsed with two keys by such endorsements is **quarantined** (not
-   introduced). Endorsements are repeated until nothing changes.
-3. **Revocations**: `r` by device `A` of device `T` at position `(A, at)` cuts `T` at
-   `at - 1` if `T = A`, else at `max(last_valid_seq, seen[T])`. It is **valid** under a set
-   of counting revocations if `A` is introduced, had powers (unless `T = A`), and `at` is not
-   after `A`'s cut, where for a self-revocation `A`'s cut ignores its own self-revocations.
-4. **Cuts** from a set of counting revocations: per device, the lowest cut among those by
-   others; if there is none, the lowest self-revocation cut.
-5. **Which revocations count**: let `V(S)` be the revocations valid under the cuts of `S`
-   (with the introductions under those cuts). Starting from `U` = all, repeat `L = V(U)`,
-   `U = V(L)` until `U` is stable; then `L ⊆ U`. Revocations in `L` count. The rest of `U`
-   is decided by the author's distance from the root along endorsements: groups of equal
-   distance, closest first, each adding those of its revocations valid under the counting
-   set so far.
-6. A stream position `(device, seq)` **counts** (is admitted) iff the device is introduced
-   and `seq` is not after its cut. The fold (§9.4) builds sibling sets from admitted
-   versions only and is rebuilt whenever trust changes.
+1. In the root's stream, verified with the root's key: `genesis` must be entry 1, with this
+   account's id and the root's key. `endorse` must verify with the root's key; it approves
+   `device` with `key` (the stream of `device` is then verified with that key), unless the
+   root already approved or removed that id (then it is ignored). `revoke` of an approved
+   device sets its cut, once: `max(last_valid_seq, seen)`, where `seen` is the device's
+   position in the root's latest earlier checkpoint if that position's hash matches the
+   reader's chain (else 0); `revoke` of an id never approved means nothing of that id ever
+   counts; `revoke` of the root itself is ignored. A `self_join` in the root's stream is
+   ignored.
+2. In any other stream, `endorse`, `revoke` and `genesis` are ignored (reported).
+   `self_join` as entry 1 of a stream marks its device as **awaiting approval** if its
+   signature and the segment verify with the key it carries; that key is used for nothing
+   else (the root may approve the device with it).
+3. A stream position `(device, seq)` **counts** (is admitted) iff the device is the root, or
+   approved and `seq` is not after its cut. On a device that self-joined, its own entries
+   count for itself until the root decides. The fold (§9.4) builds sibling sets from
+   admitted versions only and is rebuilt whenever trust changes.
 
-A device that is not introduced yet can read but does not write. A device whose own cut is
-set does not write any more. Other devices pause with an alarm for every self-joined device
-without a cut and every quarantined id; the alarm resolves itself when that changes.
+A device that is not approved can read but does not write (after `self_join`: writes
+pending). A device whose cut is set or that was removed does not write any more.
 
 ### 10.3 Reading streams
 
 A device keeps, per other stream, the last received position (initially `(0, chain_0)`)
 and the chain hash of every received entry. It receives the segment whose `first_seq` is the
-next one, verified with the stream device's key from §10.2 (for the root, the pinned key if
-there is one); for entry 1 of a stream whose device is not introduced, with the key in its
-`genesis` (root only) or `self_join` (never the root), but only while no trust entry of any
-stream waits to be applied (one could endorse the id with another key). A segment that does
-not open is retried later. A received segment whose `prev_hash` is not the known hash is a
-**fork**. A `put` whose author is not the stream's device rejects the stream; trust entries
-never do.
+next one, verified with the stream's key from §10.2 (the root's, or one the root gave);
+streams without such a key are not read (except entry 1, for a `self_join`), and streams of
+removed devices not at all. A segment that does not open is retried later. A received
+segment whose `prev_hash` is not the known hash, or an entry whose chain hash differs from
+one already known for its position, is a **fork**. A `put` whose author is not the stream's
+device rejects the stream; trust entries never do.
 
-Past a stream's cut, `put` entries are not applied (only their record ids are noted, §10.4);
-trust entries and checkpoints are still received. If a cut moves later, the stream is read
-again from the first skipped segment, taking only its `put` entries.
+Past a stream's cut, `put` entries are not applied (only their record ids are noted,
+§10.4); a cut never moves.
 
-Received entries are then applied with per-record buffering: an entry waits only for what it
-needs, and entries of one stream keep their order within their lane (per record for `put`,
-one lane for trust entries):
+Received records are applied with per-record buffering: an entry waits only for what it
+needs, and entries of one stream keep their order per record:
 
-- an item or attachment `put` waits for a key of its vault that opens its body, taken only
-  from admitted vault versions;
-- a `put` whose `vector[X]` (X ≠ author, X not cut) exceeds X's highest applied counter for
-  that record waits for X's earlier versions (§9.3);
-- a trust entry waits until the stream's device is introduced.
+- an item or attachment `put` waits for a key that opens its body; it is tried with the keys
+  of every retained version of its vault, admitted ones first. New records are sealed, and
+  new vault versions written, with the vault's key from its earliest admitted version;
+- a `put` whose `vector[X]` (X ≠ author, X not cut or removed) exceeds X's highest applied
+  counter for that record waits for X's earlier versions (§9.3).
 
-At most 20 000 entries of one stream wait at a time; beyond that the stream is not read
-further until some apply.
+At most 20 000 records of one stream wait at a time; beyond that the stream is not read
+further until some apply (the root's stream is never held back).
 
 Checkpoints are evaluated once their position counts (positions that never count are
-dropped): a listed position that this device has received with a different chain hash is a
-**fork**; a listed position of this device's own stream that it wrote with another hash, or
-beyond what it wrote, is a fork, unless it is exactly the segment whose append outcome was
-lost (then it counts as confirmed); a listed position not received yet is a **claim**,
-settled when the position arrives (a different hash then is a fork). Every unmet claim is
-kept; when the oldest is 24 hours old the stream is reported as withheld (a warning, not a
-pause), once until its claims are met. A counting `revoke` whose `last_valid_hash` differs
-from the received chain hash at `last_valid_seq` is a fork. A fork at a position after the
-stream's cut raises nothing (neither history counts); reading that stream stops there.
+dropped). A listed position that this device has with a different chain hash, a listed
+position of this device's own stream that it wrote with another hash or never wrote (other
+than exactly the segment whose append outcome was lost, which then counts as confirmed),
+or a claimed position that later arrives with another hash, is a **fork** if the checkpoint
+is the root's, and a **dispute** naming the checkpoint's device otherwise. A listed position
+not received yet is a **claim**; when the oldest unmet claim of a stream is 24 hours old the
+stream is reported as withheld (a warning), once until its claims are met. A root `revoke`
+whose `last_valid_hash` differs from the received chain hash at `last_valid_seq` is a fork.
+Forks and disputes at positions after the stream's cut raise nothing.
 
 **Rollback**: before reading, a device compares each stream's stored head (`Transport::head`)
 with its own received position, and before writing, the stored head of its own stream with
@@ -380,11 +364,12 @@ its last confirmed position; a stored head behind is a rollback. A head that can
 is reported. A stored head of its own stream ahead of its confirmed position means another
 copy of the device wrote there: the device stops writing (clone handling: plan A1c-2).
 
-Forks, rollbacks, self-joined devices and quarantined ids are **alarms**, kept as a queue
-and accepted one by one (accepting a fork stops reading that stream). While any alarm is
-open, `put` entries are not applied and nothing is materialised; trust entries are still
-applied, and the device's own entries are still pushed unless the alarm is about its own
-stream. The round reports the first alarm as an error.
+**Alarms** are scoped. A rollback or fork pauses only its stream (its records wait; for the
+device's own stream, nothing is pushed) until accepted; accepting a fork stops reading that
+stream further, keeping what was received before it. One alarm per stream and kind: a
+repeated rollback replaces the earlier one. Disputes (one open per claimant) and the
+aggregated alarm about devices awaiting approval pause nothing. A sync round does not fail
+because of an alarm.
 
 ### 10.4 Conflict copies after a revocation
 
