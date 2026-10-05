@@ -127,15 +127,17 @@ impl Store {
             return Err(Error::NotFound(path.display().to_string()));
         }
         let conn = Connection::open(path)?;
-        configure(&conn)?;
-        upgrade(&conn, path)?;
+        configure(&conn).map_err(not_a_database)?;
+        upgrade(&conn, path).map_err(not_a_database)?;
         let raw: Vec<u8> = conn
             .query_row("SELECT value FROM meta WHERE key = 'header'", [], |r| {
                 r.get(0)
             })
-            .optional()?
-            .ok_or_else(|| Error::Invalid("missing header".into()))?;
-        let header = serde_json::from_slice(&raw)?;
+            .optional()
+            .map_err(|e| not_a_database(e.into()))?
+            .ok_or_else(|| Error::NotADatabase("missing header".into()))?;
+        let header = serde_json::from_slice(&raw)
+            .map_err(|e| Error::NotADatabase(format!("unreadable header: {e}")))?;
         Ok(Store {
             conn,
             header,
@@ -222,6 +224,57 @@ impl Store {
         insert_vault(&self.conn, account, &info, &key)?;
         self.vault_keys.insert(info.id, key);
         Ok(info)
+    }
+
+    pub fn rename_vault(&mut self, id: Uuid, name: &str) -> Result<VaultInfo> {
+        let account = self.account_key()?;
+        let info = VaultInfo {
+            id,
+            name: name.to_owned(),
+        };
+        let meta = crypto::seal(account, &serde_json::to_vec(&info)?, &vault_meta_aad(id));
+        let n = self.conn.execute(
+            "UPDATE vaults SET meta = ?2, revision = revision + 1 WHERE id = ?1 AND deleted = 0",
+            params![id.to_string(), meta],
+        )?;
+        if n == 0 {
+            return Err(Error::NotFound(format!("vault {id}")));
+        }
+        Ok(info)
+    }
+
+    /// Deletes an empty vault. Its items in Recently Deleted are purged with it; the row stays
+    /// as a tombstone (for sync), and its key is kept so old tombstones still parse.
+    pub fn delete_vault(&mut self, id: Uuid, now: i64) -> Result<()> {
+        self.vault_key(id)?;
+        let tx = self.conn.unchecked_transaction()?;
+        let live: i64 = tx.query_row(
+            "SELECT COUNT(*) FROM items WHERE vault_id = ?1 AND deleted_at IS NULL",
+            [id.to_string()],
+            |r| r.get(0),
+        )?;
+        if live > 0 {
+            return Err(Error::Invalid(format!("vault has {live} items")));
+        }
+        tx.execute(
+            "UPDATE attachments SET data = X'', deleted = 1, revision = revision + 1
+             WHERE item_id IN (SELECT id FROM items WHERE vault_id = ?1) AND deleted = 0",
+            [id.to_string()],
+        )?;
+        tx.execute(
+            "UPDATE items SET data = X'', deleted_at = COALESCE(deleted_at, ?2), revision = revision + 1
+             WHERE vault_id = ?1 AND length(data) > 0",
+            params![id.to_string(), now],
+        )?;
+        let n = tx.execute(
+            "UPDATE vaults SET deleted = 1, revision = revision + 1 WHERE id = ?1 AND deleted = 0",
+            [id.to_string()],
+        )?;
+        if n == 0 {
+            return Err(Error::NotFound(format!("vault {id}")));
+        }
+        tx.commit()?;
+        Ok(())
     }
 
     /// Writes a previewed import: one new vault per imported vault, all in one transaction.
@@ -664,7 +717,7 @@ fn apply_migrations(tx: &Connection, from: i64) -> Result<()> {
 fn upgrade(conn: &Connection, path: &Path) -> Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if version <= 0 {
-        return Err(Error::Invalid("not a keepsake database".into()));
+        return Err(Error::NotADatabase("no keepsake schema".into()));
     }
     if version > DB_VERSION {
         return Err(Error::Invalid(format!(
@@ -678,6 +731,20 @@ fn upgrade(conn: &Connection, path: &Path) -> Result<()> {
         tx.commit()?;
     }
     Ok(())
+}
+
+/// Errors that mean "this file is not ours or is damaged"; others (I/O, a newer schema, a busy
+/// database) pass through unchanged so the UI never offers to start over for them.
+fn not_a_database(e: Error) -> Error {
+    use rusqlite::ErrorCode::{DatabaseCorrupt, NotADatabase};
+    match e {
+        Error::Db(rusqlite::Error::SqliteFailure(f, _))
+            if matches!(f.code, NotADatabase | DatabaseCorrupt) =>
+        {
+            Error::NotADatabase(f.to_string())
+        }
+        other => other,
+    }
 }
 
 /// Copies the database next to itself before a schema migration.

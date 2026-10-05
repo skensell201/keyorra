@@ -12,6 +12,9 @@ pub enum Error {
     NotFound(String),
     #[error("invalid data: {0}")]
     Invalid(String),
+    /// The file exists but is not a Keepsake database (or is damaged beyond opening).
+    #[error("not a keepsake database: {0}")]
+    NotADatabase(String),
     #[error("network: {0}")]
     Network(String),
     #[error("database: {0}")]

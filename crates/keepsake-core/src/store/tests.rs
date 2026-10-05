@@ -126,7 +126,7 @@ fn open_rejects_empty_file_without_writing() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("empty.db");
     std::fs::write(&path, b"").unwrap();
-    assert!(matches!(Store::open(&path), Err(Error::Invalid(_))));
+    assert!(matches!(Store::open(&path), Err(Error::NotADatabase(_))));
     assert_eq!(std::fs::read(&path).unwrap(), b"");
 }
 
@@ -140,7 +140,7 @@ fn open_rejects_foreign_sqlite_database_without_writing() {
             .unwrap();
     }
     let before = std::fs::read(&path).unwrap();
-    assert!(matches!(Store::open(&path), Err(Error::Invalid(_))));
+    assert!(matches!(Store::open(&path), Err(Error::NotADatabase(_))));
     assert_eq!(std::fs::read(&path).unwrap(), before);
 }
 
@@ -217,7 +217,7 @@ fn negative_user_version_is_rejected_without_backup() {
         .unwrap()
         .pragma_update(None, "user_version", -1)
         .unwrap();
-    assert!(matches!(Store::open(&path), Err(Error::Invalid(_))));
+    assert!(matches!(Store::open(&path), Err(Error::NotADatabase(_))));
     let files = std::fs::read_dir(dir.path()).unwrap().count();
     assert_eq!(files, 1, "no backup or other file should appear");
 }
@@ -873,4 +873,87 @@ fn sealed_meta_is_bound_to_its_name_and_not_plaintext() {
     drop(store);
     let bytes = std::fs::read(&path).unwrap();
     assert!(!bytes.windows(13).any(|w| w == b"TopSecretBlob"));
+}
+
+#[test]
+fn open_rejects_a_file_that_is_not_sqlite() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("keepsake.db");
+    std::fs::write(&path, b"this is a text file, not a database at all.......").unwrap();
+    assert!(matches!(Store::open(&path), Err(Error::NotADatabase(_))));
+}
+
+#[test]
+fn open_rejects_a_damaged_header() {
+    let (_dir, path, store) = new_store();
+    drop(store);
+    rusqlite::Connection::open(&path)
+        .unwrap()
+        .execute("UPDATE meta SET value = X'7B' WHERE key = 'header'", [])
+        .unwrap();
+    assert!(matches!(Store::open(&path), Err(Error::NotADatabase(_))));
+}
+
+#[test]
+fn rename_vault_keeps_its_items() {
+    let (_dir, path, mut store) = new_store();
+    let vault = store.create_vault("Personal").unwrap();
+    store.save_item(&login(vault.id, "GitHub")).unwrap();
+    let renamed = store.rename_vault(vault.id, "Home").unwrap();
+    assert_eq!(renamed.name, "Home");
+    drop(store);
+    let mut store = Store::open(&path).unwrap();
+    store.unlock(PW).unwrap();
+    assert_eq!(store.vaults().unwrap()[0].name, "Home");
+    assert_eq!(store.list_items(Some(vault.id)).unwrap().len(), 1);
+    assert!(matches!(
+        store.rename_vault(Uuid::new_v4(), "x"),
+        Err(Error::NotFound(_))
+    ));
+}
+
+#[test]
+fn delete_vault_refuses_live_items_and_purges_its_trash() {
+    let (_dir, _path, mut store) = new_store();
+    store.create_vault("Personal").unwrap();
+    let old = store.create_vault("Old").unwrap();
+    let item = login(old.id, "Forum");
+    store.save_item(&item).unwrap();
+    assert!(matches!(
+        store.delete_vault(old.id, 1_000),
+        Err(Error::Invalid(_))
+    ));
+    store.delete_item(item.id, 1_000).unwrap();
+    store.delete_vault(old.id, 2_000).unwrap();
+    let names: Vec<_> = store
+        .vaults()
+        .unwrap()
+        .into_iter()
+        .map(|v| v.name)
+        .collect();
+    assert_eq!(names, ["Personal"]);
+    assert!(
+        store.deleted_items().unwrap().is_empty(),
+        "its trash is purged"
+    );
+    assert!(matches!(
+        store.restore_item(item.id),
+        Err(Error::NotFound(_))
+    ));
+    assert!(matches!(
+        store.delete_vault(old.id, 3_000),
+        Err(Error::NotFound(_))
+    ));
+}
+
+#[test]
+fn deleted_vault_does_not_break_unlock() {
+    let (_dir, path, mut store) = new_store();
+    store.create_vault("Personal").unwrap();
+    let old = store.create_vault("Old").unwrap();
+    store.delete_vault(old.id, 1_000).unwrap();
+    drop(store);
+    let mut store = Store::open(&path).unwrap();
+    store.unlock(PW).unwrap();
+    assert_eq!(store.vaults().unwrap().len(), 1);
 }
