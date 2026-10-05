@@ -121,6 +121,14 @@ enum Op {
     },
     /// The stolen device signs a snapshot of its own stream with other content (review S1).
     StolenSnapshot,
+    /// From now on a keyless squatter keeps junk at the main device's next position and far
+    /// ahead of it, re-adding it before every step (review F1).
+    SquatRoot,
+    /// `dev` syncs through a frozen, partitioned copy of the store (review F3); its own
+    /// pushes land only there.
+    PartitionedSync {
+        dev: usize,
+    },
     RootSnapshot,
     /// The store deletes the main device's snapshots, or serves an old one again.
     DeleteRootSnapshots,
@@ -156,6 +164,8 @@ fn op() -> impl Strategy<Value = Op> {
         1 => Just(Op::ReplayRootSnapshot),
         1 => Just(Op::ReplayRootHead),
         1 => Just(Op::ForeignHeader),
+        1 => Just(Op::SquatRoot),
+        1 => d.clone().prop_map(|dev| Op::PartitionedSync { dev }),
         1 => i.clone().prop_map(|item| Op::StolenCopy { item }),
         1 => d.clone().prop_map(|dev| Op::StolenFork { dev }),
         1 => Just(Op::SelfJoin),
@@ -180,6 +190,8 @@ struct World {
     old_root_snapshots: Vec<Vec<u8>>,
     old_root_heads: Vec<Vec<u8>>,
     foreign_header: bool,
+    squatting: bool,
+    partition: Option<crate::transport::MemoryTransport>,
     seed: u64,
 }
 
@@ -210,6 +222,8 @@ fn setup(seed: u64) -> World {
         old_root_snapshots: Vec::new(),
         old_root_heads: Vec::new(),
         foreign_header: false,
+        squatting: false,
+        partition: None,
         seed,
     }
 }
@@ -263,10 +277,45 @@ impl World {
         );
     }
 
+    /// The squatter re-adds its junk at the main device's next position and far ahead.
+    fn squat(&mut self) {
+        if !self.squatting {
+            return;
+        }
+        let next = self.c.devices[0].sent.seq + 1;
+        for seq in [next, next + 40] {
+            let header = crate::segment::SegmentHeader {
+                collection: crate::segment::ACCOUNT_COLLECTION,
+                device_id: device_id(0),
+                first_seq: seq,
+                last_seq: seq,
+                prev_hash: [0; 32],
+                last_hash: [0; 32],
+            };
+            let mut bytes = header.to_bytes().to_vec();
+            bytes.extend_from_slice(&[0; 64]);
+            let _ = self.c.store.append(&bytes);
+        }
+    }
+
     fn run(&mut self, step: usize, op: &Op) {
+        self.squat();
         let clock = self.c.clocks[0];
         let vault = self.vault;
         match *op {
+            Op::SquatRoot => self.squatting = true,
+            Op::PartitionedSync { dev } => {
+                let frozen = self
+                    .partition
+                    .get_or_insert_with(|| self.c.store.deep_copy())
+                    .clone();
+                self.sync_timed(
+                    dev,
+                    Some(&|e: &mut Engine<StdRng>, at| {
+                        let _ = e.sync(&frozen, at);
+                    }),
+                );
+            }
             Op::Save { dev, item } => {
                 let id = item_id(item);
                 let json = Cluster::item_json(id, &format!("t{step}"), &[]);
@@ -644,6 +693,16 @@ impl World {
                 }
                 // Computed from state; resolves itself.
                 Alarm::RootBehind { .. } => continue,
+                // The own stream rolled back (its pushes went to a partitioned copy): the user
+                // restores from this Mac.
+                Alarm::Rollback { stream, .. } if *stream == device_id(i) => {
+                    let store = self.c.store.clone();
+                    let at = self.c.clocks[i];
+                    self.c.devices[i]
+                        .restore(&store, *stream, at)
+                        .unwrap_or_else(|e| panic!("device {i} cannot restore: {e}"));
+                    continue;
+                }
                 Alarm::Rollback { .. } | Alarm::Unapproved { .. } => {}
             }
             assert!(self.c.devices[i].accept_alarm(&alarm));
@@ -658,6 +717,7 @@ impl World {
         let mut last = Vec::new();
         for _ in 0..80 {
             for i in 0..HONEST {
+                self.squat();
                 self.decide(i);
                 self.sync_timed(i, None);
             }

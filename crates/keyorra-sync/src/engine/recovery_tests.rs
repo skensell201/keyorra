@@ -553,22 +553,24 @@ fn own_segments_covered_by_a_root_snapshot_are_not_kept() {
 }
 
 #[test]
-fn a_device_restores_its_own_rolled_back_stream_by_appending_it_again() {
+fn a_device_repairs_its_own_rolled_back_stream_by_appending_it_again() {
     let (mut c, vault) = shared(3);
     let backup = c.store.deep_copy();
     save(&mut c, 1, vault, ITEM, "after the backup");
     c.sync(1).unwrap();
     let store = backup;
     save(&mut c, 1, vault, Uuid::from_bytes([0x61; 16]), "later");
+    // It appends the lost segment again by itself (it kept it): no alarm (review F1).
     c.devices[1].sync(&store, c.clocks[1]).unwrap();
-    assert!(matches!(
-        c.devices[1].alarms().first(),
-        Some(Alarm::Rollback { stream, .. }) if *stream == device_id(1)
-    ));
-    c.devices[1]
-        .restore(&store, device_id(1), c.clocks[1])
-        .unwrap();
-    c.devices[1].sync(&store, c.clocks[1]).unwrap();
+    assert!(
+        c.devices[1].alarms().is_empty(),
+        "{:?}",
+        c.devices[1].alarms()
+    );
+    assert!(c.devices[1]
+        .take_events()
+        .iter()
+        .any(|e| matches!(e, Event::RollbackRepaired { .. })));
     c.devices[2].sync(&store, c.clocks[2]).unwrap();
     let seen = titles(&c.devices[2].view());
     assert!(

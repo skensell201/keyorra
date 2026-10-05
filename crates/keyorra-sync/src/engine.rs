@@ -433,6 +433,9 @@ pub struct Engine<R> {
     /// Own confirmed segments, byte for byte, by first position: what "Restore from this
     /// Mac" appends again after the store lost them (A1d persists them with the outbox).
     own_segments: BTreeMap<u64, Vec<u8>>,
+    /// The main device's snapshots cover the own stream up to here: kept segments up to it
+    /// are dropped once the store is seen holding them.
+    own_covered: u64,
     /// The last outbox save failed: nothing is appended until one succeeds.
     outbox_unsaved: bool,
     bootstrap_tried: bool,
@@ -554,6 +557,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             revoked_since_snapshot: false,
             own_segments: BTreeMap::new(),
             outbox_unsaved: false,
+            own_covered: 0,
             bootstrap_tried: false,
             root_head_written: (0, 0, 0, 0),
             root_time: None,
@@ -1623,7 +1627,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                     Entry::Snapshot { frontier, .. } => {
                         if is_root {
                             if let Some(h) = frontier.get(&self.device) {
-                                self.own_segments.retain(|first, _| *first > h.seq);
+                                self.own_covered = self.own_covered.max(h.seq);
                             }
                         }
                     }
@@ -2117,7 +2121,8 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             self.retire_due = Some(RetireReason::OtherCopyWrote);
             return false;
         }
-        let mut cleared = true;
+        // Nothing found (the store did not list it this time): try again next round.
+        let mut cleared = !junk.is_empty();
         for seq in junk {
             if transport.delete_segment(&self.device, seq).is_ok() {
                 self.events.push(Event::OwnStreamCleaned { seq });
@@ -2127,6 +2132,87 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             }
         }
         cleared
+    }
+
+    /// Makes the store hold this device's kept segments byte for byte: a missing one is
+    /// appended again (a rollback of the store, or a partitioned view, repaired by itself), and
+    /// something else at its position is deleted first, unless it is signed with the own key
+    /// (another copy of this device: retire). Returns whether the stream is whole again.
+    fn heal_own_stream(&mut self, transport: &impl Transport) -> bool {
+        let Some(lowest) = self.own_segments.keys().next().copied() else {
+            return true;
+        };
+        let Ok(found) = transport.segments(&self.device, lowest - 1) else {
+            return true;
+        };
+        let stored: BTreeMap<u64, Vec<u8>> = found
+            .into_iter()
+            .filter_map(|f| match f {
+                Fetched::Ready(b) => Some(b),
+                _ => None,
+            })
+            .filter_map(|b| Some((SegmentHeader::parse(&b).ok()?.first_seq, b)))
+            .collect();
+        // Segments the store holds and the main device's snapshot covers need not be kept.
+        let covered = self.own_covered;
+        self.own_segments
+            .retain(|f, b| *f > covered || stored.get(f) != Some(b));
+        let own_key = self.signer.verifying_key();
+        let kept: Vec<(u64, Vec<u8>)> = self
+            .own_segments
+            .iter()
+            .filter(|(f, b)| stored.get(f) != Some(b))
+            .map(|(f, b)| (*f, b.clone()))
+            .collect();
+        let mut repaired = false;
+        for (first, bytes) in kept {
+            // Appending says for sure whether something else is there (a listing may lie).
+            match transport.append(&bytes) {
+                Ok(AppendOutcome::Appended) => {
+                    repaired = true;
+                    continue;
+                }
+                Ok(AppendOutcome::AlreadyThere) => continue,
+                Ok(AppendOutcome::Conflict) => {}
+                Err(_) => return false,
+            }
+            let occupant = transport
+                .segments(&self.device, first - 1)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|f| match f {
+                    Fetched::Ready(b) => Some(b),
+                    _ => None,
+                })
+                .find(|b| SegmentHeader::parse(b).is_ok_and(|h| h.first_seq == first));
+            let Some(occupant) = occupant else {
+                return false;
+            };
+            let ours = decrypt_segment(&self.segment_key, &occupant)
+                .ok()
+                .and_then(|u| u.verify(&own_key).ok())
+                .is_some();
+            if ours {
+                self.events.push(Event::OwnStreamConflict);
+                self.retire_due = Some(RetireReason::OtherCopyWrote);
+                return false;
+            }
+            if transport.delete_segment(&self.device, first).is_err() {
+                self.raise_own_tampered(first);
+                return false;
+            }
+            self.events.push(Event::OwnStreamCleaned { seq: first });
+            match transport.append(&bytes) {
+                Ok(AppendOutcome::Appended | AppendOutcome::AlreadyThere) => repaired = true,
+                _ => return false,
+            }
+        }
+        if repaired {
+            self.events.push(Event::RollbackRepaired {
+                stream: self.device,
+            });
+        }
+        true
     }
 
     /// The user chose to leave this device's id behind (its stream is occupied for good):
@@ -2163,42 +2249,52 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             return;
         }
         self.upload_header_files(transport);
-        if self.unsent.is_none() && self.outbox.is_empty() {
+        if !self.heal_own_stream(transport) {
             return;
         }
-        // The store's head of this device's own stream must be where this device left it.
-        match transport.head(&self.device) {
-            Ok(stored) => {
-                let stored = stored.unwrap_or(0);
-                let acknowledged = self.acknowledged_rollbacks.contains(&(self.device, stored));
-                if stored < self.sent.seq
-                    && !acknowledged
-                    && self.snapshot_covers(transport, &self.device, self.sent.seq)
-                {
-                    // The main device's snapshot covers what the store lost: nothing to do.
-                    self.acknowledged_rollbacks.insert((self.device, stored));
-                    self.events.push(Event::RollbackRepaired {
-                        stream: self.device,
-                    });
-                } else if stored < self.sent.seq && !acknowledged {
-                    self.raise(Alarm::Rollback {
-                        stream: self.device,
-                        received: self.sent.seq,
-                        stored,
-                    });
-                    return;
+        // The store's head of this device's own stream must be where this device left it
+        // (checked every round, not only before writing: an idle device's lost segments
+        // matter to every reader).
+        for _ in 0..2 {
+            match transport.head(&self.device) {
+                Ok(stored) => {
+                    let stored = stored.unwrap_or(0);
+                    if stored > self.sent.seq && self.unsent.is_none() {
+                        // Something beyond what this device wrote: cleaned up if it is not
+                        // this device's, then the head is looked at again.
+                        if !self.own_stream_occupied(transport) {
+                            return;
+                        }
+                        continue;
+                    }
+                    let acknowledged = self.acknowledged_rollbacks.contains(&(self.device, stored));
+                    if stored < self.sent.seq
+                        && !acknowledged
+                        && self.snapshot_covers(transport, &self.device, self.sent.seq)
+                    {
+                        // The main device's snapshot covers what the store lost.
+                        self.acknowledged_rollbacks.insert((self.device, stored));
+                        self.events.push(Event::RollbackRepaired {
+                            stream: self.device,
+                        });
+                    } else if stored < self.sent.seq && !acknowledged {
+                        self.raise(Alarm::Rollback {
+                            stream: self.device,
+                            received: self.sent.seq,
+                            stored,
+                        });
+                        return;
+                    }
                 }
-                if stored > self.sent.seq
-                    && self.unsent.is_none()
-                    && !self.own_stream_occupied(transport)
-                {
-                    return;
-                }
+                Err(e) => self.events.push(Event::HeadUnknown {
+                    stream: self.device,
+                    reason: e.to_string(),
+                }),
             }
-            Err(e) => self.events.push(Event::HeadUnknown {
-                stream: self.device,
-                reason: e.to_string(),
-            }),
+            break;
+        }
+        if self.unsent.is_none() && self.outbox.is_empty() {
+            return;
         }
         if self.outbox_unsaved && !self.save_outbox() {
             return;
@@ -2256,6 +2352,14 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                 Ok(AppendOutcome::Conflict) => {
                     retries += 1;
                     if retries > 3 || !self.own_stream_occupied(transport) {
+                        return;
+                    }
+                    // Appending again only continues the stream if the store still holds
+                    // everything before this position (no gap).
+                    let stored = transport.head(&self.device).ok().flatten().unwrap_or(0);
+                    if stored < self.sent.seq
+                        && !self.acknowledged_rollbacks.contains(&(self.device, stored))
+                    {
                         return;
                     }
                 }

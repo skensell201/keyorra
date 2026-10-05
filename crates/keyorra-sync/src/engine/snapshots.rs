@@ -17,6 +17,8 @@
 use crate::pack::{check_entries, SnapshotBody};
 use crate::snapshot::{decrypt_snapshot, seal_snapshot};
 
+use std::collections::BTreeSet;
+
 use super::*;
 
 /// A snapshot is due after this many new entries…
@@ -445,27 +447,77 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             unreachable!("filtered above")
         };
         if stream == self.device {
-            let lost: Vec<Vec<u8>> = self
-                .own_segments
-                .range(stored + 1..)
-                .map(|(_, b)| b.clone())
+            let stored_segments: Vec<Vec<u8>> = transport
+                .segments(&stream, 0)
+                .unwrap_or_default()
+                .into_iter()
+                .filter_map(|f| match f {
+                    Fetched::Ready(b) => Some(b),
+                    _ => None,
+                })
                 .collect();
-            // Positions are segment ends: the first lost segment starts right after `stored`.
-            let have_all = self.own_segments.contains_key(&(stored + 1));
-            if !have_all && self.snapshot_covers(transport, &stream, self.sent.seq) {
-                // The main device's snapshot already covers what the store lost.
-                self.alarms.retain(|a| *a != alarm);
-                self.acknowledged_rollbacks.insert((stream, stored));
-                self.push(transport);
-                return Ok(());
-            }
-            if !have_all {
+            // Where the store holds this device's own chain: a segment ending there with the
+            // own chain hash, signed with the own key.
+            let own_key = self.signer.verifying_key();
+            let own_end = |end: u64| {
+                stored_segments.iter().any(|b| {
+                    SegmentHeader::parse(b).is_ok_and(|h| {
+                        h.last_seq == end && self.own_hashes.get(&end) == Some(&h.last_hash)
+                    }) && decrypt_segment(&self.segment_key, b)
+                        .ok()
+                        .and_then(|u| u.verify(&own_key).ok())
+                        .is_some()
+                })
+            };
+            // Which kept segments the store no longer holds byte for byte.
+            let present: BTreeSet<u64> = stored_segments
+                .iter()
+                .cloned()
+                .filter_map(|b| {
+                    let h = SegmentHeader::parse(&b).ok()?;
+                    (self.own_segments.get(&h.first_seq) == Some(&b)).then_some(h.first_seq)
+                })
+                .collect();
+            let missing: Vec<(u64, Vec<u8>)> = self
+                .own_segments
+                .iter()
+                .filter(|(first, _)| !present.contains(first))
+                .map(|(f, b)| (*f, b.clone()))
+                .collect();
+            // Everything before the first missing segment must still be there: a kept segment,
+            // the start of the stream, or the main device's snapshot.
+            let anchored = match missing.first() {
+                None => true,
+                Some((m, _)) => {
+                    *m == 1
+                        || own_end(m - 1)
+                        || self
+                            .own_segments
+                            .range(..*m)
+                            .next_back()
+                            .is_some_and(|(f, _)| present.contains(f))
+                        || self.snapshot_covers(transport, &stream, m - 1)
+                }
+            };
+            if !anchored {
+                if self.snapshot_covers(transport, &stream, self.sent.seq) {
+                    // The main device's snapshot already covers what the store lost.
+                    self.alarms.retain(|a| *a != alarm);
+                    self.acknowledged_rollbacks.insert((stream, stored));
+                    self.push(transport);
+                    return Ok(());
+                }
                 return Err(Error::Refused(
                     "this device no longer has its lost changes; restore on the main device".into(),
                 ));
             }
-            for bytes in lost {
-                transport.append(&bytes)?;
+            for (first, bytes) in missing {
+                if let AppendOutcome::Conflict = transport.append(&bytes)? {
+                    // Something else squats there: not this device's segment, so it goes.
+                    transport.delete_segment(&stream, first)?;
+                    self.events.push(Event::OwnStreamCleaned { seq: first });
+                    transport.append(&bytes)?;
+                }
             }
             self.alarms.retain(|a| *a != alarm);
             self.push(transport);
