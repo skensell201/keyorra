@@ -912,6 +912,7 @@ fn field(id: &str, label: &str, value: FieldValue) -> Field {
         label: label.into(),
         value,
         purpose: None,
+        extra: Default::default(),
     }
 }
 
@@ -956,6 +957,7 @@ fn purpose_field(purpose: Purpose) -> Field {
         label: id.into(),
         value,
         purpose: Some(purpose),
+        extra: Default::default(),
     }
 }
 

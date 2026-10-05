@@ -341,6 +341,7 @@ impl Store {
                         id: Uuid::new_v4(),
                         name: name.clone(),
                         size: bytes.len() as u64,
+                        extra: Default::default(),
                     };
                     insert_attachment(&tx, &key, &item, &att, bytes)?;
                     record_change(&tx, ChangeKind::Attachment, att.id)?;
@@ -444,6 +445,7 @@ impl Store {
             id: Uuid::new_v4(),
             name: name.to_owned(),
             size: bytes.len() as u64,
+            extra: Default::default(),
         };
         let tx = self.conn.unchecked_transaction()?;
         insert_attachment(&tx, key, &item, &att, bytes)?;
@@ -823,6 +825,9 @@ fn not_a_database(e: Error) -> Error {
 }
 
 /// Copies the database next to itself before a schema migration.
+/// The copy is kept: nothing deletes it yet. Plan A3 tells the user it exists (Settings,
+/// with its size) and offers to delete it; the app does not remove it on its own, since it
+/// is the only way back if a migration went wrong.
 pub fn backup(path: &Path, from_version: i64) -> Result<PathBuf> {
     let copy = sibling(path, &format!(".bak-v{from_version}"));
     std::fs::copy(path, &copy)?;

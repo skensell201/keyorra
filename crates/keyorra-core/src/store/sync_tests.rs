@@ -192,3 +192,124 @@ fn the_meta_writer_writes_what_the_store_reads() {
         b"state"
     );
 }
+
+/// Review A1d C1: a vault created offline must be written before the items moved into it,
+/// whatever order their changes were first recorded in.
+#[test]
+fn vault_changes_come_before_item_changes() {
+    let (_dir, _path, mut store) = new_store();
+    store.set_sync_tracking(true).unwrap();
+    let old = store.create_vault("Old").unwrap();
+    let mut item = Item::new(old.id, ItemKind::Login, "x", 1);
+    store.save_item(&item).unwrap();
+    store.clear_changes(&changes(&store)).unwrap();
+    item.title = "edited".into();
+    store.save_item(&item).unwrap();
+    let new = store.create_vault("New").unwrap();
+    item.vault_id = new.id;
+    store.save_item(&item).unwrap();
+    assert_eq!(
+        changes(&store),
+        vec![vault_change(new.id), item_change(item.id)]
+    );
+}
+
+/// Review A1d C2: an item moved to another vault elsewhere keeps readable attachments here.
+#[test]
+fn a_remote_move_reencrypts_the_attachments() {
+    let (_dir, _path, mut store) = new_store();
+    let a = store.create_vault("A").unwrap();
+    let b = store.create_vault("B").unwrap();
+    let item = Item::new(a.id, ItemKind::Login, "x", 1);
+    store.save_item(&item).unwrap();
+    let att = store.add_attachment(item.id, "f.txt", b"bytes", 2).unwrap();
+    let mut moved = store.get_item(item.id).unwrap();
+    moved.vault_id = b.id;
+    store.apply_remote_item(&moved, None).unwrap();
+    assert_eq!(store.get_item(item.id).unwrap().vault_id, b.id);
+    assert_eq!(&store.get_attachment(att.id).unwrap()[..], b"bytes");
+}
+
+/// Review A1d C3: what sync shows can rename or delete a vault, never change its key.
+#[test]
+fn an_existing_vaults_key_is_never_replaced_remotely() {
+    let (_dir, path, mut store) = new_store();
+    let v = store.create_vault("Personal").unwrap();
+    let item = Item::new(v.id, ItemKind::Login, "x", 1);
+    store.save_item(&item).unwrap();
+    let account = store.account_key_copy().unwrap();
+    let other = crypto::wrap_vault_key(&account, v.id, &Key::random());
+    assert!(store
+        .apply_remote_vault(v.id, "Personal", &other, false)
+        .is_err());
+    // The same key wrapped again (another nonce) is the same vault.
+    let key = store.vault_rows().unwrap()[0].1.clone();
+    let rewrapped = crypto::wrap_vault_key(&account, v.id, &key);
+    store
+        .apply_remote_vault(v.id, "Renamed", &rewrapped, false)
+        .unwrap();
+    assert!(store
+        .apply_remote_vault(v.id, "Bad", &[0xab; 72], false)
+        .is_err());
+    drop(store);
+    let mut store = Store::open(&path).unwrap();
+    store.unlock(PW).unwrap();
+    assert_eq!(store.vaults().unwrap()[0].name, "Renamed");
+    assert_eq!(store.get_item(item.id).unwrap().title, "x");
+}
+
+/// Review A1d I4: a live item shown in a vault deleted here brings the vault back.
+#[test]
+fn a_live_remote_item_revives_its_deleted_vault() {
+    let (_dir, _path, mut store) = new_store();
+    let keep = store.create_vault("Keep").unwrap();
+    let v = store.create_vault("Gone").unwrap();
+    store.delete_vault(v.id, 5).unwrap();
+    assert_eq!(store.vaults().unwrap().len(), 1);
+    let item = Item::new(v.id, ItemKind::Login, "added elsewhere", 6);
+    store.apply_remote_item(&item, None).unwrap();
+    let names: Vec<String> = store
+        .vaults()
+        .unwrap()
+        .into_iter()
+        .map(|x| x.name)
+        .collect();
+    assert!(names.contains(&"Gone".to_owned()) && names.contains(&keep.name));
+    assert_eq!(store.get_item(item.id).unwrap().title, "added elsewhere");
+}
+
+/// A version 1 database as the released app wrote it (items, Recently Deleted, an
+/// attachment, sealed meta) opens as version 2 with everything readable, and the backup is
+/// the untouched version 1 file.
+#[test]
+fn a_real_version_1_database_migrates_with_everything() {
+    let (_dir, path, mut store) = new_store();
+    let v = store.create_vault("Personal").unwrap();
+    let live = Item::new(v.id, ItemKind::Login, "live", 1);
+    store.save_item(&live).unwrap();
+    let att = store.add_attachment(live.id, "a.txt", b"bytes", 2).unwrap();
+    let trashed = Item::new(v.id, ItemKind::SecureNote, "trashed", 1);
+    store.save_item(&trashed).unwrap();
+    store.delete_item(trashed.id, 3).unwrap();
+    store.set_sealed_meta("pairings", b"paired").unwrap();
+    drop(store);
+    // Exactly what version 1 had: no sync tables, user_version 1.
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch("DROP TABLE sync_changes; DROP TABLE sync_segments;")
+        .unwrap();
+    conn.pragma_update(None, "user_version", 1).unwrap();
+    drop(conn);
+    let v1 = std::fs::read(&path).unwrap();
+
+    let mut store = Store::open(&path).unwrap();
+    store.unlock(PW).unwrap();
+    assert_eq!(store.get_item(live.id).unwrap().title, "live");
+    assert_eq!(&store.get_attachment(att.id).unwrap()[..], b"bytes");
+    assert_eq!(store.deleted_items().unwrap().len(), 1);
+    assert_eq!(
+        &store.sealed_meta("pairings").unwrap().unwrap()[..],
+        b"paired"
+    );
+    assert!(store.pending_changes().unwrap().is_empty());
+    assert_eq!(std::fs::read(sibling(&path, ".bak-v1")).unwrap(), v1);
+}

@@ -12,8 +12,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
 use super::{
-    configure, insert_vault, parse_id, sealed_meta_aad, sealed_meta_key, upsert_item,
-    vault_meta_aad, Store,
+    configure, insert_vault, parse_id, reencrypt_attachments, sealed_meta_aad, sealed_meta_key,
+    upsert_item, vault_meta_aad, Store,
 };
 use crate::crypto::{self, Key};
 use crate::model::{Item, VaultInfo};
@@ -98,11 +98,18 @@ impl Store {
         Ok(on.as_deref() == Some(b"1"))
     }
 
-    /// The records changed locally and not yet written by the sync engine, in a stable order.
+    /// The records changed locally and not yet written by the sync engine: vaults first
+    /// (an item may have moved into a vault created in the same batch, review A1d C1), then
+    /// items, then attachments, each in the order first recorded.
+    ///
+    /// Clearing what was written ([`Store::clear_changes`]) is safe without a generation
+    /// counter because both happen under one `&mut Store` borrow: no change can be recorded
+    /// between reading and clearing.
     pub fn pending_changes(&self) -> Result<Vec<Change>> {
-        let mut stmt = self
-            .conn
-            .prepare("SELECT kind, id FROM sync_changes ORDER BY rowid")?;
+        let mut stmt = self.conn.prepare(
+            "SELECT kind, id FROM sync_changes
+             ORDER BY CASE kind WHEN 'vault' THEN 0 WHEN 'item' THEN 1 ELSE 2 END, rowid",
+        )?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
         let mut out = Vec::new();
         for row in rows {
@@ -129,7 +136,10 @@ impl Store {
     }
 
     /// A vault as the sync engine shows it (its key wrapped under the account key, as
-    /// locally). Records nothing.
+    /// locally; the caller passes the key the engine chose, `Engine::vault_key`). Records
+    /// nothing; writes nothing when it is the same. The key of a vault this store already
+    /// has is never changed (that is key rotation, C1): a different key is refused, so items
+    /// can never become unreadable through what sync shows (review A1d C3).
     pub fn apply_remote_vault(
         &mut self,
         id: Uuid,
@@ -139,33 +149,51 @@ impl Store {
     ) -> Result<()> {
         let account = self.account_key()?.clone();
         let key = crypto::unwrap_vault_key(&account, id, wrapped_key)?;
+        if let Some(current) = self.vault_keys.get(&id) {
+            if current.as_bytes() != key.as_bytes() {
+                return Err(Error::Invalid(format!(
+                    "vault {id}: sync shows another key; it is kept as it is"
+                )));
+            }
+        }
         let info = VaultInfo {
             id,
             name: name.to_owned(),
         };
-        let exists = self
+        let row: Option<(Vec<u8>, i64)> = self
             .conn
             .query_row(
-                "SELECT 1 FROM vaults WHERE id = ?1",
+                "SELECT meta, deleted FROM vaults WHERE id = ?1",
                 [id.to_string()],
-                |_| Ok(()),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )
-            .optional()?
-            .is_some();
-        if exists {
-            let meta = crypto::seal(&account, &serde_json::to_vec(&info)?, &vault_meta_aad(id));
-            self.conn.execute(
-                "UPDATE vaults SET meta = ?2, wrapped_key = ?3, deleted = ?4,
-                     revision = revision + 1 WHERE id = ?1",
-                params![id.to_string(), meta, wrapped_key, deleted as i64],
-            )?;
-        } else {
-            insert_vault(&self.conn, &account, &info, &key)?;
-            self.conn.execute(
-                "UPDATE vaults SET deleted = ?2 WHERE id = ?1",
-                params![id.to_string(), deleted as i64],
-            )?;
+            .optional()?;
+        let tx = self.conn.unchecked_transaction()?;
+        match row {
+            Some((meta, was_deleted)) => {
+                let same_name = crypto::open(&account, &meta, &vault_meta_aad(id))
+                    .ok()
+                    .and_then(|m| serde_json::from_slice::<VaultInfo>(&m).ok())
+                    .is_some_and(|i| i.name == name);
+                if same_name && (was_deleted != 0) == deleted {
+                    return Ok(());
+                }
+                let meta = crypto::seal(&account, &serde_json::to_vec(&info)?, &vault_meta_aad(id));
+                tx.execute(
+                    "UPDATE vaults SET meta = ?2, deleted = ?3, revision = revision + 1
+                     WHERE id = ?1",
+                    params![id.to_string(), meta, deleted as i64],
+                )?;
+            }
+            None => {
+                insert_vault(&tx, &account, &info, &key)?;
+                tx.execute(
+                    "UPDATE vaults SET deleted = ?2 WHERE id = ?1",
+                    params![id.to_string(), deleted as i64],
+                )?;
+            }
         }
+        tx.commit()?;
         self.vault_keys.insert(id, key);
         Ok(())
     }
@@ -196,11 +224,29 @@ impl Store {
             }
         }
         let tx = self.conn.unchecked_transaction()?;
+        // Moved to another vault elsewhere: its attachments follow under the new key
+        // (review A1d C2).
+        if let Some(old) = current
+            .as_ref()
+            .and_then(|(vault, _, _, _)| parse_id(vault).ok())
+            .filter(|old| *old != item.vault_id)
+        {
+            let old_key = self.vault_key(old)?.clone();
+            reencrypt_attachments(&tx, item.id, (old, &old_key), (item.vault_id, &key))?;
+        }
         upsert_item(&tx, &key, item)?;
         tx.execute(
             "UPDATE items SET deleted_at = ?2 WHERE id = ?1",
             params![item.id.to_string(), deleted_at],
         )?;
+        // A live item keeps its vault: one deleted here comes back (review A1d I4).
+        if deleted_at.is_none() {
+            tx.execute(
+                "UPDATE vaults SET deleted = 0, revision = revision + 1
+                 WHERE id = ?1 AND deleted = 1",
+                [item.vault_id.to_string()],
+            )?;
+        }
         tx.commit()?;
         Ok(())
     }
@@ -307,6 +353,12 @@ impl Store {
             )?;
         }
         tx.commit()?;
+        Ok(())
+    }
+
+    pub fn delete_sealed_meta(&mut self, name: &str) -> Result<()> {
+        self.conn
+            .execute("DELETE FROM meta WHERE key = ?1", [sealed_meta_key(name)])?;
         Ok(())
     }
 

@@ -153,6 +153,7 @@ fn convert_item(raw: &Value, now: i64) -> Item {
                 label: id.into(),
                 value,
                 purpose: Some(purpose),
+                extra: Default::default(),
             });
             continue;
         }
@@ -172,6 +173,7 @@ fn convert_item(raw: &Value, now: i64) -> Item {
             label: label.to_owned(),
             value,
             purpose: None,
+            extra: Default::default(),
         });
     }
     if let Some(password) = details["password"].as_str().filter(|s| !s.is_empty()) {
@@ -181,6 +183,7 @@ fn convert_item(raw: &Value, now: i64) -> Item {
                 label: "password".into(),
                 value: FieldValue::Concealed(password.to_owned()),
                 purpose: Some(Purpose::Password),
+                extra: Default::default(),
             });
         }
     }
@@ -198,6 +201,7 @@ fn convert_item(raw: &Value, now: i64) -> Item {
             id: str_of(&section["name"]).to_owned(),
             title: str_of(&section["title"]).to_owned(),
             fields,
+            extra: Default::default(),
         });
     }
     if !extra_login_fields.is_empty() {
@@ -205,6 +209,7 @@ fn convert_item(raw: &Value, now: i64) -> Item {
             id: "login-fields".into(),
             title: "Login fields".into(),
             fields: extra_login_fields,
+            extra: Default::default(),
         });
     }
     ensure_unique_ids(&mut item);
@@ -268,6 +273,7 @@ fn convert_field(field: &Value) -> Vec<Field> {
         label: label.to_owned(),
         value,
         purpose: None,
+        extra: Default::default(),
     };
     if kind == "sshKey" {
         let mut out = Vec::new();

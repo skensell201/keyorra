@@ -938,6 +938,7 @@ fn set_password_field(item: &mut Item, password: &str) {
             label: "password".into(),
             value: FieldValue::Concealed(password.to_owned()),
             purpose: Some(Purpose::Password),
+            extra: Default::default(),
         }),
     }
 }

@@ -61,13 +61,21 @@ pub struct Field {
     pub value: FieldValue,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub purpose: Option<Purpose>,
+    /// Keys written by a newer app, kept as they are (sync, spec §3.6).
+    #[serde(flatten)]
+    pub extra: Extra,
 }
+
+/// Unknown JSON keys of an item part, kept so an older app does not drop them on save.
+pub type Extra = BTreeMap<String, serde_json::Value>;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Section {
     pub id: String,
     pub title: String,
     pub fields: Vec<Field>,
+    #[serde(flatten)]
+    pub extra: Extra,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +89,9 @@ pub struct AttachmentRef {
     pub id: Uuid,
     pub name: String,
     pub size: u64,
+    /// E.g. `copied_from` on a conflict copy's attachment (sync, spec §3.5).
+    #[serde(flatten)]
+    pub extra: Extra,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -198,6 +209,7 @@ impl Item {
                 label: "password".into(),
                 value: FieldValue::Concealed(new.to_owned()),
                 purpose: Some(Purpose::Password),
+                extra: Default::default(),
             }),
         }
         self.updated_at = now;
@@ -272,6 +284,7 @@ mod tests {
             label: "username".into(),
             value: FieldValue::Text("ivan".into()),
             purpose: Some(Purpose::Username),
+            extra: Default::default(),
         });
         item.set_password("first", 100);
         item.sections.push(Section {
@@ -282,7 +295,9 @@ mod tests {
                 label: "one-time password".into(),
                 value: FieldValue::Totp("otpauth://totp/x?secret=JBSWY3DPEHPK3PXP".into()),
                 purpose: None,
+                extra: Default::default(),
             }],
+            extra: Default::default(),
         });
         item
     }
@@ -303,6 +318,28 @@ mod tests {
         // Without them, the JSON is as before.
         let plain = serde_json::to_value(login()).unwrap();
         assert!(plain.get("conflict").is_none());
+    }
+
+    /// Review A1d I6: fields, sections and attachment references keep what a newer app (or
+    /// a conflict copy's `copied_from`) put in them.
+    #[test]
+    fn unknown_fields_survive_in_fields_sections_and_attachments() {
+        let mut json = serde_json::to_value(login()).unwrap();
+        json["fields"][0]["future"] = serde_json::json!(1);
+        json["sections"][0]["future"] = serde_json::json!(2);
+        json["sections"][0]["fields"][0]["future"] = serde_json::json!(3);
+        json["attachments"] = serde_json::json!([{
+            "id": "60606060-6060-6060-6060-606060606060",
+            "name": "a.txt",
+            "size": 1,
+            "copied_from": "61616161-6161-6161-6161-616161616161",
+        }]);
+        let item: Item = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(
+            item.attachments[0].extra["copied_from"],
+            "61616161-6161-6161-6161-616161616161"
+        );
+        assert_eq!(serde_json::to_value(&item).unwrap(), json);
     }
 
     #[test]

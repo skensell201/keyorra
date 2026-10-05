@@ -295,6 +295,7 @@ mod tests {
             label: "one-time password".into(),
             value: FieldValue::Totp("JBSWY3DPEHPK3PXP".into()),
             purpose: None,
+            extra: Default::default(),
         });
         let items = [
             login("GitHub", "x", "https://github.com/login"),

@@ -77,6 +77,7 @@ pub fn parse(text: &str, vault_name: &str, now: i64) -> Result<ImportPlan> {
                 label: "username".into(),
                 value: FieldValue::Text(user.to_owned()),
                 purpose: Some(Purpose::Username),
+                extra: Default::default(),
             });
         }
         if !pass.is_empty() {
@@ -89,6 +90,7 @@ pub fn parse(text: &str, vault_name: &str, now: i64) -> Result<ImportPlan> {
                 label: "one-time password".into(),
                 value: FieldValue::Totp(otp.to_owned()),
                 purpose: None,
+                extra: Default::default(),
             });
         }
         item.notes = raw(c_notes).to_owned();
