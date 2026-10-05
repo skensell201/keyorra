@@ -6,10 +6,15 @@
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use rand::RngCore;
 
 use crate::names::NOSYNC_TMP;
+use crate::safe::ensure_dir;
+
+/// Temp files older than this are left over from a crash and removed when a folder opens.
+pub const STALE_TMP: Duration = Duration::from_secs(3600);
 
 /// Where temp files go: the app's own temp directory when it is on the same volume as the
 /// folder (a rename across volumes is not atomic), otherwise `<folder>/.keyorra-tmp.nosync`.
@@ -21,19 +26,35 @@ pub fn choose_temp_dir(folder: &Path, app_temp: Option<&Path>) -> std::io::Resul
         }
     }
     let inside = folder.join(NOSYNC_TMP);
-    std::fs::create_dir_all(&inside)?;
+    ensure_dir(folder, &inside)?;
     Ok(inside)
+}
+
+/// Removes `*.tmp` files older than [`STALE_TMP`] from a temp directory (review A2 M6).
+pub fn clean_temp_dir(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    let now = SystemTime::now();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let stale = entry
+            .metadata()
+            .ok()
+            .filter(|m| m.is_file())
+            .and_then(|m| m.modified().ok())
+            .and_then(|t| now.duration_since(t).ok())
+            .is_some_and(|age| age > STALE_TMP);
+        if stale && path.extension().is_some_and(|e| e == "tmp") {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
 
 #[cfg(unix)]
 fn same_volume(a: &Path, b: &Path) -> std::io::Result<bool> {
     use std::os::unix::fs::MetadataExt;
     Ok(std::fs::metadata(a)?.dev() == std::fs::metadata(b)?.dev())
-}
-
-#[cfg(not(unix))]
-fn same_volume(_: &Path, _: &Path) -> std::io::Result<bool> {
-    Ok(false)
 }
 
 /// Whether a write replaces an existing file of that name.
@@ -45,8 +66,19 @@ pub enum Mode {
     Replace,
 }
 
-/// Writes `bytes` to `dest` through `tmp_dir`.
-pub fn write_file(tmp_dir: &Path, dest: &Path, bytes: &[u8], mode: Mode) -> std::io::Result<()> {
+/// Writes `bytes` to `dest` (inside `root`) through `tmp_dir`. The directories on the way
+/// are created as plain directories; a symlink among them is an error.
+pub fn write_file(
+    tmp_dir: &Path,
+    root: &Path,
+    dest: &Path,
+    bytes: &[u8],
+    mode: Mode,
+) -> std::io::Result<()> {
+    let dir = dest
+        .parent()
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::InvalidInput, "no directory"))?;
+    ensure_dir(root, dir)?;
     let mut suffix = [0u8; 8];
     rand::thread_rng().fill_bytes(&mut suffix);
     let tmp = tmp_dir.join(format!("{}.tmp", data_encoding::HEXLOWER.encode(&suffix)));
@@ -55,17 +87,12 @@ pub fn write_file(tmp_dir: &Path, dest: &Path, bytes: &[u8], mode: Mode) -> std:
         f.write_all(bytes)?;
         f.sync_all()?;
         drop(f);
-        if let Some(dir) = dest.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
         match mode {
             Mode::New => rename_new(&tmp, dest)?,
             Mode::Replace => std::fs::rename(&tmp, dest)?,
         }
-        if let Some(dir) = dest.parent() {
-            // Makes the rename durable; not every file system can sync a directory.
-            let _ = File::open(dir).and_then(|d| d.sync_all());
-        }
+        // Makes the rename durable; not every file system can sync a directory.
+        let _ = File::open(dir).and_then(|d| d.sync_all());
         Ok(())
     })();
     if result.is_err() {
@@ -74,8 +101,26 @@ pub fn write_file(tmp_dir: &Path, dest: &Path, bytes: &[u8], mode: Mode) -> std:
     result
 }
 
-/// A rename that fails with `AlreadyExists` instead of replacing `to`.
+/// A rename that fails with `AlreadyExists` instead of replacing `to`. Where the file system
+/// cannot do that in one step (SMB, NFS: `ENOTSUP`), a hard link (which fails if the name
+/// exists) and an unlink of the temp file do the same (review A2 M6).
 fn rename_new(from: &Path, to: &Path) -> std::io::Result<()> {
+    match rename_excl(from, to) {
+        Err(e)
+            if matches!(
+                e.raw_os_error(),
+                Some(libc::ENOTSUP) | Some(libc::EINVAL) | Some(libc::ENOSYS)
+            ) =>
+        {
+            std::fs::hard_link(from, to)?;
+            let _ = std::fs::remove_file(from);
+            Ok(())
+        }
+        other => other,
+    }
+}
+
+fn rename_excl(from: &Path, to: &Path) -> std::io::Result<()> {
     use std::ffi::CString;
     use std::os::unix::ffi::OsStrExt;
     let c = |p: &Path| {
@@ -96,13 +141,6 @@ fn rename_new(from: &Path, to: &Path) -> std::io::Result<()> {
             t.as_ptr(),
             libc::RENAME_NOREPLACE,
         )
-    };
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    let rc = {
-        if to.symlink_metadata().is_ok() {
-            return Err(std::io::ErrorKind::AlreadyExists.into());
-        }
-        std::fs::rename(from, to).map(|()| 0)?
     };
     if rc == 0 {
         Ok(())

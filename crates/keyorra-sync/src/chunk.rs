@@ -66,13 +66,18 @@ pub fn seal_chunk(
     Ok(out)
 }
 
+/// The largest valid chunk file: magic, nonce, padded 4 MiB, tag.
+pub fn max_chunk_len() -> usize {
+    MAGIC.len() + NONCE_LEN + padded_len(MAX_CHUNK) + 16
+}
+
 pub fn open_chunk(
     attachment_key: &Key,
     place: &ChunkPlace,
     chunk: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>> {
     // Checked before any decryption: a chunk comes from untrusted storage.
-    if chunk.len() > MAGIC.len() + NONCE_LEN + padded_len(MAX_CHUNK) + 16 {
+    if chunk.len() > max_chunk_len() {
         return Err(malformed("chunk larger than allowed"));
     }
     let sealed = chunk

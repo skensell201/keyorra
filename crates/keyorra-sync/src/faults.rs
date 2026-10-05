@@ -198,6 +198,14 @@ impl<T: Transport> Transport for Faulty<T> {
         self.inner.begin_round()
     }
 
+    fn chunk_state(&self, name: &str) -> Result<Fetched<()>> {
+        self.inner.chunk_state(name)
+    }
+
+    fn end_round(&self) {
+        self.inner.end_round()
+    }
+
     fn append(&self, segment: &[u8]) -> Result<AppendOutcome> {
         let f = self.faults();
         if self.roll(f.fail_before_append) {
@@ -303,6 +311,14 @@ impl<T: Transport> Transport for Rollback<T> {
     fn begin_round(&self) {
         self.inner.begin_round()
     }
+
+    fn chunk_state(&self, name: &str) -> Result<Fetched<()>> {
+        self.inner.chunk_state(name)
+    }
+
+    fn end_round(&self) {
+        self.inner.end_round()
+    }
 }
 
 /// A store that shows one stream from another store: one side of a fork (two histories of
@@ -391,6 +407,14 @@ impl<T: Transport, U: Transport> Transport for Overlay<T, U> {
 
     fn begin_round(&self) {
         self.base.begin_round()
+    }
+
+    fn chunk_state(&self, name: &str) -> Result<Fetched<()>> {
+        self.base.chunk_state(name)
+    }
+
+    fn end_round(&self) {
+        self.base.end_round()
     }
 }
 

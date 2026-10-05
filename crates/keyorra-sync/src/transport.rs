@@ -67,8 +67,20 @@ pub trait Transport {
         let _ = name;
         Ok(Fetched::Missing)
     }
-    /// A sync round starts (a folder transport starts its time budget, plan A2).
+    /// Whether a chunk is here, without reading it (`Pending`: not on this device yet, and
+    /// asked for). Review A2 I6.
+    fn chunk_state(&self, name: &str) -> Result<Fetched<()>> {
+        Ok(match self.get_chunk(name)? {
+            Fetched::Ready(_) => Fetched::Ready(()),
+            Fetched::Pending => Fetched::Pending,
+            Fetched::Missing => Fetched::Missing,
+        })
+    }
+    /// A sync round starts (a folder transport starts its time budget, plan A2). The caller
+    /// that runs rounds calls it, and [`Transport::end_round`] when the round is over.
     fn begin_round(&self) {}
+    /// The round is over: calls until the next round have no round budget (review A2 I1).
+    fn end_round(&self) {}
 }
 
 /// A boxed transport (the app picks the transport at run time).
@@ -121,8 +133,14 @@ impl<T: Transport + ?Sized> Transport for Box<T> {
     fn get_chunk(&self, name: &str) -> Result<Fetched<Vec<u8>>> {
         (**self).get_chunk(name)
     }
+    fn chunk_state(&self, name: &str) -> Result<Fetched<()>> {
+        (**self).chunk_state(name)
+    }
     fn begin_round(&self) {
         (**self).begin_round()
+    }
+    fn end_round(&self) {
+        (**self).end_round()
     }
 }
 

@@ -262,11 +262,11 @@ fn the_temp_directory_is_outside_the_folder_when_on_the_same_volume() {
     std::fs::create_dir_all(&root).unwrap();
     let app_tmp = base.path().join("app-tmp");
     let t = FolderTransport::open(&root, Some(&app_tmp), Arc::new(LocalDisk)).unwrap();
-    assert_eq!(t.tmp, app_tmp);
+    assert_eq!(t.tmp_dir().unwrap(), app_tmp);
     assert!(!root.join(names::NOSYNC_TMP).exists());
     // Without an app temp directory (or on another volume): `.nosync` inside.
     let t = FolderTransport::open(&root, None, Arc::new(LocalDisk)).unwrap();
-    assert_eq!(t.tmp, root.join(names::NOSYNC_TMP));
+    assert_eq!(t.tmp_dir().unwrap(), root.join(names::NOSYNC_TMP));
 }
 
 #[test]
@@ -391,4 +391,183 @@ fn every_file_access_is_coordinated() {
             (Access::Delete, seg),
         ]
     );
+}
+
+// ---- review of A2 ----
+
+/// Review A2 I1: a round's time budget ends with the round; calls between rounds have none.
+#[test]
+fn review_a2_i1_the_budget_ends_with_the_round() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = folder(dir.path()).with_round_budget(Duration::from_millis(30));
+    t.begin_round();
+    std::thread::sleep(Duration::from_millis(60));
+    assert!(t.streams().is_err());
+    t.end_round();
+    assert!(t.streams().is_ok(), "between rounds");
+    assert!(t.put_chunk(b"KYC1 later").is_ok());
+}
+
+#[cfg(unix)]
+fn symlink(target: &Path, link: &Path) {
+    std::os::unix::fs::symlink(target, link).unwrap();
+}
+
+/// Review A2 I2: directories inside the account folder that are symlinks are never
+/// followed: nothing is read, written or deleted outside the folder.
+#[test]
+fn review_a2_i2_symlinked_directories_are_not_followed() {
+    let base = tempfile::tempdir().unwrap();
+    let root = base.path().join("acct");
+    let outside = base.path().join("outside");
+    std::fs::create_dir_all(&outside).unwrap();
+    let t = folder(&root);
+    let segs = some_segments();
+    // A segment of device 0 placed outside, reached through a symlinked stream directory.
+    let outside_stream = outside.join("stream");
+    std::fs::create_dir_all(&outside_stream).unwrap();
+    std::fs::write(outside_stream.join(names::segment_file(1)), &segs[0]).unwrap();
+    symlink(&outside_stream, &root.join("streams").join("01".repeat(16)));
+    assert!(
+        t.streams().unwrap().is_empty(),
+        "a symlinked stream is not a stream"
+    );
+    assert!(t.segments(&device_id(0), 0).unwrap().is_empty());
+    assert!(t.append(&segs[0]).is_err(), "no write through the link");
+    t.delete_segment(&device_id(0), 1).unwrap();
+    assert!(
+        outside_stream.join(names::segment_file(1)).exists(),
+        "nothing deleted outside"
+    );
+    // A symlinked chunk fan-out directory.
+    let outside_chunks = outside.join("chunks");
+    std::fs::create_dir_all(&outside_chunks).unwrap();
+    let name = keyorra_sync::chunk::chunk_name(b"KYC1 x");
+    symlink(&outside_chunks, &root.join("chunks").join(&name[..2]));
+    assert!(t.put_chunk(b"KYC1 x").is_err());
+    assert_eq!(std::fs::read_dir(&outside_chunks).unwrap().count(), 0);
+}
+
+/// Review A2 I3: a symlinked file is not read, and files are read only up to the largest
+/// valid size of their kind.
+#[test]
+fn review_a2_i3_reads_are_bounded_and_do_not_follow_links() {
+    let base = tempfile::tempdir().unwrap();
+    let root = base.path().join("acct");
+    let t = folder(&root);
+    let secret = base.path().join("secret.txt");
+    std::fs::write(&secret, b"not yours").unwrap();
+    let header = format!("00000001-{}.hdr", "01".repeat(16));
+    symlink(&secret, &root.join("account").join(&header));
+    assert!(t.headers().unwrap().is_empty(), "a symlink is not listed");
+    symlink(&secret, &root.join("account").join("root.head"));
+    assert_eq!(t.root_head_file().unwrap(), Fetched::Missing, "nor read");
+    std::fs::remove_file(root.join("account").join(&header)).unwrap();
+    let big = vec![7u8; keyorra_sync::header::MAX_HEADER_FILE_LEN + 1000];
+    std::fs::write(root.join("account").join(&header), &big).unwrap();
+    match &t.headers().unwrap()[0].1 {
+        Fetched::Ready(b) => assert_eq!(b.len(), keyorra_sync::header::MAX_HEADER_FILE_LEN + 1),
+        other => panic!("{other:?}"),
+    }
+}
+
+/// Review A2 M9: a directory with absurdly many entries is an error, not a long stall.
+#[test]
+fn review_a2_m9_listings_are_capped() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = folder(dir.path()).with_max_entries(5);
+    for i in 0..6 {
+        std::fs::create_dir_all(dir.path().join("streams").join(format!("{i:032x}"))).unwrap();
+    }
+    assert!(t.streams().is_err());
+}
+
+/// Review A2 M2: a chunk or snapshot name held by other bytes is reported, not taken as ours.
+#[test]
+fn review_a2_m2_a_squatted_content_name_is_reported() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = folder(dir.path());
+    let name = keyorra_sync::chunk::chunk_name(b"KYC1 real");
+    let path = dir.path().join("chunks").join(&name[..2]).join(&name);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, b"planted").unwrap();
+    assert!(t.put_chunk(b"KYC1 real").is_err());
+    std::fs::remove_file(&path).unwrap();
+    assert_eq!(t.put_chunk(b"KYC1 real").unwrap(), name);
+    assert_eq!(
+        t.put_chunk(b"KYC1 real").unwrap(),
+        name,
+        "the same bytes: fine"
+    );
+}
+
+/// Review A2 M6: temp files left by a crash are cleaned when the folder is opened.
+#[test]
+fn review_a2_m6_old_temp_files_are_cleaned() {
+    let base = tempfile::tempdir().unwrap();
+    let root = base.path().join("acct");
+    let app_tmp = base.path().join("tmp");
+    std::fs::create_dir_all(&app_tmp).unwrap();
+    let old = app_tmp.join("0011223344556677.tmp");
+    let fresh = app_tmp.join("8899aabbccddeeff.tmp");
+    std::fs::write(&old, b"x").unwrap();
+    std::fs::write(&fresh, b"x").unwrap();
+    let two_hours_ago = std::time::SystemTime::now() - Duration::from_secs(7200);
+    std::fs::File::options()
+        .write(true)
+        .open(&old)
+        .unwrap()
+        .set_modified(two_hours_ago)
+        .unwrap();
+    FolderTransport::open(&root, Some(&app_tmp), Arc::new(LocalDisk)).unwrap();
+    assert!(!old.exists());
+    assert!(fresh.exists(), "maybe in use");
+}
+
+/// Review A2 M5: looking at a folder to join creates nothing in it.
+#[test]
+fn review_a2_m5_probing_a_folder_creates_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = FolderTransport::probe(dir.path(), None, Arc::new(LocalDisk)).unwrap();
+    assert!(t.headers().unwrap().is_empty());
+    assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
+}
+
+/// Review A2 I6: whether a chunk is here is asked without reading it, and a missing one is
+/// requested.
+#[test]
+fn review_a2_i6_chunk_state_does_not_read() {
+    #[derive(Default)]
+    struct Reads(Cloud, Mutex<usize>);
+    impl Availability for Reads {
+        fn state(&self, path: &Path) -> FileState {
+            self.0.state(path)
+        }
+        fn request_download(&self, path: &Path) {
+            self.0.request_download(path)
+        }
+        fn coordinate(
+            &self,
+            _: &Path,
+            access: Access,
+            f: &mut dyn FnMut() -> std::io::Result<()>,
+        ) -> std::io::Result<()> {
+            if access == Access::Read {
+                *self.1.lock().unwrap() += 1;
+            }
+            f()
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let a = Arc::new(Reads::default());
+    let t = FolderTransport::open(dir.path(), None, a.clone()).unwrap();
+    let here = t.put_chunk(b"KYC1 here").unwrap();
+    let away = t.put_chunk(b"KYC1 away").unwrap();
+    let away_path = dir.path().join("chunks").join(&away[..2]).join(&away);
+    a.0.evicted.lock().unwrap().insert(away_path.clone());
+    assert_eq!(t.chunk_state(&here).unwrap(), Fetched::Ready(()));
+    assert_eq!(t.chunk_state(&away).unwrap(), Fetched::Pending);
+    assert_eq!(t.chunk_state(&"0".repeat(64)).unwrap(), Fetched::Missing);
+    assert_eq!(*a.1.lock().unwrap(), 0, "nothing read");
+    assert!(a.0.requested.lock().unwrap().contains(&away_path));
 }

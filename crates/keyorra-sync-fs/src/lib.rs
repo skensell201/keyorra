@@ -8,6 +8,7 @@
 
 pub mod avail;
 pub mod names;
+pub mod safe;
 pub mod write;
 
 #[cfg(test)]
@@ -18,14 +19,16 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use keyorra_sync::chunk::chunk_name;
-use keyorra_sync::segment::{SegmentHeader, HEADER_LEN};
-use keyorra_sync::snapshot::{snapshot_name, SnapshotHeader};
+use keyorra_sync::header::MAX_HEADER_FILE_LEN;
+use keyorra_sync::segment::{max_segment_len, SegmentHeader, HEADER_LEN};
+use keyorra_sync::snapshot::{max_snapshot_len, snapshot_name, SnapshotHeader};
 use keyorra_sync::transport::{AppendOutcome, Fetched, Transport};
 use keyorra_sync::{DeviceId, Error, Result};
 
 pub use avail::{Access, Availability, FileState, LocalDisk};
 use names::*;
-use write::{choose_temp_dir, write_file, Mode};
+use safe::{dir_is_plain, read_limited};
+use write::{choose_temp_dir, clean_temp_dir, write_file, Mode};
 
 const README_TEXT: &str = "This folder holds a Keyorra account, end-to-end encrypted.\n\
 Do not edit, move or rename the files in it: Keyorra on your devices reads and writes them.\n\
@@ -34,13 +37,24 @@ The format is public: docs/sync-protocol.md in Keyorra's source code.\n";
 /// How long one sync round may spend in the folder by default.
 pub const ROUND_BUDGET: Duration = Duration::from_secs(30);
 
+/// More entries than this in one directory is an error (review A2 M9).
+pub const MAX_ENTRIES: usize = 200_000;
+
+/// The largest `root.head` file read.
+pub const MAX_ROOT_HEAD_LEN: usize = 4 * 1024;
+
+use keyorra_sync::chunk::max_chunk_len;
+
 /// One account's folder.
 pub struct FolderTransport {
     root: PathBuf,
-    tmp: PathBuf,
+    app_temp: Option<PathBuf>,
+    /// Chosen at the first write (looking at a folder to join creates nothing).
+    tmp: Mutex<Option<PathBuf>>,
     availability: Arc<dyn Availability>,
     budget: Duration,
     deadline: Mutex<Option<Instant>>,
+    max_entries: usize,
 }
 
 fn io(context: &str, e: std::io::Error) -> Error {
@@ -49,28 +63,66 @@ fn io(context: &str, e: std::io::Error) -> Error {
 
 impl FolderTransport {
     /// Opens the account folder `root`, creating its directories (and the README) when
-    /// missing. `app_temp` is the app's temp directory (used when on the same volume).
+    /// missing, and removing temp files left by a crash. `app_temp` is the app's temp
+    /// directory (used when on the same volume).
     pub fn open(
         root: &Path,
         app_temp: Option<&Path>,
         availability: Arc<dyn Availability>,
     ) -> Result<FolderTransport> {
+        std::fs::create_dir_all(root).map_err(|e| io("creating the folder", e))?;
+        let t = Self::probe(root, app_temp, availability)?;
         for dir in [ACCOUNT, STREAMS, SNAPSHOTS, CHUNKS] {
-            std::fs::create_dir_all(root.join(dir)).map_err(|e| io("creating the folder", e))?;
+            safe::ensure_dir(root, &root.join(dir)).map_err(|e| io("creating the folder", e))?;
         }
-        let tmp = choose_temp_dir(root, app_temp).map_err(|e| io("temp directory", e))?;
-        let t = FolderTransport {
+        let tmp = t.tmp_dir().map_err(|e| io("temp directory", e))?;
+        clean_temp_dir(&tmp);
+        let readme = root.join(README);
+        if readme.symlink_metadata().is_err() {
+            let _ = t.write(&readme, README_TEXT.as_bytes(), Mode::New);
+        }
+        Ok(t)
+    }
+
+    /// Looks at an existing folder without creating anything in it (choosing the folder to
+    /// join, review A2 M5). Writing later works as with [`FolderTransport::open`].
+    pub fn probe(
+        root: &Path,
+        app_temp: Option<&Path>,
+        availability: Arc<dyn Availability>,
+    ) -> Result<FolderTransport> {
+        let meta = std::fs::symlink_metadata(root).map_err(|e| io("the sync folder", e))?;
+        if !meta.is_dir() {
+            return Err(Error::Transport(format!(
+                "{} is not a folder",
+                root.display()
+            )));
+        }
+        Ok(FolderTransport {
             root: root.to_path_buf(),
-            tmp,
+            app_temp: app_temp.map(Path::to_path_buf),
+            tmp: Mutex::new(None),
             availability,
             budget: ROUND_BUDGET,
             deadline: Mutex::new(None),
-        };
-        let readme = root.join(README);
-        if readme.symlink_metadata().is_err() {
-            let _ = write_file(&t.tmp, &readme, README_TEXT.as_bytes(), Mode::New);
+            max_entries: MAX_ENTRIES,
+        })
+    }
+
+    fn tmp_dir(&self) -> std::io::Result<PathBuf> {
+        let mut tmp = self.tmp.lock().unwrap();
+        if let Some(t) = &*tmp {
+            return Ok(t.clone());
         }
-        Ok(t)
+        let chosen = choose_temp_dir(&self.root, self.app_temp.as_deref())?;
+        *tmp = Some(chosen.clone());
+        Ok(chosen)
+    }
+
+    /// A smaller cap on directory entries (tests).
+    pub fn with_max_entries(mut self, max: usize) -> Self {
+        self.max_entries = max;
+        self
     }
 
     /// A shorter or longer time budget per round (tests, slow network shares).
@@ -97,6 +149,11 @@ impl FolderTransport {
     /// the names they stand for (`true` = placeholder).
     fn list(&self, dir: &Path) -> Result<Vec<(String, bool)>> {
         self.check_time()?;
+        // A symlinked directory on the way is not followed: it lists as empty.
+        match dir_is_plain(&self.root, dir) {
+            Ok(true) => {}
+            Ok(false) | Err(_) => return Ok(Vec::new()),
+        }
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -104,6 +161,17 @@ impl FolderTransport {
         };
         let mut out = Vec::new();
         for entry in entries.flatten() {
+            if out.len() >= self.max_entries {
+                return Err(Error::Transport(format!(
+                    "{} holds more than {} entries",
+                    dir.display(),
+                    self.max_entries
+                )));
+            }
+            // Symlinks are never entries of the folder (review A2 I2).
+            if entry.file_type().is_ok_and(|t| t.is_symlink()) {
+                continue;
+            }
             let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
                 continue;
             };
@@ -115,31 +183,49 @@ impl FolderTransport {
         Ok(out)
     }
 
-    /// Reads a file if it is on this Mac; otherwise asks for it and says `Pending`. An empty
-    /// file is a write still in progress (`Pending`).
-    fn fetch(&self, path: &Path) -> Result<Fetched<Vec<u8>>> {
+    /// Whether a file is here (`Ready(())`), not on this Mac yet (asked for: `Pending`), or
+    /// missing, without reading it.
+    fn state(&self, path: &Path) -> Result<Fetched<()>> {
         self.check_time()?;
+        let in_plain_dir = path
+            .parent()
+            .is_some_and(|d| matches!(dir_is_plain(&self.root, d), Ok(true)));
+        if !in_plain_dir {
+            return Ok(Fetched::Missing);
+        }
         let placeholder = path
             .file_name()
             .and_then(|n| n.to_str())
             .map(|n| path.with_file_name(placeholder_name(n)));
-        match self.availability.state(path) {
-            FileState::Ready => {}
+        Ok(match self.availability.state(path) {
+            FileState::Ready => Fetched::Ready(()),
             FileState::NotDownloaded => {
                 self.availability.request_download(path);
-                return Ok(Fetched::Pending);
+                Fetched::Pending
             }
             FileState::Missing => {
-                if placeholder.is_some_and(|p| p.symlink_metadata().is_ok()) {
+                if placeholder.is_some_and(|p| p.symlink_metadata().is_ok_and(|m| m.is_file())) {
                     self.availability.request_download(path);
-                    return Ok(Fetched::Pending);
+                    Fetched::Pending
+                } else {
+                    Fetched::Missing
                 }
-                return Ok(Fetched::Missing);
             }
+        })
+    }
+
+    /// Reads a file if it is on this Mac (at most `limit + 1` bytes, never through a
+    /// symlink); otherwise asks for it and says `Pending`. An empty file is a write still in
+    /// progress (`Pending`).
+    fn fetch(&self, path: &Path, limit: usize) -> Result<Fetched<Vec<u8>>> {
+        match self.state(path)? {
+            Fetched::Ready(()) => {}
+            Fetched::Pending => return Ok(Fetched::Pending),
+            Fetched::Missing => return Ok(Fetched::Missing),
         }
         let mut bytes = Vec::new();
         let read = self.availability.coordinate(path, Access::Read, &mut || {
-            bytes = std::fs::read(path)?;
+            bytes = read_limited(path, limit)?;
             Ok(())
         });
         match read {
@@ -167,9 +253,31 @@ impl FolderTransport {
     }
 
     fn write(&self, dest: &Path, bytes: &[u8], mode: Mode) -> std::io::Result<()> {
+        let tmp = self.tmp_dir()?;
         self.availability.coordinate(dest, Access::Write, &mut || {
-            write_file(&self.tmp, dest, bytes, mode)
+            write_file(&tmp, &self.root, dest, bytes, mode)
         })
+    }
+
+    /// Stores content-addressed bytes (chunks, snapshots) under `dest`: a name that is taken
+    /// must hold the same bytes (its name is their hash), otherwise it is reported (review A2
+    /// M2).
+    fn write_content(&self, dest: &Path, bytes: &[u8], limit: usize) -> Result<()> {
+        match self.write(dest, bytes, Mode::New) {
+            Ok(()) => Ok(()),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                match self.fetch(dest, limit)? {
+                    Fetched::Ready(existing) if existing == bytes => Ok(()),
+                    Fetched::Ready(_) => Err(Error::Transport(format!(
+                        "{} holds other content than its name says",
+                        dest.display()
+                    ))),
+                    // Not here yet: it will be compared once it is.
+                    _ => Ok(()),
+                }
+            }
+            Err(e) => Err(io("writing to the folder", e)),
+        }
     }
 
     fn remove(&self, path: &Path) -> Result<()> {
@@ -181,7 +289,11 @@ impl FolderTransport {
                     .unwrap_or_default(),
             )),
         ] {
-            if p.symlink_metadata().is_err() {
+            // Only in a plain directory of the folder, and never through a symlink.
+            let plain = p
+                .parent()
+                .is_some_and(|d| matches!(dir_is_plain(&self.root, d), Ok(true)));
+            if !plain || p.symlink_metadata().is_err() {
                 continue;
             }
             let removed = self
@@ -229,6 +341,10 @@ impl Transport for FolderTransport {
         *self.deadline.lock().unwrap() = Some(Instant::now() + self.budget);
     }
 
+    fn end_round(&self) {
+        *self.deadline.lock().unwrap() = None;
+    }
+
     fn streams(&self) -> Result<Vec<DeviceId>> {
         Ok(self
             .list(&self.root.join(STREAMS))?
@@ -242,7 +358,7 @@ impl Transport for FolderTransport {
         let mut out = Vec::new();
         for seq in self.segment_files(stream)? {
             if seq > after_seq {
-                out.push(self.fetch(&dir.join(segment_file(seq)))?);
+                out.push(self.fetch(&dir.join(segment_file(seq)), max_segment_len())?);
             }
         }
         Ok(out)
@@ -253,7 +369,10 @@ impl Transport for FolderTransport {
         let Some(newest) = self.segment_files(stream)?.last().copied() else {
             return Ok(None);
         };
-        match self.fetch(&self.stream_dir(stream).join(segment_file(newest)))? {
+        match self.fetch(
+            &self.stream_dir(stream).join(segment_file(newest)),
+            max_segment_len(),
+        )? {
             Fetched::Ready(bytes) if bytes.len() >= HEADER_LEN => {
                 Ok(Some(SegmentHeader::parse(&bytes)?.last_seq))
             }
@@ -271,7 +390,7 @@ impl Transport for FolderTransport {
             .join(segment_file(header.first_seq));
         self.check_time()?;
         let compare = |this: &Self| -> Result<AppendOutcome> {
-            match this.fetch(&path)? {
+            match this.fetch(&path, max_segment_len())? {
                 Fetched::Ready(existing) if existing == segment => Ok(AppendOutcome::AlreadyThere),
                 Fetched::Ready(_) => Ok(AppendOutcome::Conflict),
                 Fetched::Missing => Err(Error::Transport("the segment went away".into())),
@@ -312,7 +431,7 @@ impl Transport for FolderTransport {
         names
             .into_iter()
             .map(|n| {
-                let f = self.fetch(&dir.join(&n))?;
+                let f = self.fetch(&dir.join(&n), MAX_HEADER_FILE_LEN)?;
                 Ok((n, f))
             })
             .collect()
@@ -354,7 +473,7 @@ impl Transport for FolderTransport {
 
     fn get_snapshot(&self, name: &str) -> Result<Fetched<Vec<u8>>> {
         match self.snapshot_path(name)? {
-            Some(p) => self.fetch(&p),
+            Some(p) => self.fetch(&p, max_snapshot_len()),
             None => Ok(Fetched::Missing),
         }
     }
@@ -368,12 +487,8 @@ impl Transport for FolderTransport {
             .join(SNAPSHOTS)
             .join(device_dir(&author))
             .join(snapshot_file(&name));
-        match self.write(&path, bytes, Mode::New) {
-            Ok(()) => Ok(name),
-            // Content-addressed: the same name is the same bytes.
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(name),
-            Err(e) => Err(io("writing a snapshot", e)),
-        }
+        self.write_content(&path, bytes, max_snapshot_len())?;
+        Ok(name)
     }
 
     fn delete_snapshot(&self, name: &str) -> Result<()> {
@@ -384,7 +499,7 @@ impl Transport for FolderTransport {
     }
 
     fn root_head_file(&self) -> Result<Fetched<Vec<u8>>> {
-        self.fetch(&self.root.join(ACCOUNT).join(ROOT_HEAD))
+        self.fetch(&self.root.join(ACCOUNT).join(ROOT_HEAD), MAX_ROOT_HEAD_LEN)
     }
 
     fn put_root_head_file(&self, bytes: &[u8]) -> Result<()> {
@@ -400,17 +515,21 @@ impl Transport for FolderTransport {
     fn put_chunk(&self, bytes: &[u8]) -> Result<String> {
         let name = chunk_name(bytes);
         self.check_time()?;
-        match self.write(&self.chunk_path(&name), bytes, Mode::New) {
-            Ok(()) => Ok(name),
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => Ok(name),
-            Err(e) => Err(io("writing a chunk", e)),
-        }
+        self.write_content(&self.chunk_path(&name), bytes, max_chunk_len())?;
+        Ok(name)
     }
 
     fn get_chunk(&self, name: &str) -> Result<Fetched<Vec<u8>>> {
         if !is_chunk_name(name) {
             return Ok(Fetched::Missing);
         }
-        self.fetch(&self.chunk_path(name))
+        self.fetch(&self.chunk_path(name), max_chunk_len())
+    }
+
+    fn chunk_state(&self, name: &str) -> Result<Fetched<()>> {
+        if !is_chunk_name(name) {
+            return Ok(Fetched::Missing);
+        }
+        self.state(&self.chunk_path(name))
     }
 }

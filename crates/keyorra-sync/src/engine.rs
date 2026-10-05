@@ -1455,7 +1455,6 @@ impl<R: RngCore + CryptoRng> Engine<R> {
     /// returned afterwards. Alarms do not make a round fail: a rollback or fork pauses only
     /// its stream (the own stream: nothing is pushed), see [`Engine::alarms`].
     pub fn sync(&mut self, transport: &impl Transport, wall_ms: u64) -> Result<()> {
-        transport.begin_round();
         if self.sent.seq > 0 && !self.keys.holds(&self.device) {
             self.retire(RetireReason::KeyMissing, wall_ms)?;
         }
