@@ -467,3 +467,52 @@ fn a_missing_device_key_retires_the_id() {
     c.assert_converged();
     assert!(titles(&c.devices[0].view()).contains("after restore"));
 }
+
+/// An outbox store whose saves fail while `failing` is set.
+#[derive(Clone, Default)]
+struct FlakyOutbox(std::sync::Arc<std::sync::atomic::AtomicBool>);
+
+impl OutboxStore for FlakyOutbox {
+    fn save(&mut self, _: &OutboxState) -> Result<()> {
+        if self.0.load(std::sync::atomic::Ordering::SeqCst) {
+            Err(Error::Transport("disk full".into()))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+#[test]
+fn nothing_is_appended_while_the_outbox_cannot_be_saved() {
+    let (mut c, vault) = shared(2);
+    let flaky = FlakyOutbox::default();
+    c.devices[1].set_outbox_store(Box::new(flaky.clone()));
+    flaky.0.store(true, std::sync::atomic::Ordering::SeqCst);
+    let before = c.store.head(&device_id(1)).unwrap();
+    save(&mut c, 1, vault, ITEM, "unsaved");
+    c.sync(1).unwrap();
+    assert_eq!(c.store.head(&device_id(1)).unwrap(), before, "not appended");
+    assert!(c.devices[1]
+        .take_events()
+        .iter()
+        .any(|e| matches!(e, Event::OutboxNotSaved(_))));
+    flaky.0.store(false, std::sync::atomic::Ordering::SeqCst);
+    c.sync(1).unwrap();
+    c.sync(0).unwrap();
+    assert!(titles(&c.devices[0].view()).contains("unsaved"));
+}
+
+#[test]
+fn an_inconsistent_outbox_state_is_refused() {
+    let (mut c, vault) = shared(2);
+    save(&mut c, 1, vault, ITEM, "queued");
+    let good = c.devices[1].outbox_state();
+    let mut restarted = clone_of(&c.devices[1]);
+    let mut bad = good.clone();
+    bad.next_seq += 1;
+    assert!(restarted.restore_outbox(bad).is_err());
+    let mut bad = good.clone();
+    bad.own_hashes.clear();
+    assert!(restarted.restore_outbox(bad).is_err());
+    restarted.restore_outbox(good).unwrap();
+}

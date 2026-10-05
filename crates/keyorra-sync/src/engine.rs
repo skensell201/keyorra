@@ -301,6 +301,8 @@ pub enum Event {
     RootSilent {
         since_ms: u64,
     },
+    /// The outbox could not be persisted; nothing is appended until it can.
+    OutboxNotSaved(String),
     /// A rollback of `stream` that a snapshot already covers: nothing is lost, no alarm.
     RollbackRepaired {
         stream: DeviceId,
@@ -422,6 +424,8 @@ pub struct Engine<R> {
     /// Own confirmed segments, byte for byte, by first position: what "Restore from this
     /// Mac" appends again after the store lost them (A1d persists them with the outbox).
     own_segments: BTreeMap<u64, Vec<u8>>,
+    /// The last outbox save failed: nothing is appended until one succeeds.
+    outbox_unsaved: bool,
     bootstrap_tried: bool,
     /// The own head and wall time last written to the root head file (main device).
     root_head_written: (u64, u64),
@@ -539,6 +543,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             last_snapshot_ms: None,
             revoked_since_snapshot: false,
             own_segments: BTreeMap::new(),
+            outbox_unsaved: false,
             bootstrap_tried: false,
             root_head_written: (0, 0),
             root_time: None,
@@ -2141,6 +2146,9 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                 reason: e.to_string(),
             }),
         }
+        if self.outbox_unsaved && !self.save_outbox() {
+            return;
+        }
         loop {
             if self.unsent.is_none() {
                 if self.outbox.is_empty() {
@@ -2167,7 +2175,9 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                     last_hash,
                 });
                 // Persisted before the append, so a restart retries these exact bytes.
-                self.save_outbox();
+                if !self.save_outbox() {
+                    return;
+                }
             }
             let unsent = self.unsent.as_ref().expect("set above");
             match transport.append(&unsent.bytes) {

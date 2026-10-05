@@ -250,7 +250,8 @@ impl DeviceKeys for MemoryKeys {
 pub struct MemoryOutbox(pub Arc<Mutex<Option<OutboxState>>>);
 
 impl OutboxStore for MemoryOutbox {
-    fn save(&mut self, state: &OutboxState) {
+    fn save(&mut self, state: &OutboxState) -> Result<()> {
         *self.0.lock().unwrap() = Some(state.clone());
+        Ok(())
     }
 }

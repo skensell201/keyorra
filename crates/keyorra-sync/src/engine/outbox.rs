@@ -19,14 +19,18 @@ pub struct OutboxState {
 
 /// Where A1d keeps [`OutboxState`] (in the same transaction as the local change).
 pub trait OutboxStore: Send {
-    fn save(&mut self, state: &OutboxState);
+    /// Persists `state`. On an error the engine appends nothing until a save succeeds, so it
+    /// never sends what a restart would not know about (review minor).
+    fn save(&mut self, state: &OutboxState) -> Result<()>;
 }
 
 /// Nothing is persisted (tests, and until A1d).
 pub struct NoOutboxStore;
 
 impl OutboxStore for NoOutboxStore {
-    fn save(&mut self, _: &OutboxState) {}
+    fn save(&mut self, _: &OutboxState) -> Result<()> {
+        Ok(())
+    }
 }
 
 impl<R: RngCore + CryptoRng> Engine<R> {
@@ -45,10 +49,29 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         }
     }
 
-    /// Continues from a persisted state after a restart (A1d also restores the fold).
+    /// Continues from a persisted state after a restart (A1d also restores the fold). The
+    /// state must be consistent: positions add up, and every own position from the confirmed
+    /// one on has its chain hash (the unsent segment's end included).
     pub fn restore_outbox(&mut self, state: OutboxState) -> Result<()> {
         if state.device != self.device {
             return Err(Error::Refused("outbox of another device".into()));
+        }
+        let after_unsent = state.unsent.as_ref().map_or(state.sent.seq, |u| u.last_seq);
+        if state.next_seq != after_unsent + state.outbox.len() as u64 + 1 {
+            return Err(Error::Refused("outbox positions do not add up".into()));
+        }
+        let covered =
+            (state.sent.seq.max(1)..state.next_seq).all(|seq| state.own_hashes.contains_key(&seq));
+        let sent_ok =
+            state.sent.seq == 0 || state.own_hashes.get(&state.sent.seq) == Some(&state.sent.hash);
+        let unsent_ok = state
+            .unsent
+            .as_ref()
+            .is_none_or(|u| state.own_hashes.get(&u.last_seq) == Some(&u.last_hash));
+        if !covered || !sent_ok || !unsent_ok {
+            return Err(Error::Refused(
+                "outbox chain hashes are missing or wrong".into(),
+            ));
         }
         let outbox = state
             .outbox
@@ -63,8 +86,19 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         Ok(())
     }
 
-    pub(super) fn save_outbox(&mut self) {
+    /// Saves the state; returns whether it was saved (otherwise nothing is appended).
+    pub(super) fn save_outbox(&mut self) -> bool {
         let state = self.outbox_state();
-        self.outbox_store.save(&state);
+        match self.outbox_store.save(&state) {
+            Ok(()) => {
+                self.outbox_unsaved = false;
+                true
+            }
+            Err(e) => {
+                self.outbox_unsaved = true;
+                self.events.push(Event::OutboxNotSaved(e.to_string()));
+                false
+            }
+        }
     }
 }
