@@ -346,9 +346,11 @@ behind, other devices' records are **unconfirmed** and an alarm says so (pausing
 until the stream catches up; a different hash at that position is a fork of the root. The
 advertised head only moves forward. If `at_ms` has not advanced for 7 days the device warns
 that the root looks silent (a frozen or replayed file, or the root is off). `pending` lists
-the root's `revoke` entries written but not yet confirmed, with their positions: a reader
-cuts each such approved device at once at its `last_valid_seq` (provisionally); the entry in
-the root's stream settles it. `devices` counts the approved devices other than the root; a
+every `revoke` entry of the root, with its position (a short list): a reader that has not
+received that position cuts each such approved device at once at its `last_valid_seq`
+(provisionally), so neither a squatter nor a deleter of the root's segments can hide a
+removal; the entry in the root's stream settles it, and if the settled cut is higher (the
+root's checkpoint had seen more), the records skipped meanwhile are read again. `devices` counts the approved devices other than the root; a
 join without a setup code is refused while it is not zero.
 
 **Snapshots** count only if the root wrote them: bootstrap and anchoring use root snapshots

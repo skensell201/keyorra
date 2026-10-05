@@ -457,7 +457,8 @@ other device's approvals or removals count; there is nothing to resolve between 
   in the root's own latest checkpoint before the `Revoke`, counted only where that position
   matches the reader's chain. Removing a device that was never approved means none of its
   entries count. A cut is set once and never moves. **Removals also travel in the root head
-  file** (below) while they are written but not yet confirmed in the main device's stream:
+  file** (below), all of them (a short list), not only until they are confirmed in the main
+  device's stream (review G1):
   readers cut the device at once and the stream's entry settles it, so someone squatting the
   main device's next position cannot keep a stolen device admitted (review F1). **Removing a
   stolen Mac also means cutting its access to the store**: sign it out of iCloud or remove

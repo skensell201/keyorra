@@ -222,7 +222,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
 
     /// The main device writes its confirmed head for everyone to compare with: when it moved
     /// or its pending removals changed, and at least daily while online (a heartbeat,
-    /// review I1). Removals written but not yet confirmed travel in it too (review F1).
+    /// review I1). Every removal travels in it too (reviews F1, G1): a short list.
     pub(super) fn write_root_head_file(&mut self, transport: &impl Transport, wall_ms: u64) {
         if !self.is_root() || self.sent.seq == 0 {
             return;
@@ -230,7 +230,9 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         let pending: Vec<(u64, Entry)> = self
             .root_log
             .iter()
-            .filter(|(seq, e)| *seq > self.sent.seq && matches!(e, Entry::Revoke { .. }))
+            // Every removal, not only unconfirmed ones: a keyless deleter who removes the
+            // main device's segments from a Revoke on must not hide it (review G1).
+            .filter(|(_, e)| matches!(e, Entry::Revoke { .. }))
             .cloned()
             .collect();
 

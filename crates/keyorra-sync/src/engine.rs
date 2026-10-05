@@ -1866,7 +1866,27 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                 .filter(|h| hashes.get(d).and_then(|x| x.get(&h.seq)) == Some(&h.hash))
                 .map_or(0, |h| h.seq)
         };
+        // A provisional cut (from the head file) the stream's Revoke may raise: the records
+        // skipped past it are read again (review G1).
+        let before = match entry {
+            Entry::Revoke { device, .. } => self
+                .trust
+                .device(device)
+                .and_then(|d| d.cut)
+                .map(|c| (*device, c)),
+            _ => None,
+        };
         let result = self.trust.apply_root(seq, entry, seen);
+        if let (Ok(true), Some((device, old))) = (&result, before) {
+            if self
+                .trust
+                .device(&device)
+                .and_then(|d| d.cut)
+                .is_some_and(|c| c > old)
+            {
+                self.reread_after(device, old);
+            }
+        }
         if result.is_ok() && !self.root_log.iter().any(|(s, _)| *s == seq) {
             self.root_log.push((seq, entry.clone()));
         }
@@ -1883,6 +1903,35 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                 seq,
                 reason: e.to_string(),
             }),
+        }
+    }
+
+    /// Receives `stream` again after position `seq` (a cut rose above records skipped past
+    /// it): what is waiting from there is dropped and read anew.
+    fn reread_after(&mut self, stream: DeviceId, seq: u64) {
+        let hash = if seq == 0 {
+            Some(chain_genesis(&self.account_id, &stream))
+        } else {
+            self.hashes.get(&stream).and_then(|h| h.get(&seq)).copied()
+        };
+        let Some(hash) = hash else {
+            return;
+        };
+        for ((s, _), queue) in self.lanes.iter_mut() {
+            if *s == stream {
+                queue.retain(|p| p.seq <= seq);
+            }
+        }
+        self.lanes.retain(|_, q| !q.is_empty());
+        let left = self
+            .lanes
+            .iter()
+            .filter(|((s, _), _)| *s == stream)
+            .map(|(_, q)| q.len())
+            .sum();
+        self.pending_count.insert(stream, left);
+        if self.heads.get(&stream).is_some_and(|h| h.seq > seq) {
+            self.heads.insert(stream, Head { seq, hash });
         }
     }
 

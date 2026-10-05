@@ -1255,3 +1255,105 @@ fn review_f3_a_frozen_partitioned_view_is_noticed_even_with_no_other_movement() 
     }
     assert!(warned);
 }
+
+#[test]
+fn review_g1_deleting_the_roots_segments_cannot_hide_a_removal() {
+    let mut c = Cluster::new(3, 1, Faults::NONE);
+    let vault = c.devices[0].create_vault("Personal", START_MS).unwrap();
+    c.heal();
+    let from = c.devices[0].sent.seq + 1;
+    c.devices[0].revoke(device_id(2), c.clocks[0]).unwrap();
+    c.devices[2].forging = true;
+    for round in 0..4u8 {
+        c.sync(0).unwrap();
+        // A keyless deleter removes the main device's segments from the Revoke on.
+        let gone: Vec<u64> = c
+            .store
+            .segments(&device_id(0), from - 1)
+            .unwrap()
+            .into_iter()
+            .filter_map(|f| match f {
+                Fetched::Ready(b) => SegmentHeader::parse(&b).ok().map(|h| h.first_seq),
+                _ => None,
+            })
+            .collect();
+        for first in gone {
+            c.store.remove_segment(&device_id(0), first);
+        }
+        // The removed device keeps editing.
+        let id = Uuid::from_bytes([0x70 + round; 16]);
+        let json = Cluster::item_json(id, "after", &[]);
+        c.devices[2]
+            .save_item(vault, id, &json, c.clocks[2])
+            .unwrap();
+        c.devices[2].push(&c.store);
+        c.sync(1).unwrap();
+        assert!(
+            c.devices[1]
+                .trust()
+                .device(&device_id(2))
+                .unwrap()
+                .cut
+                .is_some(),
+            "round {round}"
+        );
+        assert!(!c.devices[1].view().items.contains_key(&id));
+    }
+}
+
+#[test]
+fn review_g1_a_provisional_cut_that_rises_rereads_the_skipped_records() {
+    let mut c = Cluster::new(3, 1, Faults::NONE);
+    let vault = c.devices[0].create_vault("Personal", START_MS).unwrap();
+    c.heal();
+    // Device 2 writes two segments; the main device receives both.
+    let low = c.devices[2].sent.seq;
+    let first = Uuid::from_bytes([0x71; 16]);
+    let json = Cluster::item_json(first, "counts", &[]);
+    c.devices[2]
+        .save_item(vault, first, &json, c.clocks[2])
+        .unwrap();
+    c.sync(2).unwrap();
+    c.sync(0).unwrap();
+    let high = c.devices[0].heads[&device_id(2)];
+    let low_hash = c.devices[0].hashes[&device_id(2)][&low];
+    // The main device's checkpoint lists device 2 at `high`; its Revoke claims only `low`,
+    // so the cut is `high` (what it had seen). Its head file announced the Revoke first.
+    let mut heads = c.devices[0].heads.clone();
+    heads.insert(device_id(2), high);
+    let revoke = Entry::Revoke {
+        device: device_id(2),
+        last_valid_seq: low,
+        last_valid_hash: low_hash,
+    };
+    let at = c.devices[0].next_seq;
+    let file = crate::root_head::seal_root_head(
+        &ACCOUNT_ID,
+        &crate::root_head::RootHead {
+            head: c.devices[0].sent,
+            at_ms: c.clocks[0],
+            devices: 2,
+            pending: vec![(at + 1, revoke.clone())],
+        },
+        &signer(0),
+    );
+    c.store.put_root_head_file(&file).unwrap();
+    // Device 1 learns of the Revoke from the file alone, then reads device 2's records.
+    c.sync(1).unwrap();
+    assert_eq!(
+        c.devices[1].trust().device(&device_id(2)).unwrap().cut,
+        Some(low)
+    );
+    assert!(!c.devices[1].view().items.contains_key(&first));
+    // Now the stream delivers the checkpoint and the Revoke: the cut rises to `high`, and the
+    // record skipped meanwhile is read again.
+    c.devices[0].queue(Entry::Checkpoint(heads));
+    c.devices[0].queue(revoke);
+    c.devices[0].push(&c.store);
+    c.sync(1).unwrap();
+    assert_eq!(
+        c.devices[1].trust().device(&device_id(2)).unwrap().cut,
+        Some(high.seq)
+    );
+    assert_eq!(title(&c.devices[1].view(), first), "counts");
+}
