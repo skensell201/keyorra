@@ -644,6 +644,7 @@ bytes.
 Keyorra/
   README-KEYORRA.txt                 plaintext: what this folder is, "don't edit", link to the protocol doc
   account/<epoch:08x>-<device>.hdr   account headers
+  account/root.head                  the main device's signed head (rewritten after every confirmed append)
   streams/<device hex>/<first_seq:016x>.seg
   snapshots/<device hex>/<sha256 hex>.snap
   chunks/<2 hex>/<64 hex>            attachment chunks, 256-way fan-out
