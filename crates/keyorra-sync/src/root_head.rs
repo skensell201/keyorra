@@ -3,8 +3,17 @@
 //! store withholds the root's newest entries (a removal, an approval).
 //!
 //! ```text
-//! file = canonical({ "account_id": bytes16, "seq": uint, "hash": bytes32, "sig": bytes64 })
-//! sig  = Ed25519(root_sk, "keyorra/sync/v1/root-head\0" ‖ account_id ‖ seq:u64be ‖ hash)
+//! file = canonical({ "account_id": bytes16, "seq": uint, "hash": bytes32, "at_ms": uint,
+//!                    "sig": bytes64 })
+//! sig  = Ed25519(root_sk, "keyorra/sync/v1/root-head\0" ‖ account_id ‖ seq:u64be ‖ hash
+//!                ‖ at_ms:u64be)
+//! ```
+//!
+//! `at_ms` is the main device's wall time when it wrote the file. It rewrites the file at
+//! least daily while online (a heartbeat), so a store that freezes or replays an old file is
+//! noticed: its time stops advancing while other devices' streams move on (review I1).
+//!
+//! ```text
 //! ```
 //!
 //! A reader only moves its advertised head forward, so an old file served later changes
@@ -23,26 +32,42 @@ use crate::AccountId;
 pub const ROOT_HEAD_FILE: &str = "root.head";
 const MAX_LEN: usize = 512;
 
-fn message(account_id: &AccountId, head: &Head) -> Vec<u8> {
+fn message(account_id: &AccountId, head: &Head, at_ms: u64) -> Vec<u8> {
     tagged(
         labels::ROOT_HEAD,
-        &[account_id, &head.seq.to_be_bytes(), &head.hash],
+        &[
+            account_id,
+            &head.seq.to_be_bytes(),
+            &head.hash,
+            &at_ms.to_be_bytes(),
+        ],
     )
 }
 
-pub fn seal_root_head(account_id: &AccountId, head: &Head, root: &SigningKey) -> Vec<u8> {
-    let sig = root.sign(&message(account_id, head)).to_bytes();
+pub fn seal_root_head(
+    account_id: &AccountId,
+    head: &Head,
+    at_ms: u64,
+    root: &SigningKey,
+) -> Vec<u8> {
+    let sig = root.sign(&message(account_id, head, at_ms)).to_bytes();
     cbor::encode(&Value::map(vec![
         ("account_id", Value::bytes(account_id)),
         ("seq", Value::Uint(head.seq)),
         ("hash", Value::bytes(head.hash)),
+        ("at_ms", Value::Uint(at_ms)),
         ("sig", Value::bytes(sig)),
     ]))
 }
 
-pub fn open_root_head(account_id: &AccountId, root: &VerifyingKey, bytes: &[u8]) -> Result<Head> {
+/// The head and the main device's wall time when it wrote the file.
+pub fn open_root_head(
+    account_id: &AccountId,
+    root: &VerifyingKey,
+    bytes: &[u8],
+) -> Result<(Head, u64)> {
     let value = cbor::decode_limited(bytes, MAX_LEN)?;
-    let f = value.fields(&["account_id", "seq", "hash", "sig"])?;
+    let f = value.fields(&["account_id", "seq", "hash", "at_ms", "sig"])?;
     let file_account: AccountId = f.get("account_id")?.as_array_of()?;
     if file_account != *account_id {
         return Err(Error::Refused("root head of another account".into()));
@@ -51,10 +76,14 @@ pub fn open_root_head(account_id: &AccountId, root: &VerifyingKey, bytes: &[u8])
         seq: f.get("seq")?.as_uint()?,
         hash: f.get("hash")?.as_array_of()?,
     };
+    let at_ms = f.get("at_ms")?.as_uint()?;
     let sig: [u8; 64] = f.get("sig")?.as_array_of()?;
-    root.verify_strict(&message(account_id, &head), &Signature::from_bytes(&sig))
-        .map_err(|_| Error::BadSignature)?;
-    Ok(head)
+    root.verify_strict(
+        &message(account_id, &head, at_ms),
+        &Signature::from_bytes(&sig),
+    )
+    .map_err(|_| Error::BadSignature)?;
+    Ok((head, at_ms))
 }
 
 #[cfg(test)]
@@ -68,10 +97,10 @@ mod tests {
             seq: 42,
             hash: [7; 32],
         };
-        let bytes = seal_root_head(&[9; 16], &head, &root);
+        let bytes = seal_root_head(&[9; 16], &head, 77, &root);
         assert_eq!(
             open_root_head(&[9; 16], &root.verifying_key(), &bytes).unwrap(),
-            head
+            (head, 77)
         );
         let other = SigningKey::from_bytes(&[2; 32]).verifying_key();
         assert!(open_root_head(&[9; 16], &other, &bytes).is_err());

@@ -183,27 +183,63 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         }
     }
 
-    /// The main device writes its confirmed head for everyone to compare with.
-    pub(super) fn write_root_head_file(&mut self, transport: &impl Transport) {
-        if !self.is_root() || self.sent.seq == 0 || self.root_head_written == self.sent.seq {
+    /// The main device writes its confirmed head for everyone to compare with: when it
+    /// moved, and at least daily while online (a heartbeat, review I1).
+    pub(super) fn write_root_head_file(&mut self, transport: &impl Transport, wall_ms: u64) {
+        if !self.is_root() || self.sent.seq == 0 {
             return;
         }
-        let bytes = seal_root_head(&self.account_id, &self.sent, &self.signer);
+        let (seq, at) = self.root_head_written;
+        if seq == self.sent.seq && wall_ms < at + ROOT_HEARTBEAT_MS {
+            return;
+        }
+        let bytes = seal_root_head(&self.account_id, &self.sent, wall_ms, &self.signer);
         if transport.put_root_head_file(&bytes).is_ok() {
-            self.root_head_written = self.sent.seq;
+            self.root_head_written = (self.sent.seq, wall_ms);
         }
     }
 
-    /// Other devices read it (only forward; a bad file is ignored).
-    pub(super) fn read_root_head_file(&mut self, transport: &impl Transport) {
+    /// Other devices read it (only forward; a bad file is ignored). If the main device's
+    /// time in it stops advancing for a week while other devices' streams move on, the store
+    /// may be freezing it while hiding the main device's newest entries: a warning.
+    pub(super) fn read_root_head_file(&mut self, transport: &impl Transport, wall_ms: u64) {
         if self.is_root() {
             return;
         }
-        let Ok(Fetched::Ready(bytes)) = transport.root_head_file() else {
-            return;
+        let others: u64 = self
+            .heads
+            .iter()
+            .filter(|(d, _)| **d != self.trust.root())
+            .map(|(_, h)| h.seq)
+            .sum();
+        let opened = match transport.root_head_file() {
+            Ok(Fetched::Ready(bytes)) => {
+                open_root_head(&self.account_id, &self.trust.root_key(), &bytes).ok()
+            }
+            _ => None,
         };
-        if let Ok(head) = open_root_head(&self.account_id, &self.trust.root_key(), &bytes) {
+        if let Some((head, at_ms)) = opened {
             self.set_root_head(head);
+            if self.root_time.is_none_or(|t| at_ms > t.root_ms) {
+                self.root_time = Some(RootTime {
+                    root_ms: at_ms,
+                    since_ms: wall_ms,
+                    others,
+                    reported: false,
+                });
+                return;
+            }
+        }
+        let t = self.root_time.get_or_insert(RootTime {
+            root_ms: 0,
+            since_ms: wall_ms,
+            others,
+            reported: false,
+        });
+        if !t.reported && wall_ms >= t.since_ms + ROOT_SILENT_AFTER_MS && others > t.others {
+            t.reported = true;
+            let since_ms = t.since_ms;
+            self.events.push(Event::RootSilent { since_ms });
         }
     }
 

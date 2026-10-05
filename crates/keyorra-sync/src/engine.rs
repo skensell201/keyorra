@@ -62,6 +62,23 @@ pub use outbox::{NoOutboxStore, OutboxState, OutboxStore};
 pub use retire::{DeviceKeys, KeepKeys, RetireReason};
 pub use snapshots::{SNAPSHOT_EVERY_ENTRIES, SNAPSHOT_EVERY_MS};
 
+/// The main device rewrites its head file at least this often while online.
+pub const ROOT_HEARTBEAT_MS: u64 = 24 * 60 * 60 * 1000;
+/// The main device's head file not advancing for this long, while other streams move on,
+/// is reported ([`Event::RootSilent`]).
+pub const ROOT_SILENT_AFTER_MS: u64 = 7 * 24 * 60 * 60 * 1000;
+
+/// What a device last saw of the main device's head file.
+#[derive(Clone, Copy, Debug)]
+struct RootTime {
+    root_ms: u64,
+    /// Local wall time when it last advanced.
+    since_ms: u64,
+    /// Sum of the other streams' received heads then.
+    others: u64,
+    reported: bool,
+}
+
 /// Entries per segment; keeps segments well below the 4 MiB cap for ordinary records.
 const MAX_ENTRIES_PER_SEGMENT: usize = 256;
 /// Received entries waiting to be applied, per stream; beyond this a stream is not read further
@@ -268,6 +285,12 @@ pub enum Event {
         seq: u64,
         by: DeviceId,
     },
+    /// The main device's head file has not advanced since `since_ms` (a week) while other
+    /// devices kept writing: the store may be freezing it and hiding the main device's newest
+    /// entries. A warning (the main device may simply be switched off).
+    RootSilent {
+        since_ms: u64,
+    },
     /// A rollback of `stream` that a snapshot already covers: nothing is lost, no alarm.
     RollbackRepaired {
         stream: DeviceId,
@@ -390,8 +413,10 @@ pub struct Engine<R> {
     /// Mac" appends again after the store lost them (A1d persists them with the outbox).
     own_segments: BTreeMap<u64, Vec<u8>>,
     bootstrap_tried: bool,
-    /// The own head last written to the root head file (main device).
-    root_head_written: u64,
+    /// The own head and wall time last written to the root head file (main device).
+    root_head_written: (u64, u64),
+    /// The main device's time in its head file, as last seen advancing (other devices).
+    root_time: Option<RootTime>,
     /// The main device's trust entries applied so far, in its stream's order (for snapshots).
     root_log: Vec<(u64, Entry)>,
     /// Tests only: an attacker's copy of the engine, which writes whatever it is told,
@@ -505,7 +530,8 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             revoked_since_snapshot: false,
             own_segments: BTreeMap::new(),
             bootstrap_tried: false,
-            root_head_written: 0,
+            root_head_written: (0, 0),
+            root_time: None,
             root_log: Vec::new(),
             #[cfg(test)]
             forging: false,
@@ -1265,7 +1291,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             self.bootstrap_tried = true;
             self.bootstrap(transport, wall_ms)?;
         }
-        self.read_root_head_file(transport);
+        self.read_root_head_file(transport, wall_ms);
         let pulled = self.pull(transport, wall_ms);
         if let Some(reason) = self.retire_due.take() {
             self.retire(reason, wall_ms)?;
@@ -1287,7 +1313,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                 self.push(transport);
             }
         }
-        self.write_root_head_file(transport);
+        self.write_root_head_file(transport, wall_ms);
         pulled
     }
 

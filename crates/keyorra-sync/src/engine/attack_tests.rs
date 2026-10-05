@@ -961,3 +961,108 @@ fn review_s1_another_devices_snapshot_cannot_rewrite_its_history_for_newcomers()
         .iter()
         .any(|e| matches!(e, Event::Anchored { by, .. } if *by == device_id(1))));
 }
+
+/// A store that hides the main device's segments after `root_upto` and keeps serving one
+/// old root head file, dropping the main device's updates of it.
+struct FrozenRoot<'a> {
+    inner: &'a MemoryTransport,
+    root_upto: u64,
+    frozen: Vec<u8>,
+}
+
+impl Transport for FrozenRoot<'_> {
+    fn streams(&self) -> Result<Vec<DeviceId>> {
+        self.inner.streams()
+    }
+    fn segments(&self, stream: &DeviceId, after_seq: u64) -> Result<Vec<Fetched<Vec<u8>>>> {
+        let all = self.inner.segments(stream, after_seq)?;
+        if *stream != device_id(0) {
+            return Ok(all);
+        }
+        Ok(all
+            .into_iter()
+            .filter(|f| match f {
+                Fetched::Ready(b) => {
+                    SegmentHeader::parse(b).is_ok_and(|h| h.last_seq <= self.root_upto)
+                }
+                _ => true,
+            })
+            .collect())
+    }
+    fn append(&self, segment: &[u8]) -> Result<AppendOutcome> {
+        self.inner.append(segment)
+    }
+    fn head(&self, stream: &DeviceId) -> Result<Option<u64>> {
+        if *stream == device_id(0) {
+            return Ok(Some(self.root_upto));
+        }
+        self.inner.head(stream)
+    }
+    fn headers(&self) -> Result<Vec<(String, Fetched<Vec<u8>>)>> {
+        self.inner.headers()
+    }
+    fn put_header(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        self.inner.put_header(name, bytes)
+    }
+    fn delete_header(&self, name: &str) -> Result<()> {
+        self.inner.delete_header(name)
+    }
+    fn snapshots(&self) -> Result<Vec<(String, DeviceId)>> {
+        self.inner.snapshots()
+    }
+    fn get_snapshot(&self, name: &str) -> Result<Fetched<Vec<u8>>> {
+        self.inner.get_snapshot(name)
+    }
+    fn put_snapshot(&self, bytes: &[u8]) -> Result<String> {
+        self.inner.put_snapshot(bytes)
+    }
+    fn delete_snapshot(&self, name: &str) -> Result<()> {
+        self.inner.delete_snapshot(name)
+    }
+    fn root_head_file(&self) -> Result<Fetched<Vec<u8>>> {
+        Ok(Fetched::Ready(self.frozen.clone()))
+    }
+    fn put_root_head_file(&self, _: &[u8]) -> Result<()> {
+        Ok(())
+    }
+}
+
+#[test]
+fn review_i1_a_frozen_root_head_file_is_noticed_while_others_move_on() {
+    let mut c = Cluster::new(3, 1, Faults::NONE);
+    let vault = c.devices[0].create_vault("Personal", START_MS).unwrap();
+    c.heal();
+    let Fetched::Ready(frozen) = c.store.root_head_file().unwrap() else {
+        panic!("the main device wrote its head file")
+    };
+    // The main device removes device 2; device 1 is served neither that nor a newer file.
+    let root_upto = c.devices[0].sent.seq;
+    c.devices[0].revoke(device_id(2), c.clocks[0]).unwrap();
+    c.sync(0).unwrap();
+    let shared = c.store.clone();
+    let store = FrozenRoot {
+        inner: &shared,
+        root_upto,
+        frozen,
+    };
+    let mut warned = false;
+    for day in 0..10u8 {
+        // The main device is online every day (its heartbeat rewrites the file), and the
+        // removed device keeps writing.
+        c.sync(0).unwrap();
+        let other = Uuid::from_bytes([0x70 + day; 16]);
+        let json = Cluster::item_json(other, "work", &[]);
+        c.devices[2].forging = true;
+        c.devices[2]
+            .save_item(vault, other, &json, c.clocks[2])
+            .unwrap();
+        c.devices[2].push(&c.store);
+        c.devices[1].sync(&store, c.clocks[1]).unwrap();
+        warned |= c.devices[1]
+            .take_events()
+            .iter()
+            .any(|e| matches!(e, Event::RootSilent { .. }));
+        c.tick(24 * 60 * 60 * 1000);
+    }
+    assert!(warned, "the main device looks silent while others move on");
+}
