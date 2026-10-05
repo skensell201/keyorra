@@ -356,9 +356,27 @@ impl Store {
         Ok(())
     }
 
+    /// Whether `password` is the master password (enabling sync asks for it again).
+    pub fn check_password(&self, password: &str) -> Result<()> {
+        crypto::unlock(&self.header, password).map(drop)
+    }
+
     pub fn delete_sealed_meta(&mut self, name: &str) -> Result<()> {
         self.conn
             .execute("DELETE FROM meta WHERE key = ?1", [sealed_meta_key(name)])?;
+        Ok(())
+    }
+
+    /// Records changes by hand (rejoining an account: what changed while sync was off).
+    pub fn record_changes(&mut self, changes: &[Change]) -> Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        for c in changes {
+            tx.execute(
+                "INSERT OR IGNORE INTO sync_changes (kind, id) VALUES (?1, ?2)",
+                params![c.kind.as_str(), c.id.to_string()],
+            )?;
+        }
+        tx.commit()?;
         Ok(())
     }
 

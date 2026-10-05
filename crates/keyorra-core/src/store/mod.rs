@@ -13,6 +13,7 @@ use crate::import::{ImportPlan, ImportReport};
 use crate::model::{AttachmentRef, Item, VaultInfo, SCHEMA_VERSION};
 use crate::{Error, Result};
 
+mod rotate;
 mod sync;
 #[cfg(test)]
 mod sync_tests;
@@ -729,6 +730,27 @@ fn insert_attachment(
             data,
             SCHEMA_VERSION
         ],
+    )?;
+    Ok(())
+}
+
+/// Replaces an attachment's encrypted bytes (rotating keys).
+fn insert_attachment_data(
+    conn: &Connection,
+    key: &Key,
+    vault_id: Uuid,
+    item_id: Uuid,
+    att_id: Uuid,
+    bytes: &[u8],
+) -> Result<()> {
+    let data = crypto::seal(
+        key,
+        bytes,
+        &crypto::attachment_aad(vault_id, item_id, att_id),
+    );
+    conn.execute(
+        "UPDATE attachments SET data = ?2, revision = revision + 1 WHERE id = ?1",
+        params![att_id.to_string(), data],
     )?;
     Ok(())
 }

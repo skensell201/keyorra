@@ -313,3 +313,63 @@ fn a_real_version_1_database_migrates_with_everything() {
     assert!(store.pending_changes().unwrap().is_empty());
     assert_eq!(std::fs::read(sibling(&path, ".bak-v1")).unwrap(), v1);
 }
+
+#[test]
+fn the_password_can_be_checked_without_locking() {
+    let (_dir, _path, store) = new_store();
+    store.check_password(PW).unwrap();
+    assert!(matches!(
+        store.check_password("wrong one"),
+        Err(Error::WrongPassword)
+    ));
+    assert!(store.is_unlocked());
+}
+
+#[test]
+fn changes_can_be_recorded_by_hand_and_meta_deleted() {
+    let (_dir, _path, mut store) = new_store();
+    store.set_sync_tracking(true).unwrap();
+    let id = Uuid::from_bytes([3; 16]);
+    store.record_changes(&[item_change(id)]).unwrap();
+    assert_eq!(changes(&store), vec![item_change(id)]);
+    store.set_sealed_meta("sync:config", b"x").unwrap();
+    store.delete_sealed_meta("sync:config").unwrap();
+    assert!(store.sealed_meta("sync:config").unwrap().is_none());
+}
+
+#[test]
+fn rotating_the_keys_keeps_every_record_and_drops_the_old_keys() {
+    let (_dir, path, mut store) = new_store();
+    let v = store.create_vault("Personal").unwrap();
+    let live = Item::new(v.id, ItemKind::Login, "live", 1);
+    store.save_item(&live).unwrap();
+    let att = store.add_attachment(live.id, "a.txt", b"bytes", 2).unwrap();
+    let trashed = Item::new(v.id, ItemKind::Login, "trashed", 1);
+    store.save_item(&trashed).unwrap();
+    store.delete_item(trashed.id, 3).unwrap();
+    store.set_sealed_meta("pairings", b"kept").unwrap();
+    let old_account = store.account_key_copy().unwrap();
+    let old_vault_key = store.vault_rows().unwrap()[0].1.clone();
+
+    store.rotate_keys(PW).unwrap();
+
+    assert_ne!(
+        store.account_key().unwrap().as_bytes(),
+        old_account.as_bytes()
+    );
+    assert_ne!(
+        store.vault_rows().unwrap()[0].1.as_bytes(),
+        old_vault_key.as_bytes()
+    );
+    drop(store);
+    let mut store = Store::open(&path).unwrap();
+    assert!(store.unlock_with_key(old_account).is_err());
+    store.unlock(PW).unwrap();
+    assert_eq!(store.get_item(live.id).unwrap().title, "live");
+    assert_eq!(&store.get_attachment(att.id).unwrap()[..], b"bytes");
+    assert_eq!(store.deleted_items().unwrap().len(), 1);
+    assert_eq!(
+        &store.sealed_meta("pairings").unwrap().unwrap()[..],
+        b"kept"
+    );
+}
