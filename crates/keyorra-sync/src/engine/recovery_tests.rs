@@ -207,3 +207,184 @@ fn the_root_head_file_reveals_a_withheld_root_tail() {
     assert!(fresh.root_confirmed());
     assert!(fresh.trust().device(&device_id(1)).unwrap().cut.is_some());
 }
+
+#[test]
+fn a_new_device_joins_from_the_header_and_starts_from_the_roots_snapshot() {
+    let (mut c, vault) = shared(2);
+    c.devices[0]
+        .publish_header(test_header(1, PASSWORD), c.clocks[0])
+        .unwrap();
+    save(&mut c, 1, vault, Uuid::from_bytes([0x61; 16]), "second");
+    c.heal();
+    c.devices[0].write_snapshot(&c.store, c.clocks[0]).unwrap();
+    c.heal();
+    // The newcomer has only the store, the password and the Secret Key; the header gives the
+    // main device and its key.
+    let files = c.store.headers().unwrap();
+    let (file, account_key) =
+        unlock_join_with(&files, |h| unlock_test_header(h, PASSWORD)).unwrap();
+    assert_eq!(account_key.as_bytes(), &ACCOUNT_KEY);
+    assert!(unlock_join_with(&files, |h| unlock_test_header(h, "wrong")).is_err());
+    let header = &file.header;
+    let mut fresh = Engine::join(
+        device_id(5),
+        signer(5),
+        &device_name(5),
+        ACCOUNT_ID,
+        account_key,
+        header.root_device,
+        ed25519_dalek::VerifyingKey::from_bytes(&header.root_key).unwrap(),
+        rand::rngs::StdRng::seed_from_u64(5),
+    );
+    fresh.sync(&c.store, c.clocks[0]).unwrap();
+    assert!(fresh.alarms().is_empty(), "{:?}", fresh.alarms());
+    assert_eq!(fresh.header_confirmed(&file), Some(true));
+    assert!(titles(&fresh.view()).contains("second"));
+    assert_eq!(fresh.view(), c.devices[0].view());
+}
+#[test]
+fn only_the_main_devices_snapshot_bootstraps_a_newcomer() {
+    let (mut c, vault) = shared(2);
+    save(&mut c, 1, vault, Uuid::from_bytes([0x61; 16]), "second");
+    c.heal();
+    // Only device 1 (not the main device) wrote a snapshot.
+    c.devices[1].write_snapshot(&c.store, c.clocks[1]).unwrap();
+    c.heal();
+    let i = c.add_device(97);
+    assert!(!c.devices[i].bootstrap(&c.store, c.clocks[0]).unwrap());
+    // It still reads everything from the streams.
+    c.heal();
+    c.assert_converged();
+}
+#[test]
+fn a_snapshot_its_author_never_chained_is_treated_as_a_fork() {
+    let (mut c, vault) = shared(2);
+    // A copy of the main device writes a snapshot into another store; only the file is planted.
+    let elsewhere = c.store.deep_copy();
+    let mut copy = clone_of(&c.devices[0]);
+    let name = copy.write_snapshot(&elsewhere, c.clocks[0]).unwrap();
+    let Fetched::Ready(bytes) = elsewhere.get_snapshot(&name).unwrap() else {
+        panic!()
+    };
+    c.store.put_snapshot(&bytes).unwrap();
+    // The main device itself goes on writing, never mentioning that snapshot.
+    for n in 0..3 {
+        save(&mut c, 0, vault, ITEM, &format!("v{n}"));
+        c.sync(0).unwrap();
+    }
+    let i = c.add_device(98);
+    c.sync(0).unwrap();
+    let _ = c.sync(i);
+    assert!(matches!(
+        c.devices[i].alarms().first(),
+        Some(Alarm::Fork { stream, .. }) if *stream == device_id(0)
+    ));
+}
+#[test]
+fn own_snapshots_are_pruned_to_the_newest_two_and_written_when_due() {
+    let (mut c, _) = shared(2);
+    for _ in 0..3 {
+        c.devices[0].write_snapshot(&c.store, c.clocks[0]).unwrap();
+        c.sync(0).unwrap();
+    }
+    let own = c
+        .store
+        .snapshots()
+        .unwrap()
+        .into_iter()
+        .filter(|(_, a)| *a == device_id(0))
+        .count();
+    assert_eq!(own, 2);
+    c.devices[1].entries_since_snapshot = SNAPSHOT_EVERY_ENTRIES;
+    c.devices[1].last_snapshot_ms = Some(c.clocks[1]);
+    c.sync(1).unwrap();
+    assert!(c.devices[1]
+        .take_events()
+        .iter()
+        .any(|e| matches!(e, Event::SnapshotWritten { .. })));
+}
+#[test]
+fn after_a_restored_backup_everyone_continues_from_a_snapshot() {
+    let (mut c, vault) = shared(3);
+    let backup = c.store.deep_copy();
+    save(&mut c, 1, vault, ITEM, "after the backup");
+    c.sync(1).unwrap();
+    c.sync(0).unwrap();
+    // The store is restored from the backup: device 1's last segment is gone.
+    let store = backup;
+    // The main device received it: a rollback alarm (only that stream pauses); it restores.
+    c.devices[0].sync(&store, c.clocks[0]).unwrap();
+    assert!(matches!(
+        c.devices[0].alarms().first(),
+        Some(Alarm::Rollback { stream, .. }) if *stream == device_id(1)
+    ));
+    c.devices[0]
+        .restore(&store, device_id(1), c.clocks[0])
+        .unwrap();
+    assert!(c.devices[0].alarms().is_empty());
+    // Device 1's own stream went back: it notices before its next write, restores, goes on.
+    save(&mut c, 1, vault, Uuid::from_bytes([0x61; 16]), "later");
+    c.devices[1].sync(&store, c.clocks[1]).unwrap();
+    assert!(matches!(
+        c.devices[1].alarms().first(),
+        Some(Alarm::Rollback { stream, .. }) if *stream == device_id(1)
+    ));
+    c.devices[1]
+        .restore(&store, device_id(1), c.clocks[1])
+        .unwrap();
+    c.devices[1].sync(&store, c.clocks[1]).unwrap();
+    // Device 2 never saw the lost segment: it is anchored by a snapshot and catches up.
+    c.devices[2].sync(&store, c.clocks[2]).unwrap();
+    assert!(c.devices[2]
+        .take_events()
+        .iter()
+        .any(|e| matches!(e, Event::Anchored { .. })));
+    for _ in 0..4 {
+        for i in 0..3 {
+            c.devices[i].sync(&store, c.clocks[i]).unwrap();
+        }
+        c.tick(1_000);
+    }
+    let view = c.devices[0].view();
+    for d in &c.devices {
+        assert_eq!(d.view(), view);
+    }
+    let seen = titles(&view);
+    assert!(
+        seen.contains("after the backup") && seen.contains("later"),
+        "{seen:?}"
+    );
+}
+#[test]
+fn only_the_main_device_restores_another_devices_stream() {
+    let (mut c, vault) = shared(3);
+    let backup = c.store.deep_copy();
+    save(&mut c, 1, vault, ITEM, "after the backup");
+    c.sync(1).unwrap();
+    c.sync(2).unwrap();
+    c.devices[2].sync(&backup, c.clocks[2]).unwrap();
+    assert!(matches!(
+        c.devices[2].restore(&backup, device_id(1), c.clocks[2]),
+        Err(Error::Refused(_))
+    ));
+}
+#[test]
+fn a_rollback_a_snapshot_already_covers_raises_no_alarm() {
+    let (mut c, vault) = shared(3);
+    let backup = c.store.deep_copy();
+    save(&mut c, 1, vault, ITEM, "after the backup");
+    c.sync(1).unwrap();
+    c.sync(0).unwrap();
+    c.sync(2).unwrap();
+    let store = backup;
+    c.devices[0].sync(&store, c.clocks[0]).unwrap();
+    c.devices[0]
+        .restore(&store, device_id(1), c.clocks[0])
+        .unwrap();
+    c.devices[2].sync(&store, c.clocks[2]).unwrap();
+    assert!(c.devices[2].alarms().is_empty());
+    assert!(c.devices[2]
+        .take_events()
+        .iter()
+        .any(|e| matches!(e, Event::RollbackRepaired { .. })));
+}
