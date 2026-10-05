@@ -3,6 +3,23 @@
 //! layer). Plan A1c adds endorsement and revocation (through [`Directory`] and
 //! [`Admission`](crate::fold::Admission)), checkpoints, causal delivery, headers, snapshots
 //! and clone detection.
+//!
+//! Deliberate A1b limitations (each with its successor):
+//! - A segment that has to wait (a vault key from another stream, another device's earlier
+//!   writes) stalls its whole stream. A1c: causal delivery buffers per record, so independent
+//!   records keep flowing.
+//! - A sealed segment that is not yet confirmed lives only in memory; after a crash the
+//!   engine would reseal with a new nonce and the transport would answer `Conflict`. A1d
+//!   persists the outbox and the sealed bytes in the store before calling `append`, and
+//!   retries the same bytes after a restart.
+//! - After `OwnStreamConflict` the engine stops pushing and keeps its unsent writes (it never
+//!   becomes idle). A1c's clone detection retires the device id, rejoins under a new one and
+//!   re-queues those writes.
+//! - A rejected stream is blocked for this engine's lifetime only. A1c makes rejections
+//!   persistent alarms tied to the device's trust state.
+//! - Item writes do not carry the version the user started editing from; an edit replaces
+//!   whatever is visible at that moment. A3's editor passes its base and asks before
+//!   overwriting a change that arrived meanwhile.
 
 use std::collections::{BTreeMap, BTreeSet};
 

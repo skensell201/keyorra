@@ -1027,6 +1027,14 @@ Each line becomes one implementation plan in `docs/superpowers/plans/`.
 | **B3** Packaging | Multi-arch Docker image, static musl binaries, systemd unit, signed releases, `docs/self-hosting.md` | Image runs on amd64 and arm64 (Raspberry Pi) from the docs alone |
 | **C1** Rotation + GC | Key rotation, generations, GC of segments/chunks/snapshots/tombstones and revoked devices' data by live devices using snapshot floors, 90-day inactive-device prompt | — |
 
+A1b limitations, deliberate and picked up later (from the A1b review): a waiting segment
+stalls its whole stream until A1c's per-record causal delivery; sealed-but-unconfirmed
+segments are only in memory until A1d persists the outbox and the sealed bytes before
+`append` (so a restart retries the same bytes instead of causing `Conflict`); after
+`OwnStreamConflict` the engine stops pushing until A1c retires the device id; rejections
+block a stream only for the engine's lifetime until A1c makes them persistent alarms; item
+writes carry no base version until A3's editor does.
+
 Phase A ships without GC: storage grows with history; snapshots exist only for bootstrap
 and restore, and only header files and a device's older snapshots are ever deleted.
 
