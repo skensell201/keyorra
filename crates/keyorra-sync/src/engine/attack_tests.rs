@@ -4,8 +4,8 @@
 use uuid::Uuid;
 
 use super::*;
-use crate::entry::Entry;
-use crate::faults::{Faults, Rollback};
+use crate::entry::{sign_endorsement, Entry};
+use crate::faults::Faults;
 use crate::payload::VaultPayload;
 use crate::testkit::{device_id, device_name, signer, Cluster, ACCOUNT_ID, ACCOUNT_KEY, START_MS};
 use crate::transport::MemoryTransport;
@@ -99,96 +99,6 @@ fn review_c6_a_removed_device_cannot_replace_a_vault_key() {
 }
 
 #[test]
-fn review_c7a_two_keys_for_one_id_quarantine_it_and_reject_nobody() {
-    let (mut c, vault) = {
-        let mut c = Cluster::new(3, 1, Faults::NONE);
-        let vault = c.devices[0].create_vault("Personal", START_MS).unwrap();
-        c.heal();
-        (c, vault)
-    };
-    // A stolen approved device and the root approve the same new id with different keys.
-    let stolen = signer(8).verifying_key();
-    let real = signer(5).verifying_key();
-    c.devices[1]
-        .endorse(device_id(5), &stolen, "Thief", c.clocks[1])
-        .unwrap();
-    c.sync(1).unwrap();
-    c.devices[0]
-        .endorse(device_id(5), &real, &device_name(5), c.clocks[0])
-        .unwrap();
-    settle(&mut c, &[]);
-    let alarm = Alarm::KeyConflict {
-        device: device_id(5),
-    };
-    for i in 0..3 {
-        assert_eq!(
-            c.devices[i].alarms(),
-            std::slice::from_ref(&alarm),
-            "device {i}"
-        );
-        assert!(c.devices[i].trust().device(&device_id(5)).is_none());
-        assert!(c.devices[i].accept_alarm(&alarm));
-    }
-    // Nobody rejected anyone: the root's stream is still read.
-    let json = Cluster::item_json(ITEM, "later", &[]);
-    c.devices[0]
-        .save_item(vault, ITEM, &json, c.clocks[0])
-        .unwrap();
-    let events = settle(&mut c, &[]);
-    for (i, events) in events.iter().enumerate() {
-        assert!(!rejected(events), "device {i}");
-        assert_eq!(title(&c.devices[i].view(), ITEM), "later");
-    }
-}
-
-#[test]
-fn review_c7a_an_approval_beats_a_self_join_of_the_same_id_in_any_order() {
-    for root_first in [true, false] {
-        let mut c = Cluster::new(2, 1, Faults::NONE);
-        // A thief with the Emergency Kit self-joins under the id the root approves.
-        let mut thief = Engine::join(
-            device_id(5),
-            signer(8),
-            "Thief",
-            ACCOUNT_ID,
-            Key::from_bytes(ACCOUNT_KEY),
-            device_id(0),
-            rand::rngs::OsRng,
-        );
-        thief.pin_root_key(signer(0).verifying_key());
-        let real = signer(5).verifying_key();
-        if root_first {
-            c.devices[0]
-                .endorse(device_id(5), &real, &device_name(5), c.clocks[0])
-                .unwrap();
-            c.sync(0).unwrap();
-        }
-        thief.self_join(START_MS).unwrap();
-        thief.sync(&c.store, START_MS).unwrap();
-        if !root_first {
-            let _ = c.sync(0); // pauses on the self-join alarm, but still pushes nothing new
-            c.devices[0].accept_alarm(&Alarm::SelfJoined {
-                device: device_id(5),
-                name: "Thief".into(),
-            });
-            c.devices[0]
-                .endorse(device_id(5), &real, &device_name(5), c.clocks[0])
-                .unwrap();
-            c.sync(0).unwrap();
-        }
-        let _ = c.sync(1);
-        let _ = c.sync(1);
-        let d = c.devices[1].trust().device(&device_id(5)).unwrap();
-        assert_eq!(d.key, real, "root_first = {root_first}");
-        assert!(
-            c.devices[1].alarms().is_empty(),
-            "root_first = {root_first}"
-        );
-        assert!(!rejected(&c.devices[1].take_events()));
-    }
-}
-
-#[test]
 fn review_c7b_checkpoints_past_a_cut_raise_nothing() {
     let (mut c, _) = with_removed_device(3);
     let mut claims = Heads::new();
@@ -222,7 +132,7 @@ fn review_c7b_checkpoints_past_a_cut_raise_nothing() {
 }
 
 #[test]
-fn review_c7c_a_rewrite_inside_a_segment_is_a_fork() {
+fn review_c7c_a_rewrite_inside_a_segment_is_noticed() {
     let mut c = Cluster::new(3, 1, Faults::NONE);
     let vault = c.devices[0].create_vault("Personal", START_MS).unwrap();
     for t in ["a", "b", "c"] {
@@ -242,15 +152,33 @@ fn review_c7c_a_rewrite_inside_a_segment_is_a_fork() {
             hash: [9; 32],
         },
     );
-    forge(&mut c, 2, vec![Entry::Checkpoint(claims)]);
-    assert!(c.sync(1).is_err());
+    forge(&mut c, 2, vec![Entry::Checkpoint(claims.clone())]);
+    c.sync(1).unwrap();
+    // From another device it is a dispute (it may be lying), pausing nothing...
     assert_eq!(
         c.devices[1].alarms(),
-        [Alarm::Fork {
+        vec![Alarm::Disputed {
             stream: device_id(0),
-            seq: mid
+            seq: mid,
+            by: device_id(2),
         }]
     );
+    // ...from the main device a fork, pausing that stream.
+    let mid1 = c.devices[1].sent.seq;
+    let mut claims = Heads::new();
+    claims.insert(
+        device_id(1),
+        Head {
+            seq: mid1,
+            hash: [9; 32],
+        },
+    );
+    forge(&mut c, 0, vec![Entry::Checkpoint(claims)]);
+    c.sync(2).unwrap();
+    assert!(c.devices[2].alarms().contains(&Alarm::Fork {
+        stream: device_id(1),
+        seq: mid1
+    }));
 }
 
 #[test]
@@ -271,39 +199,14 @@ fn a_revocation_naming_another_history_is_a_fork() {
             last_valid_hash: [9; 32],
         }],
     );
-    assert!(c.sync(2).is_err());
+    c.sync(2).unwrap();
     assert_eq!(
         c.devices[2].alarms(),
-        [Alarm::Fork {
+        vec![Alarm::Fork {
             stream: device_id(1),
             seq
         }]
     );
-}
-
-#[test]
-fn alarms_queue_up_and_are_accepted_one_by_one() {
-    let mut c = Cluster::new(3, 1, Faults::NONE);
-    c.devices[0].create_vault("Personal", START_MS).unwrap();
-    c.heal();
-    let r1 = c.devices[2].heads[&device_id(0)].seq;
-    let r2 = c.devices[2].heads[&device_id(1)].seq;
-    let restored = Rollback {
-        inner: Rollback {
-            inner: c.store.clone(),
-            stream: device_id(0),
-            keep_through: r1 - 1,
-        },
-        stream: device_id(1),
-        keep_through: r2 - 1,
-    };
-    assert!(c.devices[2].sync(&restored, c.clocks[2]).is_err());
-    let alarms = c.devices[2].alarms().to_vec();
-    assert_eq!(alarms.len(), 2, "{alarms:?}");
-    assert!(c.devices[2].accept_alarm(&alarms[0]));
-    assert!(c.sync(2).is_err(), "still paused by the second alarm");
-    assert!(c.devices[2].accept_alarm(&alarms[1]));
-    c.sync(2).unwrap();
 }
 
 /// A store whose stream heads cannot be read.
@@ -348,7 +251,7 @@ fn heads_that_cannot_be_read_are_reported() {
 #[test]
 fn a_store_with_another_root_is_not_trusted() {
     // Someone with the account key writes a whole account under the root's id, with their
-    // own key. A device paired with the real root (its key pinned) trusts none of it.
+    // own key. A device that knows the real root's key (header, setup code) trusts none of it.
     let store = MemoryTransport::new();
     let mut impostor = Engine::create_account(
         device_id(0),
@@ -368,71 +271,15 @@ fn a_store_with_another_root_is_not_trusted() {
         ACCOUNT_ID,
         Key::from_bytes(ACCOUNT_KEY),
         device_id(0),
+        signer(0).verifying_key(),
         rand::rngs::OsRng,
     );
-    joiner.pin_root_key(signer(0).verifying_key());
     joiner.sync(&store, START_MS).unwrap();
-    assert!(joiner.trust().device(&device_id(0)).is_none());
     assert!(joiner.view().vaults.is_empty());
     assert!(joiner
         .take_events()
         .iter()
         .any(|e| matches!(e, Event::Unreadable { from, .. } if *from == device_id(0))));
-}
-
-#[test]
-fn review_c4_a_self_joined_device_cannot_remove_anyone() {
-    let mut c = Cluster::new(2, 1, Faults::NONE);
-    let vault = c.devices[0].create_vault("Personal", START_MS).unwrap();
-    c.heal();
-    let mut thief = Engine::join(
-        device_id(5),
-        signer(5),
-        "Thief",
-        ACCOUNT_ID,
-        Key::from_bytes(ACCOUNT_KEY),
-        device_id(0),
-        rand::rngs::OsRng,
-    );
-    thief.pin_root_key(signer(0).verifying_key());
-    thief.self_join(START_MS).unwrap();
-    assert!(
-        thief.revoke(device_id(0), START_MS).is_err(),
-        "refused locally"
-    );
-    thief.forging = true;
-    thief.revoke(device_id(0), START_MS).unwrap();
-    thief.revoke(device_id(1), START_MS).unwrap();
-    thief.sync(&c.store, START_MS).unwrap();
-    for i in 0..2 {
-        assert!(c.sync(i).is_err(), "paused by the self-join");
-        let alarm = c.devices[i].alarms()[0].clone();
-        assert!(matches!(alarm, Alarm::SelfJoined { .. }));
-        assert!(c.devices[i]
-            .trust()
-            .device(&device_id(0))
-            .unwrap()
-            .cut
-            .is_none());
-        assert!(c.devices[i]
-            .trust()
-            .device(&device_id(1))
-            .unwrap()
-            .cut
-            .is_none());
-    }
-    // The user removes it; the alarm resolves itself everywhere.
-    c.devices[0].revoke(device_id(5), c.clocks[0]).unwrap();
-    assert!(c.devices[0].alarms().is_empty());
-    c.sync(0).unwrap();
-    c.sync(1).unwrap();
-    assert!(c.devices[1].alarms().is_empty());
-    let json = Cluster::item_json(ITEM, "still here", &[]);
-    c.devices[0]
-        .save_item(vault, ITEM, &json, c.clocks[0])
-        .unwrap();
-    c.heal();
-    assert_eq!(title(&c.devices[1].view(), ITEM), "still here");
 }
 
 #[test]
@@ -483,4 +330,331 @@ fn review_c5_a_removed_device_cannot_launder_content_as_a_copy() {
             .keys()
             .any(|id| view.items[id].payload.is_some() && title(&view, *id) == "forged"));
     }
+}
+
+/// A device that joins with the Emergency Kit under `id`, its own key from `signer(key)`.
+fn kit(id: DeviceId, key: usize) -> Engine<rand::rngs::OsRng> {
+    let mut e = Engine::join(
+        id,
+        signer(key),
+        "Kit",
+        ACCOUNT_ID,
+        Key::from_bytes(ACCOUNT_KEY),
+        device_id(0),
+        signer(0).verifying_key(),
+        rand::rngs::OsRng,
+    );
+    e.forging = true;
+    e
+}
+
+fn ignored(events: &[Event]) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(e, Event::TrustEntryIgnored { .. }))
+        .count()
+}
+
+#[test]
+fn review_n1_c1_c2_c3_a_stolen_approved_device_cannot_remove_or_approve_anyone() {
+    // Device 1 is approved and stolen: it removes the root and device 2 (at 0), approves a
+    // puppet, removes itself at 0 to erase its history, and is never removed in time.
+    let mut c = Cluster::new(3, 1, Faults::NONE);
+    let vault = c.devices[0].create_vault("Personal", START_MS).unwrap();
+    let json = Cluster::item_json(ITEM, "by device 1", &[]);
+    c.heal();
+    c.devices[1]
+        .save_item(vault, ITEM, &json, c.clocks[1])
+        .unwrap();
+    c.heal();
+    c.devices[1].forging = true;
+    let puppet = signer(8).verifying_key();
+    let entries = vec![
+        Entry::Revoke {
+            device: device_id(0),
+            last_valid_seq: 0,
+            last_valid_hash: [0; 32],
+        },
+        Entry::Revoke {
+            device: device_id(2),
+            last_valid_seq: 0,
+            last_valid_hash: [0; 32],
+        },
+        Entry::Revoke {
+            device: device_id(1),
+            last_valid_seq: 0,
+            last_valid_hash: [0; 32],
+        },
+        Entry::Endorse {
+            device: device_id(8),
+            key: puppet.to_bytes(),
+            name: "puppet".into(),
+            sig: sign_endorsement(&signer(1), &ACCOUNT_ID, &device_id(8), &puppet.to_bytes()),
+        },
+    ];
+    forge(&mut c, 1, entries);
+    let events = settle(&mut c, &[1]);
+    for i in [0, 2] {
+        assert_eq!(ignored(&events[i]), 4, "device {i}");
+        let t = c.devices[i].trust();
+        for d in 0..3 {
+            assert!(t.device(&device_id(d)).unwrap().cut.is_none(), "device {d}");
+        }
+        assert!(t.device(&device_id(8)).is_none());
+        assert_eq!(
+            title(&c.devices[i].view(), ITEM),
+            "by device 1",
+            "history kept"
+        );
+        assert!(c.devices[i].can_write());
+    }
+}
+
+#[test]
+fn review_n2_c7a_the_first_approval_of_an_id_is_final() {
+    let mut c = Cluster::new(3, 1, Faults::NONE);
+    c.devices[0].create_vault("Personal", START_MS).unwrap();
+    c.heal();
+    // A stolen device approves an honest id with its own key; the root (a forged copy of
+    // it, the only thing that could) approves the same id again with another key.
+    c.devices[1].forging = true;
+    c.devices[1]
+        .endorse(
+            device_id(2),
+            &signer(8).verifying_key(),
+            "evil",
+            c.clocks[1],
+        )
+        .unwrap();
+    c.sync(1).unwrap();
+    c.devices[0].forging = true;
+    c.devices[0]
+        .endorse(
+            device_id(2),
+            &signer(8).verifying_key(),
+            "again",
+            c.clocks[0],
+        )
+        .unwrap();
+    c.devices[0].forging = false;
+    let events = settle(&mut c, &[]);
+    for (i, events) in events.iter().enumerate() {
+        let t = c.devices[i].trust();
+        assert_eq!(
+            t.key(&device_id(2)),
+            Some(signer(2).verifying_key()),
+            "device {i}"
+        );
+        assert!(c.devices[i].alarms().is_empty());
+        assert!(!rejected(events));
+    }
+    assert!(c.devices[2].can_write());
+}
+
+#[test]
+fn review_n3_trust_is_one_pass_over_the_root_stream() {
+    // Many approvals and removals: every device ends with the same trust, in one round.
+    let mut c = Cluster::new(2, 1, Faults::NONE);
+    for k in 0..300u16 {
+        let id: DeviceId = [
+            0x80 | (k >> 8) as u8,
+            k as u8,
+            9,
+            9,
+            9,
+            9,
+            9,
+            9,
+            9,
+            9,
+            9,
+            9,
+            9,
+            9,
+            9,
+            9,
+        ];
+        let key = SigningKey::from_bytes(&[(k % 250) as u8 + 1; 32]).verifying_key();
+        c.devices[0].endorse(id, &key, "d", START_MS).unwrap();
+        if k % 3 == 0 {
+            c.devices[0].revoke(id, START_MS).unwrap();
+        }
+    }
+    c.sync(0).unwrap();
+    let started = std::time::Instant::now();
+    c.sync(1).unwrap();
+    assert!(started.elapsed() < std::time::Duration::from_secs(5));
+    assert_eq!(
+        c.devices[1].trust().devices(),
+        c.devices[0].trust().devices()
+    );
+}
+
+#[test]
+fn review_n4_a_thief_is_never_credited_under_an_approved_id() {
+    // A thief self-joins under an id that sorts before the root's and writes; later the root
+    // approves that id for a real device with another key. Fresh devices read the thief's
+    // stream only with the key the root gave, so nothing of the thief counts.
+    let mut c = Cluster::new(2, 1, Faults::NONE);
+    let vault = c.devices[0].create_vault("Personal", START_MS).unwrap();
+    c.heal();
+    let id: DeviceId = [0; 16];
+    let mut thief = kit(id, 7);
+    thief.sync(&c.store, START_MS).unwrap();
+    thief.self_join(START_MS).unwrap();
+    let json = Cluster::item_json(ITEM, "EVIL", &[]);
+    thief.save_item(vault, ITEM, &json, START_MS).unwrap();
+    thief.sync(&c.store, START_MS).unwrap();
+    c.devices[0]
+        .endorse(id, &signer(9).verifying_key(), "real", c.clocks[0])
+        .unwrap();
+    c.heal();
+    let mut fresh = kit(device_id(5), 5);
+    fresh.forging = false;
+    fresh.sync(&c.store, START_MS).unwrap();
+    fresh.sync(&c.store, START_MS).unwrap();
+    for view in [c.devices[0].view(), c.devices[1].view(), fresh.view()] {
+        assert!(
+            !view.items.contains_key(&ITEM),
+            "nothing of the thief counts"
+        );
+    }
+    assert!(c.devices[1]
+        .trust()
+        .device(&device_id(1))
+        .unwrap()
+        .cut
+        .is_none());
+}
+
+#[test]
+fn review_n5_a_cut_bound_counts_only_on_the_readers_chain() {
+    // The root's checkpoint claims device 1 at a far position with a hash nobody has; its
+    // removal of device 1 then cuts where it says, not at the claimed position.
+    let mut c = Cluster::new(3, 1, Faults::NONE);
+    c.devices[0].create_vault("Personal", START_MS).unwrap();
+    c.heal();
+    let seq = c.devices[1].sent.seq;
+    let mut claims = Heads::new();
+    claims.insert(
+        device_id(1),
+        Head {
+            seq: 500,
+            hash: [9; 32],
+        },
+    );
+    let hash = c.devices[0].hashes[&device_id(1)][&seq];
+    forge(
+        &mut c,
+        0,
+        vec![
+            Entry::Checkpoint(claims),
+            Entry::Revoke {
+                device: device_id(1),
+                last_valid_seq: seq,
+                last_valid_hash: hash,
+            },
+        ],
+    );
+    c.sync(2).unwrap();
+    assert_eq!(
+        c.devices[2].trust().device(&device_id(1)).unwrap().cut,
+        Some(seq)
+    );
+}
+
+#[test]
+fn review_n6_removing_a_self_joined_thief_hides_all_it_wrote() {
+    let mut c = Cluster::new(2, 1, Faults::NONE);
+    let vault = c.devices[0].create_vault("Personal", START_MS).unwrap();
+    c.heal();
+    let mut thief = kit(device_id(5), 5);
+    thief.sync(&c.store, START_MS).unwrap();
+    thief.self_join(START_MS).unwrap();
+    for t in ["one", "two"] {
+        let json = Cluster::item_json(ITEM, t, &[]);
+        thief.save_item(vault, ITEM, &json, START_MS).unwrap();
+    }
+    thief.sync(&c.store, START_MS).unwrap();
+    c.sync(0).unwrap();
+    assert_eq!(c.devices[0].alarms(), vec![Alarm::Unapproved { count: 1 }]);
+    c.devices[0].revoke(device_id(5), c.clocks[0]).unwrap();
+    assert!(c.devices[0].alarms().is_empty(), "removing resolves it");
+    c.heal();
+    thief.sync(&c.store, START_MS).unwrap();
+    for view in [c.devices[0].view(), c.devices[1].view()] {
+        assert!(!view.items.contains_key(&ITEM));
+    }
+    assert!(!thief.can_write() || thief.forging);
+    assert!(thief.take_events().contains(&Event::Removed));
+}
+
+#[test]
+fn self_joins_raise_one_aggregated_alarm_that_pauses_nothing() {
+    let mut c = Cluster::new(2, 1, Faults::NONE);
+    let vault = c.devices[0].create_vault("Personal", START_MS).unwrap();
+    c.heal();
+    for k in 0..5 {
+        let mut t = kit(device_id(10 + k), 10 + k);
+        t.self_join(START_MS).unwrap();
+        t.sync(&c.store, START_MS).unwrap();
+    }
+    c.devices[0]
+        .save_item(
+            vault,
+            ITEM,
+            &Cluster::item_json(ITEM, "still", &[]),
+            c.clocks[0],
+        )
+        .unwrap();
+    c.heal();
+    assert_eq!(c.devices[1].alarms(), vec![Alarm::Unapproved { count: 5 }]);
+    assert_eq!(title(&c.devices[1].view(), ITEM), "still");
+    assert!(c.devices[1].accept_alarm(&Alarm::Unapproved { count: 5 }));
+    let mut t = kit(device_id(20), 20);
+    t.self_join(START_MS).unwrap();
+    t.sync(&c.store, START_MS).unwrap();
+    c.sync(1).unwrap();
+    assert_eq!(c.devices[1].alarms(), vec![Alarm::Unapproved { count: 6 }]);
+}
+
+#[test]
+fn a_rollback_pauses_only_its_stream_and_repeats_aggregate() {
+    let mut c = Cluster::new(3, 1, Faults::NONE);
+    let vault = c.devices[0].create_vault("Personal", START_MS).unwrap();
+    c.heal();
+    for t in ["a", "b", "c"] {
+        c.devices[1]
+            .save_item(vault, ITEM, &Cluster::item_json(ITEM, t, &[]), c.clocks[1])
+            .unwrap();
+        c.sync(1).unwrap();
+    }
+    c.sync(2).unwrap();
+    let received = c.devices[2].heads[&device_id(1)].seq;
+    for keep in [received - 1, received - 2] {
+        let store = crate::faults::Rollback {
+            inner: c.store.clone(),
+            stream: device_id(1),
+            keep_through: keep,
+        };
+        c.devices[2].sync(&store, c.clocks[2]).unwrap();
+    }
+    let alarms = c.devices[2].alarms();
+    assert_eq!(alarms.len(), 1, "{alarms:?}");
+    let other = Uuid::from_bytes([0x61; 16]);
+    c.devices[0]
+        .save_item(
+            vault,
+            other,
+            &Cluster::item_json(other, "root", &[]),
+            c.clocks[0],
+        )
+        .unwrap();
+    c.sync(0).unwrap();
+    c.sync(2).unwrap();
+    assert_eq!(
+        title(&c.devices[2].view(), other),
+        "root",
+        "other streams keep flowing"
+    );
 }

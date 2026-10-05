@@ -399,12 +399,25 @@ pub(crate) fn assert_no_lost_edit(
                 _ => None,
             })
             .collect();
-        let purges: Vec<_> = fold
+        // A purge counts if admitted, or if an admitted version was written on top of it
+        // (its author saw the purge, even if the purge itself fell past a cut).
+        let admitted: Vec<_> = fold
             .retained()
+            .filter(|a| a.kind == RecordKind::Item && a.record_id == record)
+            .filter(|a| admission.admits(&a.stream, a.seq))
+            .collect();
+        let purges: Vec<_> = written
+            .iter()
             .filter(|a| {
                 a.kind == RecordKind::Item && a.record_id == record && a.doc == Doc::Tombstone
             })
-            .filter(|a| admission.admits(&a.stream, a.seq))
+            .filter(|t| {
+                admission.admits(&t.stream, t.seq)
+                    || admitted.iter().any(|b| {
+                        crate::vv::compare(&t.version.vector, &b.version.vector)
+                            == crate::vv::Causality::Before
+                    })
+            })
             .collect();
         for (a, p) in &edits {
             if !admission.admits(&a.stream, a.seq) {
@@ -506,4 +519,37 @@ fn a_copy_written_by_a_device_removed_later_is_written_again() {
         .filter_map(|i| title_of(&view, *i))
         .collect();
     assert!(titles.contains("t0"), "{titles:?}");
+}
+
+#[test]
+fn review_a_purge_past_a_cut_that_another_device_built_on_is_a_purge() {
+    // Device 2 is removed by the root, then (not knowing it) purges an item; device 3 sees
+    // the purge before the removal and writes the item again on top of it. The edits the
+    // purge deleted were deleted on purpose, as far as device 3 is concerned.
+    let ops = vec![
+        Op::Save { dev: 1, item: 0 },
+        Op::Sync { dev: 1 },
+        Op::Sync { dev: 2 },
+        Op::Sync { dev: 3 },
+        Op::Revoke { dev: 0, target: 2 },
+        Op::Trash { dev: 2, item: 0 },
+        Op::Purge { dev: 2, item: 0 },
+        Op::Sync { dev: 2 },
+        Op::Sync { dev: 3 },
+        Op::Save { dev: 3, item: 0 },
+        Op::Sync { dev: 3 },
+        Op::Sync { dev: 0 },
+    ];
+    for faults in [Faults::NONE, Faults::CHAOS] {
+        let (c, _) = run(4, 3328909560891880317, faults, &ops);
+        c.assert_converged();
+        for d in &c.devices {
+            assert_no_lost_edit(
+                d.fold(),
+                &d.view(),
+                d.trust(),
+                &written(&c.devices.iter().collect::<Vec<_>>()),
+            );
+        }
+    }
 }

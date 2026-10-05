@@ -75,17 +75,16 @@ impl Cluster {
                     START_MS,
                 )
             } else {
-                let mut e = Engine::join(
+                Engine::join(
                     device_id(i),
                     signer(i),
                     &device_name(i),
                     ACCOUNT_ID,
                     key,
                     device_id(0),
+                    signer(0).verifying_key(),
                     rng,
-                );
-                e.pin_root_key(signer(0).verifying_key());
-                e
+                )
             });
             links.push(Faulty::new(
                 store.clone(),

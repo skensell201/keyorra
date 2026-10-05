@@ -7,6 +7,7 @@ use crate::faults::Faults;
 use crate::faults::{Overlay, Rollback};
 use crate::payload::conflict_marker;
 use crate::testkit::{device_id, device_name, signer, Cluster, ACCOUNT_ID, ACCOUNT_KEY, START_MS};
+use rand::SeedableRng;
 
 const ITEM: Uuid = Uuid::from_bytes([0x60; 16]);
 
@@ -660,6 +661,7 @@ fn clone_of(e: &Engine<rand::rngs::StdRng>) -> Engine<rand::rngs::OsRng> {
         ACCOUNT_ID,
         Key::from_bytes(ACCOUNT_KEY),
         e.trust.root(),
+        e.trust.root_key(),
         rand::rngs::OsRng,
     );
     twin.sent = e.sent;
@@ -719,7 +721,7 @@ fn an_unapproved_device_reads_but_cannot_write() {
         .unwrap();
     c.sync(0).unwrap();
     c.sync(1).unwrap();
-    // The root's stream verifies with the key in its own Genesis.
+    // The root's stream verifies with the root key from the header / setup code.
     assert_eq!(title(&c.devices[1].view(), ITEM), "base");
     assert!(!c.devices[1].can_write());
     assert!(matches!(
@@ -746,7 +748,7 @@ fn an_unapproved_device_reads_but_cannot_write() {
 }
 
 #[test]
-fn approval_can_come_from_any_approved_device() {
+fn only_the_main_device_approves() {
     let mut c = Cluster::unapproved(3, 5, Faults::NONE);
     let key1 = c.devices[1].verifying_key();
     c.devices[0]
@@ -754,87 +756,87 @@ fn approval_can_come_from_any_approved_device() {
         .unwrap();
     c.heal();
     let key2 = c.devices[2].verifying_key();
-    c.devices[1]
-        .endorse(device_id(2), &key2, &device_name(2), c.clocks[1])
+    assert!(matches!(
+        c.devices[1].endorse(device_id(2), &key2, &device_name(2), c.clocks[1]),
+        Err(Error::Refused(_))
+    ));
+    c.devices[0]
+        .endorse(device_id(2), &key2, &device_name(2), c.clocks[0])
         .unwrap();
     c.heal();
-    let info = c.devices[0].trust().device(&device_id(2)).unwrap().clone();
+    let info = c.devices[1].trust().device(&device_id(2)).unwrap().clone();
     assert_eq!(
         info.introduced,
         crate::trust::Introduction::Endorsed {
-            by: device_id(1),
-            at_seq: info_seq(&c, 1)
+            at_seq: c.devices[0].sent.seq
         }
     );
     assert!(c.devices[2].can_write());
 }
 
-/// The sequence number of device `i`'s last confirmed entry.
-fn info_seq(c: &Cluster, i: usize) -> u64 {
-    c.devices[i].sent.seq
-}
-
 #[test]
-fn a_self_join_pauses_every_other_device_until_the_user_decides() {
-    let mut c = Cluster::unapproved(3, 6, Faults::NONE);
-    let key1 = c.devices[1].verifying_key();
-    c.devices[0]
-        .endorse(device_id(1), &key1, &device_name(1), START_MS)
-        .unwrap();
-    c.heal();
-    c.devices[2].self_join(c.clocks[2]).unwrap();
-    assert!(c.devices[2].can_write());
-    assert!(!c.devices[2].has_powers());
-    c.sync(2).unwrap();
-    let alarm = Alarm::SelfJoined {
-        device: device_id(2),
-        name: device_name(2),
-    };
-    for i in [0, 1] {
-        assert!(c.sync(i).is_err(), "device {i} pauses");
-        assert_eq!(c.devices[i].alarms(), std::slice::from_ref(&alarm));
+fn a_self_joined_device_is_pending_until_the_main_device_decides() {
+    let (mut c, vault) = shared(3);
+    // Device 2 is replaced by a fresh device that joins with the Emergency Kit.
+    let mut kit = Engine::join(
+        device_id(5),
+        signer(5),
+        "Kit",
+        ACCOUNT_ID,
+        Key::from_bytes(ACCOUNT_KEY),
+        device_id(0),
+        signer(0).verifying_key(),
+        rand::rngs::StdRng::seed_from_u64(5),
+    );
+    kit.sync(&c.store, START_MS).unwrap();
+    kit.self_join(START_MS).unwrap();
+    assert!(kit.can_write());
+    assert!(!kit.is_root());
+    kit.save_item(
+        vault,
+        ITEM,
+        &Cluster::item_json(ITEM, "pending", &[]),
+        START_MS,
+    )
+    .unwrap();
+    assert_eq!(title(&kit.view(), ITEM), "pending", "visible on itself");
+    kit.sync(&c.store, START_MS).unwrap();
+    for i in 0..3 {
+        c.sync(i).unwrap();
+        assert_eq!(c.devices[i].alarms(), vec![Alarm::Unapproved { count: 1 }]);
+        assert_eq!(
+            title(&c.devices[i].view(), ITEM),
+            "base",
+            "pending for others"
+        );
     }
-    // Device 1 accepts it as is; device 0 approves it, which resolves it everywhere.
-    assert!(c.devices[1].accept_alarm(&alarm));
-    let key2 = c.devices[2].verifying_key();
-    c.devices[0]
-        .endorse(device_id(2), &key2, &device_name(2), c.clocks[0])
-        .unwrap();
+    // Accepting the alarm only notes it; approving brings the pending edit in.
+    assert!(c.devices[1].accept_alarm(&Alarm::Unapproved { count: 1 }));
+    assert!(c.devices[1].alarms().is_empty());
+    c.devices[0].approve(device_id(5), c.clocks[0]).unwrap();
     assert!(c.devices[0].alarms().is_empty(), "approving resolves it");
     c.heal();
-    assert!(c.devices[2].has_powers());
-    // A self-join must be a stream's first entry.
-    assert!(matches!(
-        c.devices[2].self_join(c.clocks[2]),
-        Err(Error::Refused(_))
-    ));
+    for i in 0..3 {
+        assert_eq!(title(&c.devices[i].view(), ITEM), "pending");
+    }
+    assert!(matches!(kit.self_join(START_MS), Err(Error::Refused(_))));
 }
 
 #[test]
-fn a_device_can_remove_itself() {
-    let (mut c, vault) = shared(2);
-    c.devices[1].revoke(device_id(1), c.clocks[1]).unwrap();
-    assert!(!c.devices[1].can_write());
-    c.heal();
-    let cut = c.devices[0]
-        .trust()
-        .device(&device_id(1))
-        .unwrap()
-        .cut
-        .unwrap();
-    assert!(
-        cut < info_seq(&c, 1),
-        "the revocation itself is after the cut"
-    );
+fn only_the_main_device_removes_and_it_cannot_remove_itself() {
+    let (mut c, _) = shared(2);
     assert!(matches!(
-        c.devices[1].save_item(
-            vault,
-            ITEM,
-            &Cluster::item_json(ITEM, "x", &[]),
-            c.clocks[1]
-        ),
+        c.devices[1].revoke(device_id(1), c.clocks[1]),
         Err(Error::Refused(_))
     ));
+    assert!(matches!(
+        c.devices[0].revoke(device_id(0), c.clocks[0]),
+        Err(Error::Refused(_))
+    ));
+    c.devices[0].revoke(device_id(1), c.clocks[0]).unwrap();
+    c.heal();
+    assert!(!c.devices[1].can_write());
+    assert!(c.devices[1].take_events().contains(&Event::Removed));
 }
 
 #[test]
@@ -856,19 +858,24 @@ fn a_rolled_back_stream_pauses_syncing() {
         stream: device_id(1),
         keep_through: received - 1,
     };
-    let err = c.devices[0]
-        .sync(&restored_backup, c.clocks[0])
-        .unwrap_err();
-    assert!(matches!(err, Error::Refused(_)));
+    c.devices[0].sync(&restored_backup, c.clocks[0]).unwrap();
     let alarm = c.devices[0].alarms()[0].clone();
     assert!(matches!(alarm, Alarm::Rollback { stream, .. } if stream == device_id(1)));
-    // Paused until the user decides.
-    assert!(matches!(
-        c.devices[0].sync(&c.store, c.clocks[0]),
-        Err(Error::Refused(_))
-    ));
+    // That stream is paused until the user decides; the others are not.
+    c.devices[1]
+        .save_item(
+            vault,
+            ITEM,
+            &Cluster::item_json(ITEM, "later", &[]),
+            c.clocks[1],
+        )
+        .unwrap();
+    c.sync(1).unwrap();
+    c.devices[0].sync(&c.store, c.clocks[0]).unwrap();
+    assert_eq!(title(&c.devices[0].view(), ITEM), "newer");
     assert!(c.devices[0].accept_alarm(&alarm));
     c.devices[0].sync(&c.store, c.clocks[0]).unwrap();
+    assert_eq!(title(&c.devices[0].view(), ITEM), "later");
 }
 
 #[test]
@@ -890,8 +897,8 @@ fn a_rollback_of_the_own_stream_is_noticed_before_writing() {
         .unwrap();
     let _ = c.devices[0].sync(&restored_backup, c.clocks[0]);
     assert!(matches!(
-        c.devices[0].alarms().first(),
-        Some(Alarm::Rollback { stream, .. }) if *stream == device_id(0)
+        c.devices[0].alarms().first().cloned(),
+        Some(Alarm::Rollback { stream, .. }) if stream == device_id(0)
     ));
 }
 
@@ -942,9 +949,10 @@ fn a_fork_is_detected_through_another_devices_checkpoint() {
         .unwrap();
     c.sync(2).unwrap();
     let _ = c.devices[0].sync(&partitioned, c.clocks[0]);
+    // Device 2 is not the main device: a dispute (either side may be lying).
     assert!(matches!(
-        c.devices[0].alarms().first(),
-        Some(Alarm::Fork { stream, .. }) if *stream == device_id(1)
+        c.devices[0].alarms().first().cloned(),
+        Some(Alarm::Disputed { stream, by, .. }) if stream == device_id(1) && by == device_id(2)
     ));
 }
 
@@ -978,7 +986,7 @@ fn a_segment_that_does_not_continue_the_chain_is_a_fork() {
     }
     let _ = c.devices[0].sync(&c.store, c.clocks[0]);
     assert!(matches!(
-        c.devices[0].alarms().first(),
+        c.devices[0].alarms().first().cloned(),
         Some(Alarm::Fork { .. })
     ));
 }

@@ -2,24 +2,23 @@
 //! stream, applying what it carries, materialising conflict copies, and writing its own stream.
 //!
 //! Reading has two layers. The **log** layer receives segments strictly in order per stream:
-//! signature (the key comes from [`Trust`]: an introduced device's key, or the pinned root key;
-//! a self-joining device's first segment carries its own key, used only when no trust entry of
-//! any stream is still waiting), chain continuity (every entry's chain hash is kept, so a fork
-//! is noticed at any position). Past a stream's cut only trust entries and checkpoints are
-//! kept (a later revocation can still change which cuts count); records there are skipped,
-//! and read again if the cut moves. The **apply** layer applies
-//! received entries with per-record buffering: each lane (one record of one stream, or one
-//! stream's trust entries) applies in order, an entry waits only for what it needs, and only
-//! lane heads are looked at.
+//! signature (the key is the root's, known from the account header or the setup code, or one
+//! the root gave in an `Endorse`; never a key a stream certifies for itself), chain continuity
+//! (every entry's chain hash is kept and compared when seen again, so a fork is noticed at any
+//! position). Trust entries of the root's stream are applied at once, in stream order; trust
+//! entries of other streams are ignored. Past a stream's cut, records are skipped (only their
+//! ids are noted). The **apply** layer applies records with per-record buffering: each lane
+//! (one record of one stream) applies in order, an entry waits only for what it needs, and
+//! only lane heads are looked at.
 //!
 //! Only admitted positions affect anything: checkpoints are evaluated once their position is
 //! known to count; vault keys come only from admitted vault versions (a body that opens under
 //! none of them waits, it never rejects the stream).
 //!
-//! Alarms (rollback, fork, a self-joined device, an id endorsed with two keys) form a queue;
-//! while any is open, syncing is paused. Each is accepted one by one ([`Engine::accept_alarm`]),
-//! or resolves itself (a self-joined device approved or removed). Checkpoint claims unmet for a
-//! day raise [`Event::Withheld`] (a warning).
+//! Alarms are scoped: a rollback or fork pauses only the stream concerned (the own stream:
+//! no pushing); devices that self-joined and await the root's decision raise one aggregated
+//! alarm that pauses nothing (their records count for nobody anyway). Checkpoint claims unmet
+//! for a day raise [`Event::Withheld`] (a warning).
 //!
 //! Plan A1c-2 adds account headers, snapshots, restore, retiring the device id and the outbox
 //! persistence hook; A3 the editor's base version; C1 key rotation and GC.
@@ -60,7 +59,8 @@ pub const CHECKPOINT_EVERY_MS: u64 = 60 * 60 * 1000;
 /// Checkpoint claims unmet for this long are reported as withheld (spec §4.5).
 pub const WITHHELD_AFTER_MS: u64 = 24 * 60 * 60 * 1000;
 
-/// Something that pauses syncing until the user decides (spec §4.3, §4.5).
+/// Something the user must decide on (spec §4.3, §4.5). Rollbacks and forks pause the stream
+/// concerned until accepted; nothing else is paused.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Alarm {
     /// The store holds fewer segments of `stream` than this device already received.
@@ -69,13 +69,29 @@ pub enum Alarm {
         received: u64,
         stored: u64,
     },
-    /// Two different histories of `stream` at `seq`.
+    /// Two different histories of `stream` at `seq`: seen directly, or claimed by the main
+    /// device's checkpoint or removal.
     Fork { stream: DeviceId, seq: u64 },
-    /// A device joined with the Emergency Kit, approved by no device. Resolved by approving
-    /// or removing it, or by accepting the alarm (it keeps writing records, without powers).
-    SelfJoined { device: DeviceId, name: String },
-    /// One device id was endorsed with two different keys; the id is in quarantine.
-    KeyConflict { device: DeviceId },
+    /// Another (non-main) device's checkpoint claims a different history of `stream` at
+    /// `seq`: either `stream` forked or `by` lies. Pauses nothing.
+    Disputed {
+        stream: DeviceId,
+        seq: u64,
+        by: DeviceId,
+    },
+    /// `count` devices joined with the Emergency Kit and await the main device's decision
+    /// ([`Trust::unapproved`]). Their records count for nobody meanwhile.
+    Unapproved { count: usize },
+}
+
+impl Alarm {
+    /// The stream this alarm pauses, if any.
+    pub fn stream(&self) -> Option<DeviceId> {
+        match self {
+            Alarm::Rollback { stream, .. } | Alarm::Fork { stream, .. } => Some(*stream),
+            Alarm::Unapproved { .. } | Alarm::Disputed { .. } => None,
+        }
+    }
 }
 
 impl fmt::Display for Alarm {
@@ -94,18 +110,17 @@ impl fmt::Display for Alarm {
             Alarm::Fork { stream, seq } => {
                 write!(f, "two different histories of {} at {seq}", short(stream))
             }
-            Alarm::SelfJoined { device, name } => write!(
+            Alarm::Disputed { stream, seq, by } => write!(
                 f,
-                "\"{name}\" ({}) joined without approval by any of your devices",
-                short(device)
+                "{} claims another history of {} at {seq}",
+                short(by),
+                short(stream)
             ),
-            Alarm::KeyConflict { device } => {
-                write!(
-                    f,
-                    "device {} was approved with two different keys",
-                    short(device)
-                )
-            }
+            Alarm::Unapproved { count } => write!(
+                f,
+                "{count} device(s) joined with the Emergency Kit and were not approved by the \
+                 main device"
+            ),
         }
     }
 }
@@ -151,7 +166,8 @@ pub enum Event {
         first_seq: u64,
         reason: String,
     },
-    /// A trust entry that does not hold (bad signature, out of place); it is ignored.
+    /// A trust entry that does not count (not from the main device, bad signature, out of
+    /// place, already decided); it is ignored.
     TrustEntryIgnored {
         from: DeviceId,
         seq: u64,
@@ -171,9 +187,9 @@ pub enum Event {
         from: DeviceId,
         claimed_seq: u64,
     },
-    /// A new alarm; syncing is paused until it is accepted or resolves.
+    /// A new alarm.
     Alarm(Alarm),
-    /// Another device removed this one: it reads but no longer writes. A3 offers to rejoin.
+    /// The main device removed this one: it reads but no longer writes. A3 offers to rejoin.
     Removed,
     /// Someone else wrote at this device's next position (retiring the id: plan A1c-2).
     OwnStreamConflict,
@@ -186,32 +202,17 @@ struct Unsent {
     last_hash: [u8; 32],
 }
 
-/// A received entry that has not been applied yet.
+/// A received record that has not been applied yet.
 #[derive(Clone, Debug)]
 struct Pending {
     seq: u64,
-    entry: Entry,
-    /// For a trust entry: what the stream's device had received before it, by its own
-    /// earlier checkpoints.
-    seen: Heads,
-    /// The opened content of a `Put`, once known (so waiting does not decrypt again).
+    env: Envelope,
+    /// The opened content, once known (so waiting does not decrypt again).
     doc: Option<Doc>,
 }
 
-/// Entries of one stream apply in order within a lane: per record for `Put`, all trust
-/// entries together.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-enum Lane {
-    Trust,
-    Record(RecordKey),
-}
-
-fn lane_of(entry: &Entry) -> Lane {
-    match entry {
-        Entry::Put(env) => Lane::Record((env.kind, env.record_id)),
-        _ => Lane::Trust,
-    }
-}
+/// Records of one stream apply in order per record.
+type Lane = (DeviceId, RecordKey);
 
 enum Applied {
     Done,
@@ -224,6 +225,7 @@ enum Applied {
 struct Claim {
     head: Head,
     since_ms: u64,
+    by: DeviceId,
 }
 
 /// A checkpoint received at `(from, at)`, evaluated once its position is known to count.
@@ -251,8 +253,8 @@ pub struct Engine<R> {
     heads: Heads,
     /// Per other device: the chain hash of every received entry.
     hashes: BTreeMap<DeviceId, BTreeMap<u64, [u8; 32]>>,
-    /// Received entries waiting to be applied, per stream and lane.
-    lanes: BTreeMap<(DeviceId, Lane), VecDeque<Pending>>,
+    /// Received records waiting to be applied, per stream and record.
+    lanes: BTreeMap<Lane, VecDeque<Pending>>,
     pending_count: BTreeMap<DeviceId, usize>,
     /// Per stream: the highest position of every device listed in its checkpoints so far.
     checkpoint_bounds: BTreeMap<DeviceId, Heads>,
@@ -261,11 +263,8 @@ pub struct Engine<R> {
     withheld_reported: BTreeSet<DeviceId>,
     /// Streams no longer read: a protocol violation, or a fork the user accepted.
     blocked: BTreeSet<DeviceId>,
-    /// Per stream: the first position of a segment whose records were skipped past the cut.
-    skipped_from: BTreeMap<DeviceId, u64>,
-    /// Per rewound stream: how far it had been received. Up to there only records are taken
-    /// again; everything else was handled the first time.
-    rewound_through: BTreeMap<DeviceId, u64>,
+    /// Streams without a key whose start was looked at for a `SelfJoin`.
+    peeked: BTreeSet<DeviceId>,
     /// Last own position confirmed by the transport.
     sent: Head,
     /// Chain hash of every own entry, confirmed or queued.
@@ -276,9 +275,12 @@ pub struct Engine<R> {
     /// Heads in the last checkpoint this device wrote, and when.
     last_checkpoint: Option<(Heads, u64)>,
     events: Vec<Event>,
+    /// Open rollback and fork alarms (one per stream and kind).
     alarms: Vec<Alarm>,
     accepted_alarms: BTreeSet<Alarm>,
     acknowledged_rollbacks: BTreeSet<(DeviceId, u64)>,
+    /// How many unapproved devices the user has already seen in an alarm.
+    unapproved_seen: usize,
     removed_reported: bool,
     /// Set after `OwnStreamConflict`: nothing more is written (plan A1c-2 retires the id).
     halted: bool,
@@ -292,7 +294,8 @@ pub struct Engine<R> {
 }
 
 impl<R: RngCore + CryptoRng> Engine<R> {
-    /// The first device of a new account: its stream starts with `Genesis`.
+    /// The first device of a new account, the main device (root): its stream starts with
+    /// `Genesis`, and it alone approves and removes devices.
     pub fn create_account(
         device: DeviceId,
         signer: SigningKey,
@@ -302,9 +305,17 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         rng: R,
         wall_ms: u64,
     ) -> Self {
-        let mut engine = Self::join(device, signer, name, account_id, account_key, device, rng);
-        let key = engine.signer.verifying_key();
-        engine.trust.pin_root(key);
+        let key = signer.verifying_key();
+        let mut engine = Self::join(
+            device,
+            signer,
+            name,
+            account_id,
+            account_key,
+            device,
+            key,
+            rng,
+        );
         let genesis = Entry::Genesis {
             account_id,
             key: key.to_bytes(),
@@ -316,10 +327,11 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         engine
     }
 
-    /// A further device of an existing account (`root` comes from the account header; pin its
-    /// key with [`pin_root_key`](Self::pin_root_key) when pairing provides it). It reads what
-    /// it can, and can write once another device endorses it or after
+    /// A further device of an existing account. `root` and `root_key` come from the account
+    /// header or the setup code (never from the store's streams). It reads what it can, and
+    /// writes once the main device approves it, or pending after
     /// [`self_join`](Self::self_join).
+    #[allow(clippy::too_many_arguments)]
     pub fn join(
         device: DeviceId,
         signer: SigningKey,
@@ -327,6 +339,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         account_id: AccountId,
         account_key: Key,
         root: DeviceId,
+        root_key: VerifyingKey,
         rng: R,
     ) -> Self {
         Engine {
@@ -339,7 +352,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             rng,
             hlc: Hlc::default(),
             fold: Fold::default(),
-            trust: Trust::new(account_id, root),
+            trust: Trust::new(account_id, root, root_key),
             unwrapped: BTreeMap::new(),
             heads: Heads::new(),
             hashes: BTreeMap::new(),
@@ -350,8 +363,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             claims: BTreeMap::new(),
             withheld_reported: BTreeSet::new(),
             blocked: BTreeSet::new(),
-            skipped_from: BTreeMap::new(),
-            rewound_through: BTreeMap::new(),
+            peeked: BTreeSet::new(),
             sent: Head {
                 seq: 0,
                 hash: chain_genesis(&account_id, &device),
@@ -365,6 +377,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             alarms: Vec::new(),
             accepted_alarms: BTreeSet::new(),
             acknowledged_rollbacks: BTreeSet::new(),
+            unapproved_seen: 0,
             removed_reported: false,
             halted: false,
             #[cfg(test)]
@@ -372,11 +385,6 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             clock_reported: BTreeSet::new(),
             stalls: BTreeMap::new(),
         }
-    }
-
-    /// Pins the root's key (from pairing; plan A1c-2 binds it into the account header).
-    pub fn pin_root_key(&mut self, key: VerifyingKey) {
-        self.trust.pin_root(key);
     }
 
     pub fn device(&self) -> DeviceId {
@@ -408,23 +416,36 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         std::mem::take(&mut self.events)
     }
 
-    /// Open alarms; syncing is paused while there is any.
-    pub fn alarms(&self) -> &[Alarm] {
-        &self.alarms
+    /// Open alarms: rollbacks and forks (each pausing its stream), and the aggregated alarm
+    /// about devices awaiting approval if it lists more than the user has seen.
+    pub fn alarms(&self) -> Vec<Alarm> {
+        let mut alarms = self.alarms.clone();
+        let count = self.trust.unapproved().len();
+        if count > self.unapproved_seen {
+            alarms.push(Alarm::Unapproved { count });
+        }
+        alarms
     }
 
-    /// The user accepted `alarm`: a fork stops reading that stream, a rollback is taken as
-    /// is, a self-joined device keeps writing records without powers, a quarantined id stays
-    /// so. Returns whether it was open.
+    /// The user accepted `alarm`: a fork stops reading that stream further, a rollback is taken as
+    /// is, the unapproved devices listed are noted (a new one raises it again). Returns
+    /// whether it was open.
     pub fn accept_alarm(&mut self, alarm: &Alarm) -> bool {
+        if let Alarm::Unapproved { count } = alarm {
+            let open = self.alarms().contains(alarm);
+            if open {
+                self.unapproved_seen = *count;
+            }
+            return open;
+        }
         let Some(i) = self.alarms.iter().position(|a| a == alarm) else {
             return false;
         };
         let alarm = self.alarms.remove(i);
         match &alarm {
+            // What was received before the fork is a verified history: it still applies.
             Alarm::Fork { stream, .. } if *stream != self.device => {
                 self.blocked.insert(*stream);
-                self.drop_pending(stream);
             }
             Alarm::Rollback { stream, stored, .. } => {
                 self.acknowledged_rollbacks.insert((*stream, *stored));
@@ -435,14 +456,20 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         true
     }
 
-    /// Whether this device's next entry would count (introduced and not removed).
+    /// Whether this device's next entry would count: approved and not removed, or
+    /// self-joined and not (yet) decided on (then it counts only here until approved).
     pub fn can_write(&self) -> bool {
         self.trust.admits(&self.device, self.next_seq)
     }
 
-    /// Whether this device may approve and remove others.
-    pub fn has_powers(&self) -> bool {
-        self.can_write() && self.trust.device(&self.device).is_some_and(|d| d.powers)
+    /// Whether this is the main device, the one that approves and removes devices.
+    pub fn is_root(&self) -> bool {
+        self.device == self.trust.root()
+    }
+
+    /// Whether `stream` is paused by an open rollback or fork alarm.
+    fn paused(&self, stream: &DeviceId) -> bool {
+        self.alarms.iter().any(|a| a.stream() == Some(*stream))
     }
 
     /// Reports a stall of `from`'s stream unless the same one was reported last.
@@ -454,22 +481,59 @@ impl<R: RngCore + CryptoRng> Engine<R> {
     }
 
     fn raise(&mut self, alarm: Alarm) {
+        if let Alarm::Disputed { by, stream, seq } = &alarm {
+            let past_cut = self.trust.is_removed(stream)
+                || self
+                    .trust
+                    .device(stream)
+                    .and_then(|d| d.cut)
+                    .is_some_and(|c| seq > &c);
+            if past_cut {
+                return;
+            }
+            // One open dispute per claimant.
+            let open = self
+                .alarms
+                .iter()
+                .any(|a| matches!(a, Alarm::Disputed { by: b, .. } if b == by));
+            if !open && !self.accepted_alarms.contains(&alarm) {
+                self.events.push(Event::Alarm(alarm.clone()));
+                self.alarms.push(alarm);
+            }
+            return;
+        }
+        let Some(stream) = alarm.stream() else {
+            return;
+        };
         // Two histories past a removed device's cut: neither counts, so nothing to decide
         // (reading that stream simply stops at the fork).
-        if let Alarm::Fork { stream, seq } = &alarm {
-            let past_cut = self
-                .trust
-                .device(stream)
-                .and_then(|d| d.cut)
-                .is_some_and(|c| *seq > c);
+        if let Alarm::Fork { seq, .. } = &alarm {
+            let past_cut = self.trust.is_removed(&stream)
+                || self
+                    .trust
+                    .device(&stream)
+                    .and_then(|d| d.cut)
+                    .is_some_and(|c| *seq > c);
             if past_cut {
                 return;
             }
         }
-        if !self.alarms.contains(&alarm) && !self.accepted_alarms.contains(&alarm) {
-            self.events.push(Event::Alarm(alarm.clone()));
-            self.alarms.push(alarm);
+        if self.accepted_alarms.contains(&alarm) {
+            return;
         }
+        // One alarm per stream and kind: a repeated rollback replaces the earlier one.
+        let same_kind = |a: &Alarm| {
+            a.stream() == Some(stream)
+                && std::mem::discriminant(a) == std::mem::discriminant(&alarm)
+        };
+        if let Some(i) = self.alarms.iter().position(same_kind) {
+            if matches!(alarm, Alarm::Rollback { .. }) && self.alarms[i] != alarm {
+                self.alarms[i] = alarm;
+            }
+            return;
+        }
+        self.events.push(Event::Alarm(alarm.clone()));
+        self.alarms.push(alarm);
     }
 
     fn drop_pending(&mut self, stream: &DeviceId) {
@@ -480,10 +544,10 @@ impl<R: RngCore + CryptoRng> Engine<R> {
     // ---- trust ----
 
     /// Joins without approval, with the Emergency Kit: the stream's first entry is a
-    /// `SelfJoin`. The device may write records but has no powers, and every other device
-    /// pauses with an alarm until the user approves or removes it (spec §4.3).
+    /// `SelfJoin`. The device may write, but its records count for nobody else until the main
+    /// device approves it; others see an alarm (spec §4.3).
     pub fn self_join(&mut self, wall_ms: u64) -> Result<()> {
-        if self.next_seq != 1 {
+        if self.next_seq != 1 || self.is_root() {
             return Err(Error::Refused("self-join must be the first entry".into()));
         }
         let key = self.signer.verifying_key().to_bytes();
@@ -493,10 +557,11 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             name: self.name.clone(),
             sig,
         };
+        self.trust.set_pending_self(self.device);
         self.write_entry(entry, wall_ms)
     }
 
-    /// Approves another device (after the code comparison of spec §6.4). Needs powers.
+    /// Approves another device (after the code comparison of spec §6.4). Main device only.
     pub fn endorse(
         &mut self,
         device: DeviceId,
@@ -504,7 +569,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         name: &str,
         wall_ms: u64,
     ) -> Result<()> {
-        self.require_powers()?;
+        self.require_root()?;
         let key = key.to_bytes();
         let sig = sign_endorsement(&self.signer, &self.account_id, &device, &key);
         let entry = Entry::Endorse {
@@ -516,30 +581,32 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         self.write_entry(entry, wall_ms)
     }
 
-    /// Removes a device: its entries after the last position this device received stop
-    /// counting everywhere. Needs powers, except for removing this device itself.
-    pub fn revoke(&mut self, device: DeviceId, wall_ms: u64) -> Result<()> {
-        if device == self.device {
-            self.require_writable()?;
-        } else {
-            self.require_powers()?;
-        }
-        let (last_valid_seq, last_valid_hash) = if device == self.device {
-            let seq = self.next_seq - 1;
-            (seq, self.own_hashes.get(&seq).copied().unwrap_or([0; 32]))
-        } else {
-            let seq = self.heads.get(&device).map_or(0, |h| h.seq);
-            let hash = self
-                .hashes
-                .get(&device)
-                .and_then(|h| h.get(&seq))
-                .copied()
-                .unwrap_or([0; 32]);
-            (seq, hash)
+    /// Approves a device that self-joined, with the key its `SelfJoin` carries.
+    pub fn approve(&mut self, device: DeviceId, wall_ms: u64) -> Result<()> {
+        let Some(u) = self.trust.unapproved().get(&device).cloned() else {
+            return Err(Error::NotFound("no such device awaiting approval".into()));
         };
+        self.endorse(device, &u.key, &u.name, wall_ms)
+    }
+
+    /// Removes a device: its entries after the last position this device received stop
+    /// counting everywhere (for a device never approved: all of them). Main device only; the
+    /// main device itself cannot be removed.
+    pub fn revoke(&mut self, device: DeviceId, wall_ms: u64) -> Result<()> {
+        self.require_root()?;
+        if device == self.trust.root() && !self.forging() {
+            return Err(Error::Refused("the main device cannot be removed".into()));
+        }
+        let seq = self.heads.get(&device).map_or(0, |h| h.seq);
+        let last_valid_hash = self
+            .hashes
+            .get(&device)
+            .and_then(|h| h.get(&seq))
+            .copied()
+            .unwrap_or([0; 32]);
         let entry = Entry::Revoke {
             device,
-            last_valid_seq,
+            last_valid_seq: seq,
             last_valid_hash,
         };
         self.write_entry(entry, wall_ms)
@@ -562,29 +629,36 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         }
     }
 
-    fn require_powers(&self) -> Result<()> {
-        if self.has_powers() || self.forging() {
+    fn require_root(&self) -> Result<()> {
+        if (self.is_root() && self.can_write()) || self.forging() {
             Ok(())
         } else {
             Err(Error::Refused(
-                "only an approved device can approve or remove others".into(),
+                "only the main device approves or removes devices".into(),
             ))
         }
     }
 
-    /// The keys of `vault` from its admitted versions (more than one only around a mismatch,
-    /// which the fold reports).
+    /// The keys a body of `vault` may open with: those of its admitted versions first, then
+    /// those of versions that no longer count. Opening is safe with any key: what a record
+    /// says is vouched for by the signature of the stream that carries it, not by the vault
+    /// key. (A device may have sealed records with the key of a version that counted when it
+    /// wrote them and was cut later; those records must stay readable.) Which key new records
+    /// are sealed with comes only from the visible version.
     fn vault_keys_for(&mut self, vault: Uuid) -> Vec<Key> {
-        let wrapped: Vec<Vec<u8>> = self
+        let mut versions: Vec<(bool, Vec<u8>)> = self
             .fold
             .retained()
             .filter(|a| a.kind == RecordKind::Vault && a.record_id == vault)
-            .filter(|a| self.trust.admits(&a.stream, a.seq))
             .filter_map(|a| match &a.doc {
-                Doc::Vault(v) => Some(v.wrapped_key.clone()),
+                Doc::Vault(v) => {
+                    Some((!self.trust.admits(&a.stream, a.seq), v.wrapped_key.clone()))
+                }
                 _ => None,
             })
             .collect();
+        versions.sort_by_key(|(not_admitted, _)| *not_admitted);
+        let wrapped: Vec<Vec<u8>> = versions.into_iter().map(|(_, w)| w).collect();
         let mut keys: Vec<Key> = Vec::new();
         for w in wrapped {
             if let Some(k) = self.unwrap_vault_key(vault, &w) {
@@ -598,12 +672,31 @@ impl<R: RngCore + CryptoRng> Engine<R> {
 
     /// The key to write into `vault` with: the one of its visible version.
     fn writer_vault_key(&mut self, vault: Uuid) -> Option<Key> {
-        let wrapped = self
-            .fold
-            .set(RecordKind::Vault, vault)
-            .and_then(|s| present_vault(s, false))
-            .map(|p| p.payload.wrapped_key.clone())?;
+        let wrapped = self.vault_wrapped_key(vault)?;
         self.unwrap_vault_key(vault, &wrapped)
+    }
+
+    /// A vault's key is fixed when the vault is created (until key rotation, C1): the one of
+    /// its earliest admitted version, the ancestor of all others. Later versions carrying
+    /// another key (a removed device's, written before readers knew) are never written with
+    /// and never copied into new versions.
+    fn vault_wrapped_key(&self, vault: Uuid) -> Option<Vec<u8>> {
+        self.fold
+            .retained()
+            .filter(|a| a.kind == RecordKind::Vault && a.record_id == vault)
+            .filter(|a| self.trust.admits(&a.stream, a.seq))
+            .filter_map(|a| match &a.doc {
+                Doc::Vault(v) => {
+                    let total: u64 = a.version.vector.values().sum();
+                    Some((
+                        (total, a.version.hlc, a.version.author),
+                        v.wrapped_key.clone(),
+                    ))
+                }
+                _ => None,
+            })
+            .min_by(|x, y| x.0.cmp(&y.0))
+            .map(|(_, w)| w)
     }
 
     fn unwrap_vault_key(&mut self, vault: Uuid, wrapped: &[u8]) -> Option<Key> {
@@ -747,11 +840,16 @@ impl<R: RngCore + CryptoRng> Engine<R> {
     }
 
     fn vault_payload(&self, id: Uuid) -> Result<VaultPayload> {
-        self.fold
+        let mut p = self
+            .fold
             .set(RecordKind::Vault, id)
             .and_then(|s| present_vault(s, false))
             .map(|p| p.payload.clone())
-            .ok_or_else(|| Error::NotFound(format!("vault {id}")))
+            .ok_or_else(|| Error::NotFound(format!("vault {id}")))?;
+        if let Some(w) = self.vault_wrapped_key(id) {
+            p.wrapped_key = w;
+        }
+        Ok(p)
     }
 
     fn item_in_state(&self, id: Uuid, want: ItemState) -> Result<(Option<Uuid>, ItemPayload)> {
@@ -846,7 +944,8 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         Ok(())
     }
 
-    /// Writes a trust entry (recorded at once) or a checkpoint.
+    /// Writes a trust entry (applied at once on the main device; on others it counts for
+    /// nobody, which only an attacker's copy would do).
     fn write_entry(&mut self, entry: Entry, wall_ms: u64) -> Result<()> {
         // `Genesis` and `SelfJoin` must be the stream's first entry: no checkpoint before them.
         let introduction = matches!(entry, Entry::Genesis { .. } | Entry::SelfJoin { .. });
@@ -855,17 +954,18 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         } else {
             self.reserve_seq(wall_ms)
         };
-        let key = self.signer.verifying_key();
-        // What readers will see in this device's last checkpoint before the entry.
-        let seen = self
-            .last_checkpoint
-            .as_ref()
-            .map(|(h, _)| h.clone())
-            .unwrap_or_default();
-        let changed = self
-            .trust
-            .record(self.device, &key, seq, &entry, &seen)
-            .map_err(|e| Error::Refused(e.to_string()))?;
+        let mut changed = false;
+        if self.is_root() {
+            let seen = self.last_checkpoint.as_ref().map(|(h, _)| h.clone());
+            let result = self.trust.apply_root(seq, &entry, |d| {
+                seen.as_ref().and_then(|h| h.get(d)).map_or(0, |h| h.seq)
+            });
+            match result {
+                Ok(c) => changed = c,
+                Err(e) if !self.forging() => return Err(Error::Refused(e.to_string())),
+                Err(_) => {}
+            }
+        }
         self.queue(entry);
         if changed {
             self.trust_changed();
@@ -913,27 +1013,18 @@ impl<R: RngCore + CryptoRng> Engine<R> {
     /// One round: receive and apply everything readable, materialise conflict copies, push.
     /// Whatever was applied is always materialised and pushed, even if the transport failed
     /// part of the way (a failed stream listing is only an event); the error, if any, is
-    /// returned afterwards. While an [`Alarm`] is open only trust entries are applied (so an
-    /// alarm resolved on another device, by approving or removing, resolves here too) and
-    /// nothing is materialised; what the user did on this device is still pushed, unless the
-    /// alarm is about this device's own stream.
+    /// returned afterwards. Alarms do not make a round fail: a rollback or fork pauses only
+    /// its stream (the own stream: nothing is pushed), see [`Engine::alarms`].
     pub fn sync(&mut self, transport: &impl Transport, wall_ms: u64) -> Result<()> {
         let pulled = self.pull(transport, wall_ms);
-        if self.alarms.is_empty() && self.can_write() {
+        if self.can_write() {
             self.materialize(wall_ms)?;
             self.checkpoint_if_stale(wall_ms);
         }
-        let own_alarm = self.alarms.iter().any(|a| match a {
-            Alarm::Rollback { stream, .. } | Alarm::Fork { stream, .. } => *stream == self.device,
-            _ => false,
-        });
-        if !own_alarm {
+        if !self.paused(&self.device) {
             self.push(transport);
         }
-        match self.alarms.first() {
-            Some(alarm) => Err(Error::Refused(format!("sync paused: {alarm}"))),
-            None => pulled,
-        }
+        pulled
     }
 
     fn checkpoint_if_stale(&mut self, wall_ms: u64) {
@@ -952,6 +1043,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             .streams()?
             .into_iter()
             .filter(|d| *d != self.device && !self.blocked.contains(d))
+            .filter(|d| !self.trust.is_removed(d))
             .collect();
         for stream in &streams {
             self.check_stored_head(transport, stream);
@@ -959,6 +1051,9 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         loop {
             let mut progress = false;
             for stream in &streams {
+                if self.paused(stream) {
+                    continue;
+                }
                 match self.receive_stream(transport, stream) {
                     Ok(p) => progress |= p,
                     Err(e) => self.events.push(Event::ListingFailed {
@@ -1001,34 +1096,32 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         }
     }
 
-    /// The key that verifies `stream`'s segment at `want`: the stream's key from trust, or
-    /// the key a self-joining device's first entry carries, but only while no trust entry of
-    /// an introduced stream is still waiting to be applied (one of them could endorse this id
-    /// with another key).
-    fn stream_key(
-        &self,
-        stream: &DeviceId,
-        want: u64,
-        first: Option<&Value>,
-    ) -> Option<VerifyingKey> {
-        if let Some(key) = self.trust.key(stream) {
-            return Some(key);
+    /// A stream the main device has not given a key: if its first segment is a valid
+    /// `SelfJoin` (signed by the key it carries), the device is noted as awaiting approval.
+    /// Nothing else of it is read or credited.
+    fn peek_self_join(&mut self, stream: &DeviceId, first: &[u8]) {
+        let Ok(unverified) = decrypt_segment(&self.segment_key, first) else {
+            return;
+        };
+        let Some(Ok(Entry::SelfJoin { key, name, sig })) =
+            unverified.entries.first().map(Entry::from_value)
+        else {
+            return;
+        };
+        let Ok(vk) = VerifyingKey::from_bytes(&key) else {
+            return;
+        };
+        if !crate::entry::verify_endorsement(&vk, &self.account_id, stream, &key, &sig) {
+            return;
         }
-        let trust_waiting = self
-            .lanes
-            .keys()
-            .any(|(d, lane)| *lane == Lane::Trust && self.trust.device(d).is_some());
-        if want != 1 || trust_waiting {
-            return None;
+        if unverified.verify(&vk).is_err() {
+            return;
         }
-        let entry = Entry::from_value(first?).ok()?;
-        let own = match &entry {
-            // An unpinned root (a device joined without pairing): its Genesis key.
-            Entry::Genesis { .. } if *stream == self.trust.root() => entry.own_key(),
-            Entry::SelfJoin { .. } if *stream != self.trust.root() => entry.own_key(),
-            _ => None,
-        }?;
-        VerifyingKey::from_bytes(&own).ok()
+        self.peeked.insert(*stream);
+        if self.trust.note_self_join(*stream, vk, &name) {
+            let count = self.trust.unapproved().len();
+            self.events.push(Event::Alarm(Alarm::Unapproved { count }));
+        }
     }
 
     /// Receives every segment of `stream` that continues its chain, up to its cut. Returns
@@ -1038,7 +1131,12 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             seq: 0,
             hash: chain_genesis(&self.account_id, stream),
         });
-        if self.pending_count.get(stream).copied().unwrap_or(0) >= MAX_PENDING_PER_STREAM {
+        let is_root = *stream == self.trust.root();
+        // The root's stream carries trust: never held back (its records are capped by the
+        // root itself, which is trusted anyway).
+        if !is_root
+            && self.pending_count.get(stream).copied().unwrap_or(0) >= MAX_PENDING_PER_STREAM
+        {
             self.stall(
                 *stream,
                 Event::Waiting {
@@ -1062,6 +1160,15 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             })
             .collect();
         candidates.sort_by_key(|(seq, _)| *seq);
+        let Some(key) = self.trust.key(stream) else {
+            if head.seq == 0 && !self.peeked.contains(stream) {
+                if let Some((_, first)) = candidates.iter().find(|(s, _)| *s == 1) {
+                    let first = first.clone();
+                    self.peek_self_join(stream, &first);
+                }
+            }
+            return Ok(false);
+        };
         let mut received = false;
         loop {
             let want = head.seq + 1;
@@ -1072,15 +1179,12 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                 let Ok(unverified) = decrypt_segment(&self.segment_key, bytes) else {
                     continue;
                 };
-                let Some(key) = self.stream_key(stream, want, unverified.entries.first()) else {
-                    continue;
-                };
                 if let Ok(segment) = unverified.verify(&key) {
-                    opened = Some((segment, key));
+                    opened = Some(segment);
                     break;
                 }
             }
-            let Some((segment, key)) = opened else {
+            let Some(segment) = opened else {
                 if tried {
                     self.stall(
                         *stream,
@@ -1105,15 +1209,21 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             for (i, value) in segment.entries.iter().enumerate() {
                 let seq = segment.header.first_seq + i as u64;
                 hash = chain_next(&hash, value);
-                self.hashes.entry(*stream).or_default().insert(seq, hash);
+                // A position seen before with another hash: two histories.
+                let known = self.hashes.entry(*stream).or_default();
+                if known.get(&seq).is_some_and(|h| *h != hash) {
+                    self.raise(Alarm::Fork {
+                        stream: *stream,
+                        seq,
+                    });
+                    return Ok(received);
+                }
+                known.insert(seq, hash);
                 match Entry::from_value(value) {
-                    // Records past a cut do not count; they are read again if the cut moves.
-                    // Only the record id is kept: it can name a conflict copy owed again.
+                    // Records past a cut never count (a cut never moves); only the record id
+                    // is kept: it can name a conflict copy owed again.
                     Ok(Entry::Put(env)) if cut.is_some_and(|c| seq > c) => {
                         self.fold.note_skipped(env.kind, env.record_id);
-                        self.skipped_from
-                            .entry(*stream)
-                            .or_insert(segment.header.first_seq);
                     }
                     Ok(Entry::Put(env)) if env.version.author != *stream => {
                         self.reject(
@@ -1142,15 +1252,11 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                 }
             }
             let count = entries.len();
-            let rewound = self.rewound_through.get(stream).copied().unwrap_or(0);
             for (seq, entry) in entries {
-                if seq <= rewound && !matches!(entry, Entry::Put(_)) {
-                    continue; // handled when first received
-                }
-                match &entry {
+                match entry {
                     Entry::Checkpoint(heads) => {
                         let bounds = self.checkpoint_bounds.entry(*stream).or_default();
-                        for (d, h) in heads {
+                        for (d, h) in &heads {
                             let e = bounds.entry(*d).or_insert(*h);
                             if h.seq > e.seq {
                                 *e = *h;
@@ -1159,51 +1265,34 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                         self.observations.push(Observation {
                             from: *stream,
                             at: seq,
-                            heads: heads.clone(),
+                            heads,
                         });
                     }
-                    // A self-certified introduction is recorded at once, so the rest of the
-                    // stream can be verified.
-                    Entry::Genesis { .. } | Entry::SelfJoin { .. } => {
-                        match self.trust.record(*stream, &key, seq, &entry, &Heads::new()) {
-                            Ok(true) => self.trust_changed(),
-                            Ok(false) => {}
-                            Err(e) => self.events.push(Event::TrustEntryIgnored {
-                                from: *stream,
-                                seq,
-                                reason: e.to_string(),
-                            }),
-                        }
-                    }
-                    _ => {
-                        let seen = match &entry {
-                            Entry::Put(_) => Heads::new(),
-                            _ => self
-                                .checkpoint_bounds
-                                .get(stream)
-                                .cloned()
-                                .unwrap_or_default(),
-                        };
+                    Entry::Put(env) => {
                         self.lanes
-                            .entry((*stream, lane_of(&entry)))
+                            .entry((*stream, (env.kind, env.record_id)))
                             .or_default()
                             .push_back(Pending {
                                 seq,
-                                entry,
-                                seen,
+                                env,
                                 doc: None,
                             });
                         *self.pending_count.entry(*stream).or_insert(0) += 1;
                     }
+                    // The first entry of an approved self-joined stream: nothing to do.
+                    Entry::SelfJoin { .. } if seq == 1 && !is_root => {}
+                    entry if is_root => self.apply_root_entry(seq, &entry),
+                    _ => self.events.push(Event::TrustEntryIgnored {
+                        from: *stream,
+                        seq,
+                        reason: crate::trust::TrustError::NotFromRoot.to_string(),
+                    }),
                 }
             }
             head = Head {
                 seq: segment.header.last_seq,
                 hash: segment.header.last_hash,
             };
-            if rewound <= head.seq {
-                self.rewound_through.remove(stream);
-            }
             self.heads.insert(*stream, head);
             self.settle_claims(stream);
             self.events.push(Event::Pulled {
@@ -1221,24 +1310,17 @@ impl<R: RngCore + CryptoRng> Engine<R> {
     fn evaluate_observations(&mut self, wall_ms: u64) {
         let observations = std::mem::take(&mut self.observations);
         for o in observations {
-            if !self.trust.device(&o.from).is_some() {
-                self.observations.push(o); // the writer is not introduced yet
-                continue;
-            }
             if !self.trust.admits(&o.from, o.at) {
                 continue;
             }
             for (device, claimed) in &o.heads {
                 if *device == self.device {
-                    self.check_own_claim(claimed);
+                    self.check_own_claim(claimed, o.from);
                     continue;
                 }
                 if let Some(hash) = self.hashes.get(device).and_then(|h| h.get(&claimed.seq)) {
                     if *hash != claimed.hash {
-                        self.raise(Alarm::Fork {
-                            stream: *device,
-                            seq: claimed.seq,
-                        });
+                        self.claim_mismatch(*device, claimed.seq, o.from);
                     }
                     continue;
                 }
@@ -1249,6 +1331,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                         list.push(Claim {
                             head: *claimed,
                             since_ms: wall_ms,
+                            by: o.from,
                         });
                     }
                 }
@@ -1256,14 +1339,21 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         }
     }
 
+    /// A checkpoint of `by` claims another hash at `stream`'s `seq` than this device has:
+    /// a fork if the main device says so, otherwise a dispute (pausing nothing).
+    fn claim_mismatch(&mut self, stream: DeviceId, seq: u64, by: DeviceId) {
+        if by == self.trust.root() {
+            self.raise(Alarm::Fork { stream, seq });
+        } else {
+            self.raise(Alarm::Disputed { stream, seq, by });
+        }
+    }
+
     /// Another device claims a position of this device's own stream.
-    fn check_own_claim(&mut self, claimed: &Head) {
+    fn check_own_claim(&mut self, claimed: &Head, by: DeviceId) {
         let known = self.own_hashes.get(&claimed.seq);
         if known.is_some_and(|h| *h != claimed.hash) {
-            self.raise(Alarm::Fork {
-                stream: self.device,
-                seq: claimed.seq,
-            });
+            self.claim_mismatch(self.device, claimed.seq, by);
             return;
         }
         if claimed.seq <= self.sent.seq {
@@ -1277,10 +1367,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                 self.unsent = None;
             }
             _ if known.is_some() => {}
-            _ => self.raise(Alarm::Fork {
-                stream: self.device,
-                seq: claimed.seq,
-            }),
+            _ => self.claim_mismatch(self.device, claimed.seq, by),
         }
     }
 
@@ -1303,10 +1390,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         for c in reached {
             let known = self.hashes.get(stream).and_then(|h| h.get(&c.head.seq));
             if known.is_some_and(|h| *h != c.head.hash) {
-                self.raise(Alarm::Fork {
-                    stream: *stream,
-                    seq: c.head.seq,
-                });
+                self.claim_mismatch(*stream, c.head.seq, c.by);
             }
         }
     }
@@ -1337,10 +1421,10 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         let mut any = false;
         loop {
             let mut applied = false;
-            let keys: Vec<(DeviceId, Lane)> = self.lanes.keys().copied().collect();
+            let keys: Vec<Lane> = self.lanes.keys().copied().collect();
             for key in keys {
-                if !self.alarms.is_empty() && key.1 != Lane::Trust {
-                    continue; // paused: records wait
+                if self.paused(&key.0) {
+                    continue; // paused: its records wait
                 }
                 let Some(mut p) = self.lanes.get_mut(&key).and_then(|q| q.pop_front()) else {
                     continue;
@@ -1380,43 +1464,50 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         }
     }
 
-    fn apply(&mut self, stream: DeviceId, p: &mut Pending, wall_ms: u64) -> Applied {
-        let env = match &p.entry {
-            Entry::Put(env) => env.clone(),
-            Entry::Checkpoint(_) => return Applied::Done,
-            entry => {
-                let Some(key) = self.trust.key(&stream) else {
-                    return Applied::Wait("device not introduced yet".into());
-                };
-                if let Entry::Revoke {
-                    device,
-                    last_valid_seq,
-                    last_valid_hash,
-                } = entry
-                {
-                    // Only a counting revocation's claim about history is checked.
-                    let known = self.hashes.get(device).and_then(|h| h.get(last_valid_seq));
-                    if self.trust.admits(&stream, p.seq)
-                        && known.is_some_and(|h| h != last_valid_hash)
-                    {
-                        self.raise(Alarm::Fork {
-                            stream: *device,
-                            seq: *last_valid_seq,
-                        });
-                    }
-                }
-                match self.trust.record(stream, &key, p.seq, entry, &p.seen) {
-                    Ok(true) => self.trust_changed(),
-                    Ok(false) => {}
-                    Err(e) => self.events.push(Event::TrustEntryIgnored {
-                        from: stream,
-                        seq: p.seq,
-                        reason: e.to_string(),
-                    }),
-                }
-                return Applied::Done;
+    /// An approval or removal by the main device, in its stream's order.
+    fn apply_root_entry(&mut self, seq: u64, entry: &Entry) {
+        if let Entry::Revoke {
+            device,
+            last_valid_seq,
+            last_valid_hash,
+        } = entry
+        {
+            // The root's statement about history is checked against this device's chain.
+            let known = self.hashes.get(device).and_then(|h| h.get(last_valid_seq));
+            if *last_valid_seq > 0 && known.is_some_and(|h| h != last_valid_hash) {
+                self.raise(Alarm::Fork {
+                    stream: *device,
+                    seq: *last_valid_seq,
+                });
             }
+        }
+        // What the root had seen counts only where it matches this device's chain.
+        let root = self.trust.root();
+        let bounds = self
+            .checkpoint_bounds
+            .get(&root)
+            .cloned()
+            .unwrap_or_default();
+        let hashes = &self.hashes;
+        let seen = |d: &DeviceId| {
+            bounds
+                .get(d)
+                .filter(|h| hashes.get(d).and_then(|x| x.get(&h.seq)) == Some(&h.hash))
+                .map_or(0, |h| h.seq)
         };
+        match self.trust.apply_root(seq, entry, seen) {
+            Ok(true) => self.trust_changed(),
+            Ok(false) => {}
+            Err(e) => self.events.push(Event::TrustEntryIgnored {
+                from: root,
+                seq,
+                reason: e.to_string(),
+            }),
+        }
+    }
+
+    fn apply(&mut self, stream: DeviceId, p: &mut Pending, wall_ms: u64) -> Applied {
+        let env = p.env.clone();
         let doc = match p.doc.clone() {
             Some(doc) => doc,
             None => {
@@ -1485,95 +1576,26 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         Applied::Done
     }
 
-    /// After any change of trust: refold, update the trust alarms, report this device's
-    /// removal.
+    /// After any change of trust: refold, drop what removed devices still have waiting,
+    /// report this device's removal.
     fn trust_changed(&mut self) {
         self.fold.refold(&self.trust);
-        // A cut that moved past skipped records: read those segments again.
-        let rewind: Vec<(DeviceId, u64)> = self
-            .skipped_from
-            .iter()
-            .filter(|(d, from)| {
-                self.trust
-                    .device(d)
-                    .and_then(|i| i.cut)
-                    .is_none_or(|c| c >= **from)
-            })
-            .map(|(d, from)| (*d, *from))
+        let removed: Vec<DeviceId> = self
+            .lanes
+            .keys()
+            .map(|(d, _)| *d)
+            .filter(|d| self.trust.is_removed(d))
             .collect();
-        for (stream, from) in rewind {
-            self.skipped_from.remove(&stream);
-            self.rewind(stream, from);
+        for d in removed {
+            self.drop_pending(&d);
         }
-        let self_joined: Vec<Alarm> = self
-            .trust
-            .self_joined()
-            .filter(|(d, info)| **d != self.device && info.cut.is_none())
-            .map(|(d, info)| Alarm::SelfJoined {
-                device: *d,
-                name: info.name.clone(),
-            })
-            .collect();
-        let conflicts: Vec<Alarm> = self
-            .trust
-            .quarantined()
-            .iter()
-            .map(|d| Alarm::KeyConflict { device: *d })
-            .collect();
-        // Trust alarms that no longer hold resolve themselves.
-        self.alarms.retain(|a| match a {
-            Alarm::SelfJoined { .. } => self_joined.contains(a),
-            Alarm::KeyConflict { .. } => conflicts.contains(a),
-            _ => true,
-        });
-        for alarm in self_joined.into_iter().chain(conflicts) {
-            self.raise(alarm);
+        if self.unapproved_seen > self.trust.unapproved().len() {
+            self.unapproved_seen = self.trust.unapproved().len();
         }
-        let removed = self
-            .trust
-            .device(&self.device)
-            .is_some_and(|d| d.cut.is_some());
-        if removed && !self.removed_reported {
+        if self.trust.is_cut(&self.device) && !self.removed_reported {
             self.removed_reported = true;
             self.events.push(Event::Removed);
         }
-    }
-
-    /// Receives `stream` again from position `from` on (its records there were skipped).
-    /// Entries of the stream still waiting are dropped: they are received again.
-    fn rewind(&mut self, stream: DeviceId, from: u64) {
-        let hash = if from <= 1 {
-            chain_genesis(&self.account_id, &stream)
-        } else {
-            self.hashes
-                .get(&stream)
-                .and_then(|h| h.get(&(from - 1)))
-                .copied()
-                .expect("hashes of received entries are kept")
-        };
-        // Records waiting from the skipped segments on are received again; nothing else.
-        let mut dropped = 0;
-        for ((s, lane), queue) in self.lanes.iter_mut() {
-            if *s == stream && *lane != Lane::Trust {
-                let before = queue.len();
-                queue.retain(|p| p.seq < from);
-                dropped += before - queue.len();
-            }
-        }
-        self.lanes.retain(|_, q| !q.is_empty());
-        if let Some(n) = self.pending_count.get_mut(&stream) {
-            *n = n.saturating_sub(dropped);
-        }
-        let received = self.heads.get(&stream).map_or(0, |h| h.seq);
-        let through = self.rewound_through.entry(stream).or_insert(0);
-        *through = (*through).max(received);
-        self.heads.insert(
-            stream,
-            Head {
-                seq: from - 1,
-                hash,
-            },
-        );
     }
 
     /// A protocol violation (not a trust question): the stream is no longer read.

@@ -1,15 +1,19 @@
 //! Property tests with an adversary (spec §11, suite 6): honest devices edit through a
 //! misbehaving transport while
-//! - a removed device that kept its keys (the "stolen" device) writes whatever it likes past
-//!   its cut: records, approvals, removals, checkpoints, a new vault key, forged conflict
-//!   copies, and a second history of its stream;
-//! - someone with the Emergency Kit self-joins (the "thief"), writes, and tries to remove
-//!   devices, until the user removes it;
+//! - an approved device is stolen: while still approved it writes records and forged trust
+//!   entries (approvals, removals, checkpoints); after the main device removes it, it goes on
+//!   writing (records, a new vault key, forged conflict copies, a second history);
+//! - a thief with the Emergency Kit self-joins under an id that sorts before the main
+//!   device's, writes and forges trust entries; the main device approves it, removes it, or
+//!   never decides;
 //! - the store rolls streams back.
 //!
 //! Whatever happens, the honest devices end in the same state, nobody honest is removed,
-//! nothing forged shows, no admitted edit is lost, and a device that joins afterwards sees
-//! exactly what the others see.
+//! nothing written by a removed or never-approved device after it stopped counting shows, no
+//! admitted edit is lost, no round hangs, and a device that joins afterwards sees exactly what
+//! the others see.
+
+use std::time::{Duration, Instant};
 
 use proptest::prelude::*;
 use rand::rngs::StdRng;
@@ -26,18 +30,17 @@ use crate::payload::{ItemPayload, VaultPayload};
 use crate::segment::{seal_segment, StreamPosition};
 use crate::testkit::{device_id, device_name, signer, Cluster, ACCOUNT_ID, ACCOUNT_KEY, START_MS};
 
-/// Honest devices are 0..HONEST; the stolen device is `STOLEN`.
+/// Honest devices are 0..HONEST (0 is the main device); the stolen device is `STOLEN`.
 const HONEST: usize = 3;
 const STOLEN: usize = HONEST;
 const ITEMS: usize = 3;
+/// Sorts before the main device's id.
+const THIEF: DeviceId = [0; 16];
+/// No sync round may take longer (a trust computation that does not terminate shows here).
+const ROUND_LIMIT: Duration = Duration::from_secs(5);
 
-fn thief_id() -> DeviceId {
-    device_id(7)
-}
-
-fn puppet_key() -> VerifyingKey {
-    signer(8).verifying_key()
-}
+/// A sync round through some other store.
+type Round<'a> = &'a dyn Fn(&mut Engine<StdRng>, u64);
 
 #[derive(Clone, Debug)]
 enum Op {
@@ -60,6 +63,8 @@ enum Op {
         dev: usize,
         stream: usize,
     },
+    /// The main device removes the stolen device.
+    RemoveStolen,
     StolenSave {
         item: usize,
     },
@@ -75,11 +80,13 @@ enum Op {
         target: usize,
         seq: u8,
     },
+    /// After its removal: a new vault key.
     StolenVaultKey,
+    /// After its removal: a forged conflict copy.
     StolenCopy {
         item: usize,
     },
-    /// A second history of the stolen device's stream, shown to `dev` by a partitioned store.
+    /// After its removal: a second history shown to `dev` by a partitioned store.
     StolenFork {
         dev: usize,
     },
@@ -91,6 +98,8 @@ enum Op {
         target: usize,
     },
     ThiefEndorse,
+    ApproveThief,
+    RemoveThief,
 }
 
 fn op() -> impl Strategy<Value = Op> {
@@ -102,6 +111,7 @@ fn op() -> impl Strategy<Value = Op> {
         5 => d.clone().prop_map(|dev| Op::Sync { dev }),
         1 => (0u16..20_000).prop_map(|ms| Op::Tick { ms }),
         1 => (d.clone(), 0..=STOLEN).prop_map(|(dev, stream)| Op::Rollback { dev, stream }),
+        1 => Just(Op::RemoveStolen),
         2 => i.clone().prop_map(|item| Op::StolenSave { item }),
         1 => (0..=HONEST).prop_map(|target| Op::StolenEndorse { target }),
         2 => (0..=STOLEN, any::<u8>()).prop_map(|(target, at)| Op::StolenRevoke { target, at: at % 8 }),
@@ -110,9 +120,11 @@ fn op() -> impl Strategy<Value = Op> {
         1 => i.clone().prop_map(|item| Op::StolenCopy { item }),
         1 => d.clone().prop_map(|dev| Op::StolenFork { dev }),
         1 => Just(Op::SelfJoin),
-        1 => i.prop_map(|item| Op::ThiefSave { item }),
+        2 => i.prop_map(|item| Op::ThiefSave { item }),
         1 => (0..HONEST).prop_map(|target| Op::ThiefRevoke { target }),
         1 => Just(Op::ThiefEndorse),
+        1 => Just(Op::ApproveThief),
+        1 => Just(Op::RemoveThief),
     ]
 }
 
@@ -121,11 +133,12 @@ struct World {
     vault: Uuid,
     vault_key: Vec<u8>,
     thief: Option<Engine<StdRng>>,
+    stolen_removed: bool,
+    thief_approved: bool,
     seed: u64,
 }
 
-/// Honest devices share a vault with ITEMS items; the root then removed the stolen device,
-/// and everyone (the stolen device too) knows.
+/// Honest devices and the (not yet stolen) device share a vault with ITEMS items.
 fn setup(seed: u64) -> World {
     let mut c = Cluster::new(HONEST + 1, seed, Faults::NONE);
     let vault = c.devices[0].create_vault("Personal", START_MS).unwrap();
@@ -135,9 +148,6 @@ fn setup(seed: u64) -> World {
         c.devices[0].save_item(vault, id, &json, START_MS).unwrap();
     }
     c.heal();
-    c.devices[0].revoke(device_id(STOLEN), c.clocks[0]).unwrap();
-    c.heal();
-    assert!(!c.devices[STOLEN].can_write());
     c.devices[STOLEN].forging = true;
     for link in &c.links {
         link.set_faults(Faults::CHAOS);
@@ -148,6 +158,8 @@ fn setup(seed: u64) -> World {
         vault,
         vault_key,
         thief: None,
+        stolen_removed: false,
+        thief_approved: false,
         seed,
     }
 }
@@ -157,7 +169,7 @@ impl World {
         &mut self.c.devices[STOLEN]
     }
 
-    /// The stolen device pushes what it wrote.
+    /// The stolen device pushes what it wrote (straight to the store; it never reads again).
     fn stolen_push(&mut self) {
         let store = self.c.store.clone();
         self.stolen().push(&store);
@@ -175,6 +187,32 @@ impl World {
         }
     }
 
+    /// Titles a removed device writes once it no longer counts start with "late" (they may still
+    /// show through versions honest devices wrote on top before they heard of the removal;
+    /// what is checked is that none of its own versions past the cut counts).
+    fn stolen_title(&self, step: usize) -> String {
+        if self.stolen_removed {
+            format!("late{step}")
+        } else {
+            format!("evil{step}")
+        }
+    }
+
+    fn sync_timed(&mut self, dev: usize, transport: Option<Round>) {
+        let started = Instant::now();
+        let clock = self.c.clocks[dev];
+        match transport {
+            Some(f) => f(&mut self.c.devices[dev], clock),
+            None => {
+                let _ = self.c.sync(dev);
+            }
+        }
+        assert!(
+            started.elapsed() < ROUND_LIMIT,
+            "a sync round of device {dev} hung"
+        );
+    }
+
     fn run(&mut self, step: usize, op: &Op) {
         let clock = self.c.clocks[0];
         let vault = self.vault;
@@ -187,9 +225,7 @@ impl World {
             Op::Trash { dev, item } => {
                 let _ = self.c.devices[dev].trash_item(item_id(item), step as u64, clock);
             }
-            Op::Sync { dev } => {
-                let _ = self.c.sync(dev);
-            }
+            Op::Sync { dev } => self.sync_timed(dev, None),
             Op::Tick { ms } => self.c.tick(u64::from(ms)),
             Op::Rollback { dev, stream } => {
                 let stream = device_id(stream);
@@ -200,12 +236,23 @@ impl World {
                         stream,
                         keep_through: received / 2,
                     };
-                    let _ = self.c.devices[dev].sync(&store, clock);
+                    self.sync_timed(
+                        dev,
+                        Some(&|e: &mut Engine<StdRng>, at| {
+                            let _ = e.sync(&store, at);
+                        }),
+                    );
+                }
+            }
+            Op::RemoveStolen => {
+                if !self.stolen_removed {
+                    self.c.devices[0].revoke(device_id(STOLEN), clock).unwrap();
+                    self.stolen_removed = true;
                 }
             }
             Op::StolenSave { item } => {
                 let id = item_id(item);
-                let json = Cluster::item_json(id, &format!("evil{step}"), &[]);
+                let json = Cluster::item_json(id, &self.stolen_title(step), &[]);
                 let _ = self.stolen().save_item(vault, id, &json, clock);
                 self.stolen_push();
             }
@@ -215,7 +262,8 @@ impl World {
                 } else {
                     device_id(8)
                 };
-                let _ = self.stolen().endorse(id, &puppet_key(), "evil", clock);
+                let key = signer(8).verifying_key();
+                let _ = self.stolen().endorse(id, &key, "evil", clock);
                 self.stolen_push();
             }
             Op::StolenRevoke { target, at } => self.forge(Entry::Revoke {
@@ -234,14 +282,14 @@ impl World {
                 );
                 self.forge(Entry::Checkpoint(heads));
             }
-            Op::StolenVaultKey => {
+            Op::StolenVaultKey if self.stolen_removed => {
                 let wrapped_key = crypto::wrap_vault_key(
                     &Key::from_bytes(ACCOUNT_KEY),
                     vault,
                     &Key::from_bytes([step as u8 | 1; 32]),
                 );
                 let doc = Doc::Vault(VaultPayload {
-                    name: format!("evil{step}"),
+                    name: format!("late{step}"),
                     wrapped_key,
                     deleted: false,
                 });
@@ -250,7 +298,7 @@ impl World {
                     .write(RecordKind::Vault, vault, None, doc, clock);
                 self.stolen_push();
             }
-            Op::StolenCopy { item } => {
+            Op::StolenCopy { item } if self.stolen_removed => {
                 let id = item_id(item);
                 let Some(source) = self
                     .stolen()
@@ -264,7 +312,7 @@ impl World {
                 let copy_id = crate::present::conflict_copy_id(id, &source.hash());
                 let json = serde_json::to_vec(&serde_json::json!({
                     "id": copy_id.to_string(),
-                    "title": format!("evil{step}"),
+                    "title": format!("late{step}"),
                     "attachments": [],
                     "conflict": {
                         "of": id.to_string(),
@@ -283,7 +331,7 @@ impl World {
                     .write(RecordKind::Item, copy_id, Some(vault), doc, clock);
                 self.stolen_push();
             }
-            Op::StolenFork { dev } => {
+            Op::StolenFork { dev } if self.stolen_removed => {
                 // One history goes to a copy of the store, another to the store itself.
                 let fork = self.c.store.deep_copy();
                 let s = &self.c.devices[STOLEN];
@@ -292,6 +340,7 @@ impl World {
                     first_seq: s.sent.seq + 1,
                     prev_hash: s.sent.hash,
                 };
+                let heads = s.heads.clone();
                 let mut rng = StdRng::seed_from_u64(self.seed ^ step as u64);
                 let segment_key =
                     crate::keys::segment_key(&Key::from_bytes(ACCOUNT_KEY), &ACCOUNT_ID);
@@ -299,28 +348,34 @@ impl World {
                 let bytes = seal_segment(&segment_key, &signer(STOLEN), &at, vec![other], &mut rng)
                     .unwrap();
                 fork.append(&bytes).unwrap();
-                self.forge(Entry::Checkpoint(s_heads(&self.c.devices[STOLEN])));
+                self.forge(Entry::Checkpoint(heads));
                 let partitioned = Overlay {
                     base: self.c.store.clone(),
                     overlay: fork,
                     stream: device_id(STOLEN),
                 };
-                let _ = self.c.devices[dev].sync(&partitioned, clock);
+                self.sync_timed(
+                    dev,
+                    Some(&|e: &mut Engine<StdRng>, at| {
+                        let _ = e.sync(&partitioned, at);
+                    }),
+                );
             }
+            Op::StolenVaultKey | Op::StolenCopy { .. } | Op::StolenFork { .. } => {}
             Op::SelfJoin => {
                 if self.thief.is_some() {
                     return;
                 }
                 let mut t = Engine::join(
-                    thief_id(),
+                    THIEF,
                     signer(7),
                     "Thief",
                     ACCOUNT_ID,
                     Key::from_bytes(ACCOUNT_KEY),
                     device_id(0),
+                    signer(0).verifying_key(),
                     StdRng::seed_from_u64(self.seed ^ 7),
                 );
-                t.pin_root_key(signer(0).verifying_key());
                 let store = self.c.store.clone();
                 let _ = t.sync(&store, clock);
                 t.self_join(clock).unwrap();
@@ -331,7 +386,7 @@ impl World {
             Op::ThiefSave { item } => {
                 if let Some(t) = &mut self.thief {
                     let id = item_id(item);
-                    let json = Cluster::item_json(id, &format!("j{step}"), &[]);
+                    let json = Cluster::item_json(id, &format!("thief{step}"), &[]);
                     let _ = t.save_item(vault, id, &json, clock);
                 }
                 self.thief_push();
@@ -344,32 +399,44 @@ impl World {
             }
             Op::ThiefEndorse => {
                 if let Some(t) = &mut self.thief {
-                    let _ = t.endorse(device_id(8), &puppet_key(), "puppet", clock);
+                    let _ = t.endorse(device_id(8), &signer(8).verifying_key(), "puppet", clock);
                 }
                 self.thief_push();
+            }
+            Op::ApproveThief => {
+                if self.c.devices[0].approve(THIEF, clock).is_ok() {
+                    self.thief_approved = true;
+                }
+            }
+            Op::RemoveThief => {
+                if self.thief.is_some() && !self.c.devices[0].trust().is_cut(&THIEF) {
+                    let _ = self.c.devices[0].revoke(THIEF, clock);
+                }
             }
         }
     }
 
-    /// The user's decisions on device `i`: the root removes a self-joined device; rollbacks
-    /// are accepted; a fork may only be of the stolen device's stream, and is accepted.
+    /// The user's decisions on device `i`: rollbacks are accepted; a fork may only be of the
+    /// stolen device's stream (after its removal), and is accepted; unapproved devices are
+    /// noted (the main device decides on them through the ops).
     fn decide(&mut self, i: usize) {
-        for alarm in self.c.devices[i].alarms().to_vec() {
+        for alarm in self.c.devices[i].alarms() {
             match &alarm {
-                Alarm::SelfJoined { device, .. } => {
-                    if i == 0 {
-                        self.c.devices[0].revoke(*device, self.c.clocks[0]).unwrap();
-                    }
-                }
-                Alarm::KeyConflict { .. } => panic!("device {i}: {alarm}"),
                 Alarm::Fork { stream, .. } => {
                     assert_eq!(*stream, device_id(STOLEN), "device {i}: {alarm}");
-                    assert!(self.c.devices[i].accept_alarm(&alarm));
+                    assert!(self.stolen_removed, "device {i}: {alarm}");
                 }
-                Alarm::Rollback { .. } => {
-                    assert!(self.c.devices[i].accept_alarm(&alarm));
+                // A lying attacker, or honest devices that saw the stolen device's second
+                // history.
+                Alarm::Disputed { by, stream, .. } => {
+                    assert!(
+                        *by == device_id(STOLEN) || *by == THIEF || *stream == device_id(STOLEN),
+                        "device {i}: {alarm}"
+                    );
                 }
+                Alarm::Rollback { .. } | Alarm::Unapproved { .. } => {}
             }
+            assert!(self.c.devices[i].accept_alarm(&alarm));
         }
     }
 
@@ -382,16 +449,29 @@ impl World {
         for _ in 0..80 {
             for i in 0..HONEST {
                 self.decide(i);
-                let _ = self.c.sync(i);
+                self.sync_timed(i, None);
             }
             if let Some(e) = extra {
-                assert!(e.alarms().is_empty(), "late device: {:?}", e.alarms());
+                let started = Instant::now();
                 let _ = e.sync(&self.c.store, self.c.clocks[0]);
+                assert!(started.elapsed() < ROUND_LIMIT, "the late device hung");
+                assert!(
+                    e.alarms()
+                        .iter()
+                        .all(|a| matches!(a, Alarm::Unapproved { .. } | Alarm::Disputed { .. })),
+                    "late device: {:?}",
+                    e.alarms()
+                );
             }
             self.c.tick(1_000);
             let views: Vec<View> = (0..HONEST).map(|i| self.c.devices[i].view()).collect();
-            let quiet = (0..HONEST)
-                .all(|i| self.c.devices[i].is_idle() && self.c.devices[i].alarms().is_empty());
+            let quiet = (0..HONEST).all(|i| {
+                self.c.devices[i].is_idle()
+                    && self.c.devices[i]
+                        .alarms()
+                        .iter()
+                        .all(|a| matches!(a, Alarm::Unapproved { .. } | Alarm::Disputed { .. }))
+            });
             if quiet && views == last {
                 return;
             }
@@ -401,27 +481,25 @@ impl World {
     }
 }
 
-fn s_heads(e: &Engine<StdRng>) -> Heads {
-    e.heads.clone()
-}
-
 fn check(seed: u64, ops: &[Op]) {
     let mut w = setup(seed);
     for (step, op) in ops.iter().enumerate() {
         w.run(step, op);
     }
+    // The stolen device is removed in the end, whatever happened.
+    w.run(ops.len(), &Op::RemoveStolen);
     w.heal(&mut None);
     // A device that joins now, approved by the root, must see what the others see.
-    let mut late = Engine::join(
+    let late = Engine::join(
         device_id(9),
         signer(9),
         &device_name(9),
         ACCOUNT_ID,
         Key::from_bytes(ACCOUNT_KEY),
         device_id(0),
+        signer(0).verifying_key(),
         StdRng::seed_from_u64(seed ^ 9),
     );
-    late.pin_root_key(signer(0).verifying_key());
     let key = late.verifying_key();
     w.c.devices[0]
         .endorse(device_id(9), &key, &device_name(9), w.c.clocks[0])
@@ -441,12 +519,8 @@ fn check(seed: u64, ops: &[Op]) {
     assert_eq!(late.view(), first, "the late device differs");
     assert!(!first.owes_copies());
     let mut honest: Vec<&Engine<StdRng>> = w.c.devices[..HONEST].iter().collect();
-    let all = {
-        let mut v = honest.clone();
-        v.push(&late);
-        written(&v)
-    };
     honest.push(&late);
+    let all = written(&honest);
     for d in honest {
         let trust = d.trust();
         for i in 0..HONEST {
@@ -456,15 +530,17 @@ fn check(seed: u64, ops: &[Op]) {
             );
         }
         assert!(trust.device(&device_id(STOLEN)).unwrap().cut.is_some());
-        if w.thief.is_some() {
-            assert!(trust.device(&thief_id()).is_none_or(|t| t.cut.is_some()));
-        }
         assert!(trust.device(&device_id(8)).is_none(), "a puppet got in");
         let view = d.view();
         assert_eq!(view.vaults[&w.vault].wrapped_key, w.vault_key);
         for id in view.items.keys() {
             let title = title_of(&view, *id).unwrap_or_default();
-            assert!(!title.starts_with("evil"), "forged content shows: {title}");
+            if !w.thief_approved {
+                assert!(
+                    !title.starts_with("thief"),
+                    "an unapproved device's content shows"
+                );
+            }
         }
         assert_nothing_unaccounted(d.fold(), &view);
         assert_no_lost_edit(d.fold(), &view, trust, &all);
@@ -490,7 +566,6 @@ proptest! {
 
 #[test]
 fn every_attack_in_one_fixed_run() {
-    // A fixed run through every kind of attack, so a regression shows without proptest.
     let ops = vec![
         Op::Save { dev: 1, item: 0 },
         Op::StolenSave { item: 0 },
@@ -502,6 +577,9 @@ fn every_attack_in_one_fixed_run() {
         Op::StolenEndorse { target: HONEST },
         Op::StolenEndorse { target: 1 },
         Op::StolenCheckpoint { target: 2, seq: 1 },
+        Op::Sync { dev: 0 },
+        Op::RemoveStolen,
+        Op::StolenSave { item: 1 },
         Op::StolenVaultKey,
         Op::StolenCopy { item: 1 },
         Op::Sync { dev: 2 },
@@ -511,8 +589,21 @@ fn every_attack_in_one_fixed_run() {
         Op::ThiefRevoke { target: 0 },
         Op::ThiefEndorse,
         Op::Sync { dev: 0 },
+        Op::RemoveThief,
         Op::Rollback { dev: 1, stream: 0 },
         Op::Save { dev: 2, item: 0 },
     ];
     check(3, &ops);
+}
+
+#[test]
+fn an_approved_thief_counts_from_its_first_entry() {
+    let ops = vec![
+        Op::SelfJoin,
+        Op::ThiefSave { item: 2 },
+        Op::Sync { dev: 0 },
+        Op::ApproveThief,
+        Op::ThiefSave { item: 1 },
+    ];
+    check(4, &ops);
 }
