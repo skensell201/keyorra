@@ -4,6 +4,7 @@
 
 pub mod cbor;
 pub mod error;
+pub mod keys;
 pub mod labels;
 pub mod pad;
 pub mod secret_key;
