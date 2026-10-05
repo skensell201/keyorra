@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { IconClose } from "./icons";
 import { api, errorMessage, type Field, type FieldValue, type Item } from "../api";
 import { fieldText, KIND_LABEL } from "../format";
@@ -9,6 +9,8 @@ interface Props {
   isNew: boolean;
   onSave: (saved: Item) => void;
   onCancel: () => void;
+  /** Called when the form starts or stops differing from `item`. */
+  onDirtyChange?: (dirty: boolean) => void;
 }
 
 type EditableType = "text" | "concealed" | "totp" | "url" | "email" | "phone";
@@ -27,7 +29,7 @@ function newFieldId(prefix: string): string {
 }
 
 /** Edits the common fields and every other field; sections are passed through unchanged. */
-export function ItemEditor({ item, isNew, onSave, onCancel }: Props) {
+export function ItemEditor({ item, isNew, onSave, onCancel, onDirtyChange }: Props) {
   const [draft, setDraft] = useState<Item>(item);
   const [urls, setUrls] = useState(item.urls.join("\n"));
   const [tags, setTags] = useState(item.tags.join(", "));
@@ -36,6 +38,12 @@ export function ItemEditor({ item, isNew, onSave, onCancel }: Props) {
   const [generating, setGenerating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+
+  const dirty =
+    JSON.stringify(draft) !== JSON.stringify(item) || urls !== item.urls.join("\n") || tags !== item.tags.join(", ");
+  useEffect(() => {
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
 
   const usernameIndex = draft.fields.findIndex((f) => f.purpose === "username");
   const passwordIndex = draft.fields.findIndex((f) => f.purpose === "password");

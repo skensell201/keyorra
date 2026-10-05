@@ -143,3 +143,16 @@ test("a month/year field is shown read-only and saved unchanged", async () => {
   await user.click(screen.getByRole("button", { name: "Save" }));
   expect(saved().fields[2]).toEqual(expiry);
 });
+
+test("reports unsaved changes", async () => {
+  const user = userEvent.setup();
+  const onDirtyChange = vi.fn();
+  render(<ItemEditor item={loginItem()} isNew={false} onSave={vi.fn()} onCancel={vi.fn()} onDirtyChange={onDirtyChange} />);
+  expect(onDirtyChange).toHaveBeenLastCalledWith(false);
+  await user.type(screen.getByLabelText("Title"), "!");
+  expect(onDirtyChange).toHaveBeenLastCalledWith(true);
+  await user.type(screen.getByLabelText("Title"), "{Backspace}");
+  expect(onDirtyChange).toHaveBeenLastCalledWith(false);
+  await user.type(screen.getByLabelText("Tags"), ", x");
+  expect(onDirtyChange).toHaveBeenLastCalledWith(true);
+});

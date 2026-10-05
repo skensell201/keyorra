@@ -23,6 +23,22 @@ export function Main({ onLock }: { onLock: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [pairing, setPairing] = useState<PairingRequest | null>(null);
   const [deletingVault, setDeletingVault] = useState<Vault | null>(null);
+  /** Runs once the user agreed to drop unsaved edits. */
+  const [pendingLeave, setPendingLeave] = useState<(() => void) | null>(null);
+  const editorDirty = useRef(false);
+  const onDirtyChange = useCallback((dirty: boolean) => {
+    editorDirty.current = dirty;
+  }, []);
+
+  useEffect(() => {
+    if (pane.mode !== "edit") editorDirty.current = false;
+  }, [pane]);
+
+  /** Leaving the editor with unsaved changes asks first. */
+  function leaveEditor(action: () => void) {
+    if (pane.mode === "edit" && editorDirty.current) setPendingLeave(() => action);
+    else action();
+  }
 
   const vaultsSeq = useRef(0);
   const itemsSeq = useRef(0);
@@ -141,15 +157,17 @@ export function Main({ onLock }: { onLock: () => void }) {
       <Sidebar
         vaults={vaults}
         selection={selection}
-        onSelect={(s) => {
-          setSelection(s);
-          setPane({ mode: "empty" });
-        }}
+        onSelect={(s) =>
+          leaveEditor(() => {
+            setSelection(s);
+            setPane({ mode: "empty" });
+          })
+        }
         onNewVault={newVault}
         onRenameVault={renameVault}
         onDeleteVault={askDeleteVault}
         onImport={() => setImporting(true)}
-        onLock={onLock}
+        onLock={() => leaveEditor(onLock)}
         onSettings={() => setShowSettings(true)}
       />
       <ItemList
@@ -157,8 +175,8 @@ export function Main({ onLock }: { onLock: () => void }) {
         query={query}
         onQuery={setQuery}
         selectedId={pane.mode === "view" ? pane.id : null}
-        onSelect={(id) => setPane({ mode: "view", id })}
-        onNew={newItem}
+        onSelect={(id) => leaveEditor(() => setPane({ mode: "view", id }))}
+        onNew={(kind) => leaveEditor(() => void newItem(kind))}
         canCreate={Boolean(targetVault)}
       />
       <section className="detail">
@@ -195,6 +213,7 @@ export function Main({ onLock }: { onLock: () => void }) {
             key={pane.item.id}
             item={pane.item}
             isNew={pane.isNew}
+            onDirtyChange={onDirtyChange}
             onCancel={() => setPane(pane.isNew ? { mode: "empty" } : { mode: "view", id: pane.item.id })}
             onSave={async (saved) => {
               setPane({ mode: "view", id: saved.id });
@@ -214,6 +233,22 @@ export function Main({ onLock }: { onLock: () => void }) {
           onCancel={() => setDeletingVault(null)}
         >
           The vault is empty. Its items in Recently Deleted are removed for good.
+        </ConfirmDialog>
+      )}
+      {pendingLeave && (
+        <ConfirmDialog
+          title="Discard changes?"
+          confirmLabel="Discard"
+          danger
+          onConfirm={() => {
+            const leave = pendingLeave;
+            setPendingLeave(null);
+            editorDirty.current = false;
+            leave();
+          }}
+          onCancel={() => setPendingLeave(null)}
+        >
+          Your edits to this item haven't been saved.
         </ConfirmDialog>
       )}
       {pairing && <PairingDialog key={pairing.clientId} request={pairing} onDone={() => setPairing(null)} />}

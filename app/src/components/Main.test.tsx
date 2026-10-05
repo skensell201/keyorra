@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 import { api, type ItemSummary, type PairingRequest } from "../api";
@@ -206,4 +206,30 @@ test("a vault with items is not deleted", async () => {
   expect(await screen.findByRole("alert")).toHaveTextContent('"Personal" still has 1 item. Delete them first.');
   expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
   expect(api.deleteVault).not.toHaveBeenCalled();
+});
+
+test("leaving the editor with unsaved changes asks first", async () => {
+  const user = userEvent.setup();
+  render(<Main onLock={vi.fn()} />);
+  await user.click(await screen.findByText("GitHub"));
+  await user.click(await screen.findByRole("button", { name: "Edit" }));
+  await user.type(screen.getByLabelText("Title"), " work");
+  await user.click(screen.getByRole("button", { name: "Favorites" }));
+  const dialog = screen.getByRole("alertdialog", { name: "Discard changes?" });
+  await user.click(within(dialog).getByRole("button", { name: "Cancel" }));
+  expect(screen.getByLabelText("Title")).toHaveValue("GitHub work");
+  await user.click(screen.getByRole("button", { name: "Favorites" }));
+  await user.click(screen.getByRole("button", { name: "Discard" }));
+  await waitFor(() => expect(lastFilter().favorites).toBe(true));
+  expect(screen.queryByLabelText("Title")).not.toBeInTheDocument();
+});
+
+test("leaving an unchanged editor does not ask", async () => {
+  const user = userEvent.setup();
+  render(<Main onLock={vi.fn()} />);
+  await user.click(await screen.findByText("GitHub"));
+  await user.click(await screen.findByRole("button", { name: "Edit" }));
+  await user.click(screen.getByRole("button", { name: "Favorites" }));
+  expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  await waitFor(() => expect(lastFilter().favorites).toBe(true));
 });
