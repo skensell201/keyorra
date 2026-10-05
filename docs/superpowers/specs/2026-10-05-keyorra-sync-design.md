@@ -362,11 +362,11 @@ Each device appends only to its own **stream**. Entries:
 
 ```
 Put        { envelope }                                      // a record version, inline
-Checkpoint { heads: {DeviceId -> (seq, hash)}, header_epoch }  // first entry of every segment
-Genesis    { account_id, device_pk }                         // root device only, seq 1
-Endorse    { device_id, device_pk, statement_sig }           // by a live device (§4.3)
-SelfJoin   { device_pk, statement_sig }                      // Emergency-Kit join, own stream
-Revoke     { device_id, last_valid_seq, reason }
+Checkpoint { heads: {DeviceId -> (seq, hash)} }              // before writes after new heads (A1c-1)
+Genesis    { account_id, device_pk, name }                   // root device only, seq 1
+Endorse    { device_id, device_pk, name, statement_sig }     // by a live device (§4.3)
+SelfJoin   { device_pk, name, statement_sig }                // Emergency-Kit join, own stream
+Revoke     { device_id, last_valid_seq }
 Retire     { }                                               // this device id is done (§4.2)
 Header     { header }                                        // account header (§4.7)
 Snapshot   { name, sha256, frontier }                        // chains snapshots into the log
@@ -388,6 +388,13 @@ The plaintext header carries only random ids, counters and hashes, so a server c
 "append-only, contiguous, chained" per stream without reading anything. A sync round
 writes one segment; segments are capped at 4 MiB of plaintext (a large import becomes
 several).
+
+Device names travel in `Genesis`, `Endorse` and `SelfJoin` (there is no separate device
+record). A checkpoint is written before the first entry after the writer's received heads
+changed, and at least hourly by a device that only reads while its heads change; it is not
+the first entry of every segment (planning A1c-1: a checkpoint inserted at sealing time
+would shift the sequence numbers already given to the entries). `header_epoch` and the
+`Retire`, `Header`, `Snapshot` and `Moved` entries come with plan A1c-2 (and B2).
 
 ### 4.2 Device identity, and cloned or restored Macs
 
@@ -429,6 +436,15 @@ the cut is accepted.
 - **Live**: a device is live if it is the root or has an accepted `Endorse`/`SelfJoin`,
   and no accepted `Revoke` names it. An endorsement made before the endorser's revocation
   cut stays valid (revoking one device does not cascade).
+- **Which revocations count** (made precise while planning A1c-1): a `Revoke` counts if the
+  revoker revokes itself, or is introduced without the revoked device (so a device endorsed
+  after its endorser's cut cannot revoke the endorser back), and if it was written before
+  the revoker's own cut, ignoring a cut that came from the device being revoked (so mutual
+  revocations both apply while a removed device cannot remove others afterwards). The
+  result is computed from all trust entries in `(stream, seq)` order, independent of
+  arrival order.
+- A device that is not introduced yet reads but does not write; a removed device does not
+  write any more.
 
 Stated plainly, in the protocol doc and in the UI: every device holds AK. Endorsements and
 signatures let devices attribute changes and reject *writes* from revoked or unendorsed
@@ -443,20 +459,29 @@ An entry `e` at position `(D, seq)` is **accepted** iff:
    accepted head (or a snapshot frontier, §4.8), Ed25519 signature with D's key;
 2. D's introduction (`Genesis`, `Endorse` or `SelfJoin`) is accepted;
 3. if D is revoked, `seq ≤ last_valid_seq` of the earliest accepted revocation of D;
-4. **causal delivery**: the heads in the segment's leading `Checkpoint` (what D had
-   applied when it wrote these entries) are already applied locally. Segments that are
-   not yet deliverable are buffered; references that cannot be resolved yet (an
-   attachment record whose item has not arrived, a chunk still `Pending`) are buffered too;
+4. **causal delivery, per record** (revised while planning A1c-1): a received segment
+   advances its stream at once; each of its entries is then applied as soon as what it
+   needs is there: a `Put` waits for its vault's key and for the earlier versions of other
+   devices that its vector counts (§3.3); entries of one stream keep their order per
+   record (trust entries in one lane). Independent records keep flowing, so one waiting
+   record no longer holds back the stream (review I6). Checkpoints serve detection
+   (§4.5), not delivery;
 5. the validations of §3.3 pass for every `Put`.
 
 When a `Revoke` is accepted, the records with versions from the revoked stream after its
-cut are **re-folded** from the retained versions (§3.4). A segment that cannot be
-delivered for 24 h produces a warning naming the device whose changes are missing.
+cut are **re-folded** from the retained versions (§3.4). A checkpoint claim of a position
+that has not arrived for 24 h produces a warning naming the device whose changes are
+missing.
 
 ### 4.5 Rollback, fork and withholding detection
 
-For every stream a device stores the newest accepted `(seq, hash)` (`sync_heads`) and the
-heads that other devices' checkpoints claim to have seen.
+For every stream a device stores the newest accepted `(seq, hash)` (`sync_heads`), the chain
+hash at the end of every received segment, and the heads that other devices' checkpoints
+claim to have seen. Rollback is noticed by comparing the store's head of a stream
+(`Transport::head`, from file names or server metadata) with the received head before
+reading, and the store's head of the own stream with the last confirmed own position before
+writing. While an alarm is raised, a sync round does nothing and reports the alarm as an
+error.
 
 | Attack by folder/server | Detected by | Reaction |
 |---|---|---|
@@ -487,7 +512,14 @@ first honest crossing exposes it. Withholding cannot be prevented, only reported
 
 `Revoke {device_id, last_valid_seq}` by any live device; `last_valid_seq` is the newest
 head of that device the revoker has seen. Entries after the cut are not accepted; affected
-records are re-folded. The server additionally disables the device's token. If two devices
+records are re-folded.
+
+Limit, found while planning A1c-1: devices that received the removed device's later
+versions *before* they heard of the revocation may have written on top of them (a
+collapse, an edit); those versions are theirs and keep counting, content included. What
+must not happen is that something disappears: a conflict copy that only the removed device
+had written, of a version that still counts, is written again by a device that may write
+(protocol §10.4). The server additionally disables the device's token. If two devices
 revoke each other concurrently, both revocations apply and the user gets an alarm pointing
 to key rotation (rare; deliberately not automated).
 
@@ -1018,7 +1050,8 @@ Each line becomes one implementation plan in `docs/superpowers/plans/`.
 |---|---|---|
 | **A1a** Keys and formats | HKDF derivations, labels, canonical CBOR, Padmé, envelopes, chunks, segment/snapshot/header framing, test vectors, `docs/sync-protocol.md` draft | Suite 1 green; protocol draft reviewed |
 | **A1b** Fold | Versions/HLC, validation, payloads, sibling sets, presentation, conflict copies and materialisation, the fold with an admission hook, a first engine (`Put` entries only, fixed device directory), `MemoryTransport`, fault-injecting transport, property tests | Suites 2, 4 (trust stubbed), 5 (transient faults), 6 green |
-| **A1c** Streams and trust | Entry types, Keychain device key, endorsement, SelfJoin, revocation and re-fold, acceptance rule, causal delivery, headers, snapshots (bootstrap, restore), clone detection, rollback/fork faults | Suites 3, 5, 6 green |
+| **A1c-1** Streams and trust | Entry types, root `Genesis`, endorsement, SelfJoin alarm, revocation cut and re-fold, per-record causal delivery, checkpoints, rollback/fork/withholding detection and alarms, rollback and fork fault transports | Suites 3 (without headers, snapshots, clones), 5, 6 green |
+| **A1c-2** Recovery and bootstrap | Clone/restore detection (own-stream head, device-key store hook) and retiring the id, headers as signed entries (highest-epoch join, concurrent epochs, old-epoch deletion), snapshots (bootstrap with per-stream floors, restore after rollback), outbox persistence hooks for A1d | Suite 3 complete |
 | **A1d** Store integration | Store migration v2, single change path, `Item.extra` and the `conflict` field, the engine reading from and writing to the local store | Suite 11 green; a vault survives enable → edit → sync → restart |
 | **A2** Folder transport | `keyorra-sync-fs`: layout, temp-outside-tree writes, strict reading, iCloud/File Provider download state, `NSFileCoordinator`, FSEvents + poll, deadlines, `keyorra-inspect` | Suite 7 green; two processes on one folder converge |
 | **A3** UI | Enable/join/leave, Emergency Kit, setup code, folder-based approval, Sync screen, conflicts in list/detail/Watchtower, alarms | Suite 10 (folder) green; manual two-Mac iCloud test |
