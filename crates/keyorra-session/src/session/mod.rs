@@ -103,7 +103,7 @@ pub struct Session {
 }
 
 pub use sync::{BoxedTransport, EmergencyKitDto, JoinOutcome, LogLine, SyncLink, SyncStatusDto};
-pub use sync_screen::{BackupFile, SyncScreenDto};
+pub use sync_screen::{BackupFile, FolderFile, SyncScreenDto};
 
 impl Session {
     /// `kdf` is `KdfParams::DEFAULT` in the app; tests pass cheap parameters.
@@ -449,6 +449,14 @@ impl Session {
         } else {
             false
         }
+    }
+
+    /// A secret the app just put on the clipboard (the setup code): cleared after 90 s at
+    /// most, like other secrets (spec §7.6).
+    pub fn copied_secret(&mut self, text: &str, now: u64) {
+        self.touch(now);
+        self.clipboard
+            .copied(text, now, self.settings.clipboard_seconds.min(90));
     }
 
     pub fn clipboard_pending(&self) -> bool {

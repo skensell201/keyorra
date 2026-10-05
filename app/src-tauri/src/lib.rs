@@ -41,22 +41,16 @@ pub fn run() {
             let path = app.path().app_data_dir()?.join("keyorra.db");
             let mut session = Session::new(path, KdfParams::DEFAULT, now());
             session.set_keyring(Box::new(touchid::MacKeyring));
-            // Sync over iCloud Drive (plan A2; A3 lets the user pick another synced folder).
+            // Sync over iCloud Drive, or the folder the user chose (plan A3). Nothing is
+            // created there before sync is turned on; the watcher starts once the folder
+            // exists (housekeeping).
             let changed = Arc::new(AtomicBool::new(false));
-            let place = syncfolder::icloud_place();
-            if let Some(place) = place.clone() {
-                let temp = app.path().app_data_dir()?.join("sync-tmp");
-                // Nothing is created in iCloud Drive before sync is turned on; the watcher
-                // starts once the folder exists (housekeeping, review A2 M3).
-                session.set_sync_link(Box::new(syncfolder::FolderLink::new(
-                    place,
-                    temp,
-                    Arc::new(syncfolder::MacCloud),
-                    Box::new(|| Box::new(touchid::device_keys())),
-                    syncfolder::computer_name(),
-                )));
+            let places = Arc::new(syncfolder::SyncPlace::load(&app.path().app_data_dir()?));
+            if let Some(link) = places.link() {
+                session.set_sync_link(Box::new(link));
             }
             app.manage(AppState(Mutex::new(session)));
+            app.manage(places.clone());
             // After `manage`: both call commands that need the session. Neither is essential;
             // without them Keyorra still works from its main window.
             if let Err(e) = tray::install(app.handle()) {
@@ -66,7 +60,7 @@ pub fn run() {
                 eprintln!("keyorra: quick search unavailable: {e}");
             }
             let handle = app.handle().clone();
-            std::thread::spawn(move || housekeeping(handle, changed, place));
+            std::thread::spawn(move || housekeeping(handle, changed, places));
             if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
                 let socket = keyorra_session::bridge::wire::socket_path(&home);
                 let bridge_app = app.handle().clone();
@@ -113,6 +107,23 @@ pub fn run() {
             commands::deny_pairing,
             commands::paired_browsers,
             commands::remove_paired_browser,
+            commands::sync_screen,
+            commands::sync_now,
+            commands::enable_sync,
+            commands::join_sync,
+            commands::disable_sync,
+            commands::approve_device,
+            commands::sync_alarm_action,
+            commands::remove_sync_device,
+            commands::verify_sync,
+            commands::sync_folder_files,
+            commands::emergency_kit,
+            commands::start_new_sync_account,
+            commands::backups,
+            commands::delete_backup,
+            commands::sync_place,
+            commands::set_sync_place,
+            commands::copy_secret,
         ])
         .on_window_event(|window, event| {
             // Closing the main window keeps Keyorra in the menu bar; Quit is in the tray menu.
@@ -138,19 +149,20 @@ pub fn run() {
 
 /// Every two seconds: lock when idle (and tell the window), clear the clipboard once our copy
 /// has expired — but only if it still holds our copy.
-fn housekeeping(app: AppHandle, changed: Arc<AtomicBool>, place: Option<std::path::PathBuf>) {
+fn housekeeping(app: AppHandle, changed: Arc<AtomicBool>, places: Arc<syncfolder::SyncPlace>) {
     // `Instant` does not advance while the Mac sleeps (CLOCK_UPTIME_RAW), unlike wall time.
     let start = Instant::now();
     let mut schedule = syncfolder::Schedule::new(changed.clone());
-    let mut watcher: Option<syncfolder::Watcher> = None;
+    let mut watcher: Option<(std::path::PathBuf, syncfolder::Watcher)> = None;
+    let mut approvals_shown = 0;
     loop {
         std::thread::sleep(Duration::from_secs(2));
         // Changes are watched as soon as the sync place exists (sync turned on here or on
-        // another Mac), not only from the next launch.
-        if watcher.is_none() {
-            if let Some(p) = place.as_ref().filter(|p| p.is_dir()) {
-                watcher = syncfolder::Watcher::start(p, changed.clone());
-            }
+        // another Mac), and the watch follows the place when the user picks another one.
+        let want = places.current().filter(|p| p.is_dir());
+        if watcher.as_ref().map(|(p, _)| p) != want.as_ref() {
+            watcher =
+                want.and_then(|p| syncfolder::Watcher::start(&p, changed.clone()).map(|w| (p, w)));
         }
         let state = app.state::<AppState>();
         // Read the flag before taking the lock. Sleep is detected from wall time vs the
@@ -170,11 +182,23 @@ fn housekeeping(app: AppHandle, changed: Arc<AtomicBool>, place: Option<std::pat
         }
         // Sync while unlocked: on a change in the folder, and every minute.
         let mut synced = false;
+        let mut approvals = None;
         if session.status() == keyorra_session::session::Status::Unlocked
             && session.sync_status().is_ok_and(|s| s.enabled)
             && schedule.due(t)
         {
-            synced = session.sync_now(t).is_ok();
+            if let Ok(status) = session.sync_now(t) {
+                synced = true;
+                // Devices that ask the main Mac to approve them: told once per change.
+                let waiting = status
+                    .status
+                    .filter(|s| s.main_device)
+                    .map_or(0, |s| s.devices.iter().filter(|d| !d.approved).count());
+                if waiting != approvals_shown {
+                    approvals_shown = waiting;
+                    approvals = Some(waiting);
+                }
+            }
         }
         drop(session);
         if locked {
@@ -182,6 +206,9 @@ fn housekeeping(app: AppHandle, changed: Arc<AtomicBool>, place: Option<std::pat
         }
         if synced {
             let _ = app.emit("synced", ());
+        }
+        if let Some(waiting) = approvals {
+            let _ = app.emit("sync-approval", waiting);
         }
     }
 }

@@ -336,3 +336,138 @@ pub fn unlock_with_touch_id(app: AppHandle, state: State<'_, AppState>) -> CmdRe
     let _ = app.emit("unlocked", ());
     Ok(())
 }
+
+// ---- sync (plan A3) ----
+
+use crate::syncfolder::{describe_place, PlaceInfo, SyncPlace};
+use keyorra_session::session::{BackupFile, EmergencyKitDto, JoinOutcome, SyncScreenDto};
+use keyorra_session::sync::VerifyReport;
+use std::sync::Arc;
+
+#[tauri::command(async)]
+pub fn sync_screen(state: State<'_, AppState>) -> CmdResult<SyncScreenDto> {
+    lock_session(&state).sync_screen()
+}
+
+#[tauri::command(async)]
+pub fn sync_now(app: AppHandle, state: State<'_, AppState>) -> CmdResult<SyncScreenDto> {
+    let mut session = lock_session(&state);
+    session.sync_now(now())?;
+    let screen = session.sync_screen();
+    drop(session);
+    let _ = app.emit("synced", ());
+    screen
+}
+
+#[tauri::command(async)]
+pub fn enable_sync(state: State<'_, AppState>, password: String) -> CmdResult<EmergencyKitDto> {
+    lock_session(&state).enable_sync(&password, now())
+}
+
+#[tauri::command(async)]
+pub fn join_sync(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    password: String,
+    code: String,
+) -> CmdResult<JoinOutcome> {
+    let outcome = lock_session(&state).join_sync(&password, &code, now())?;
+    let _ = app.emit("synced", ());
+    Ok(outcome)
+}
+
+#[tauri::command(async)]
+pub fn disable_sync(state: State<'_, AppState>) -> CmdResult<()> {
+    lock_session(&state).disable_sync(now())
+}
+
+#[tauri::command(async)]
+pub fn approve_device(state: State<'_, AppState>, id: String, code: String) -> CmdResult<()> {
+    lock_session(&state).approve_device(&id, &code, now())
+}
+
+#[tauri::command(async)]
+pub fn sync_alarm_action(state: State<'_, AppState>, id: String, action: String) -> CmdResult<()> {
+    lock_session(&state).sync_alarm_action(&id, &action, now())
+}
+
+#[tauri::command(async)]
+pub fn remove_sync_device(state: State<'_, AppState>, id: String) -> CmdResult<()> {
+    lock_session(&state).remove_sync_device(&id, now())
+}
+
+#[tauri::command(async)]
+pub fn verify_sync(state: State<'_, AppState>) -> CmdResult<VerifyReport> {
+    lock_session(&state).verify_sync()
+}
+
+#[tauri::command(async)]
+pub fn sync_folder_files(
+    state: State<'_, AppState>,
+) -> CmdResult<Vec<keyorra_session::session::FolderFile>> {
+    lock_session(&state).sync_folder_files()
+}
+
+#[tauri::command(async)]
+pub fn emergency_kit(
+    state: State<'_, AppState>,
+    password: Option<String>,
+) -> CmdResult<EmergencyKitDto> {
+    lock_session(&state).emergency_kit(password.as_deref(), now())
+}
+
+#[tauri::command(async)]
+pub fn start_new_sync_account(
+    state: State<'_, AppState>,
+    password: String,
+) -> CmdResult<EmergencyKitDto> {
+    lock_session(&state).start_new_sync_account(&password, now())
+}
+
+#[tauri::command(async)]
+pub fn backups(state: State<'_, AppState>) -> CmdResult<Vec<BackupFile>> {
+    lock_session(&state).backups()
+}
+
+#[tauri::command(async)]
+pub fn delete_backup(state: State<'_, AppState>, name: String) -> CmdResult<()> {
+    lock_session(&state).delete_backup(&name, now())
+}
+
+#[tauri::command(async)]
+pub fn sync_place(places: State<'_, Arc<SyncPlace>>) -> Option<PlaceInfo> {
+    places.current().map(|p| describe_place(&p))
+}
+
+/// Chooses where accounts go (`None`: iCloud Drive); only while sync is off.
+#[tauri::command(async)]
+pub fn set_sync_place(
+    state: State<'_, AppState>,
+    places: State<'_, Arc<SyncPlace>>,
+    path: Option<String>,
+) -> CmdResult<PlaceInfo> {
+    let mut session = lock_session(&state);
+    if session.sync_status().is_ok_and(|s| s.enabled) {
+        return Err(CmdError::new(
+            ErrorKind::Invalid,
+            "Turn sync off before choosing another folder",
+        ));
+    }
+    let place = places
+        .set(path.as_deref().map(std::path::Path::new))
+        .map_err(|e| CmdError::new(ErrorKind::Invalid, e))?;
+    if let Some(link) = places.link() {
+        session.set_sync_link(Box::new(link));
+    }
+    Ok(describe_place(&place))
+}
+
+/// A secret (the setup code) on the clipboard, concealed from clipboard managers and
+/// cleared after 90 seconds at most.
+#[tauri::command(async)]
+pub fn copy_secret(state: State<'_, AppState>, text: String) -> CmdResult<()> {
+    let mut session = lock_session(&state);
+    crate::syncfolder::copy_concealed(&text).map_err(|e| CmdError::new(ErrorKind::Other, e))?;
+    session.copied_secret(&text, now());
+    Ok(())
+}

@@ -36,6 +36,7 @@ mod ffi {
             -> *mut c_void;
         pub fn ks_watch_stop(handle: *mut c_void);
         pub fn ks_computer_name(out: *mut u8, cap: usize) -> usize;
+        pub fn ks_pasteboard_set_concealed(text: *const c_char) -> i32;
     }
 }
 
@@ -64,6 +65,9 @@ mod ffi {
     pub unsafe fn ks_watch_stop(_: *mut c_void) {}
     pub unsafe fn ks_computer_name(_: *mut u8, _: usize) -> usize {
         0
+    }
+    pub unsafe fn ks_pasteboard_set_concealed(_: *const c_char) -> i32 {
+        6
     }
 }
 
@@ -154,6 +158,130 @@ pub fn icloud_place() -> Option<PathBuf> {
     let home = std::env::var_os("HOME").map(PathBuf::from)?;
     let drive = home.join("Library/Mobile Documents/com~apple~CloudDocs");
     drive.is_dir().then(|| drive.join("Keyorra"))
+}
+
+/// Where accounts live and what the Sync screen says about it.
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PlaceInfo {
+    /// `<chosen folder>/Keyorra`.
+    pub path: String,
+    /// "icloud", "cloudStorage" (Dropbox, OneDrive, Google Drive), "network" or "local".
+    pub kind: &'static str,
+    /// What to keep in mind with this kind of folder.
+    pub warning: Option<String>,
+}
+
+/// What kind of place `path` is (by where it is; nothing is read).
+pub fn describe_place(path: &Path) -> PlaceInfo {
+    let text = path.to_string_lossy().into_owned();
+    let (kind, warning) = if text.contains("/Library/Mobile Documents/com~apple~CloudDocs") {
+        ("icloud", None)
+    } else if text.contains("/Library/CloudStorage/") {
+        (
+            "cloudStorage",
+            Some(
+                "Set this folder to stay downloaded (\"Available offline\" or \"Make available \
+                 offline\") so Keyorra does not wait for files."
+                    .to_owned(),
+            ),
+        )
+    } else if text.starts_with("/Volumes/") {
+        (
+            "network",
+            Some(
+                "A network or external drive: sync works only while it is connected. Other \
+                 devices must reach the same folder."
+                    .to_owned(),
+            ),
+        )
+    } else {
+        (
+            "local",
+            Some(
+                "This folder is on this Mac only. Other devices see it only if a sync app \
+                 keeps it in step."
+                    .to_owned(),
+            ),
+        )
+    };
+    PlaceInfo {
+        path: text,
+        kind,
+        warning,
+    }
+}
+
+/// Where accounts live (`<chosen folder>/Keyorra`): iCloud Drive unless the user chose
+/// another folder, which is kept in `sync-place` next to the vault.
+pub struct SyncPlace {
+    file: PathBuf,
+    temp: PathBuf,
+    current: std::sync::Mutex<Option<PathBuf>>,
+}
+
+impl SyncPlace {
+    pub fn load(app_data: &Path) -> SyncPlace {
+        let file = app_data.join("sync-place");
+        let chosen = std::fs::read_to_string(&file)
+            .ok()
+            .map(|t| PathBuf::from(t.trim()))
+            .filter(|p| p.is_absolute());
+        SyncPlace {
+            file,
+            temp: app_data.join("sync-tmp"),
+            current: std::sync::Mutex::new(chosen.or_else(icloud_place)),
+        }
+    }
+
+    pub fn current(&self) -> Option<PathBuf> {
+        self.current.lock().unwrap().clone()
+    }
+
+    /// Chooses the folder accounts go in (`None`: iCloud Drive). The folder must exist.
+    pub fn set(&self, chosen: Option<&Path>) -> Result<PathBuf, String> {
+        let place = match chosen {
+            None => {
+                let _ = std::fs::remove_file(&self.file);
+                icloud_place().ok_or("iCloud Drive is not set up on this Mac")?
+            }
+            Some(dir) => {
+                let meta = std::fs::symlink_metadata(dir).map_err(|e| e.to_string())?;
+                if !meta.is_dir() {
+                    return Err(format!("{} is not a folder", dir.display()));
+                }
+                let place = dir.join("Keyorra");
+                std::fs::write(&self.file, place.to_string_lossy().as_bytes())
+                    .map_err(|e| e.to_string())?;
+                place
+            }
+        };
+        *self.current.lock().unwrap() = Some(place.clone());
+        Ok(place)
+    }
+
+    /// The session's link to the current place.
+    pub fn link(&self) -> Option<FolderLink> {
+        let place = self.current()?;
+        Some(FolderLink::new(
+            place,
+            self.temp.clone(),
+            Arc::new(MacCloud),
+            Box::new(|| Box::new(crate::touchid::device_keys())),
+            computer_name(),
+        ))
+    }
+}
+
+/// Puts a secret on the clipboard marked concealed and transient (clipboard managers skip
+/// it, spec §7.6).
+pub fn copy_concealed(text: &str) -> Result<(), String> {
+    let c = CString::new(text).map_err(|_| "NUL in text".to_owned())?;
+    // SAFETY: a live C string.
+    match unsafe { ffi::ks_pasteboard_set_concealed(c.as_ptr()) } {
+        0 => Ok(()),
+        _ => Err("the clipboard did not take it".into()),
+    }
 }
 
 /// This Mac's name for the other devices.
@@ -412,6 +540,37 @@ mod tests {
         assert_eq!(err.to_string(), "disk full");
         assert_eq!(MacCloud.state(&file), FileState::Ready);
         assert_eq!(MacCloud.state(&dir.path().join("none")), FileState::Missing);
+    }
+
+    #[test]
+    fn places_are_described_by_where_they_are() {
+        let icloud = describe_place(Path::new(
+            "/Users/a/Library/Mobile Documents/com~apple~CloudDocs/Keyorra",
+        ));
+        assert_eq!((icloud.kind, icloud.warning.is_none()), ("icloud", true));
+        let dropbox = describe_place(Path::new("/Users/a/Library/CloudStorage/Dropbox/Keyorra"));
+        assert_eq!(dropbox.kind, "cloudStorage");
+        assert!(dropbox.warning.unwrap().contains("offline"));
+        assert_eq!(
+            describe_place(Path::new("/Volumes/nas/Keyorra")).kind,
+            "network"
+        );
+        assert_eq!(
+            describe_place(Path::new("/Users/a/Sync/Keyorra")).kind,
+            "local"
+        );
+    }
+
+    #[test]
+    fn the_chosen_place_is_kept() {
+        let data = tempfile::tempdir().unwrap();
+        let chosen = tempfile::tempdir().unwrap();
+        let places = SyncPlace::load(data.path());
+        let place = places.set(Some(chosen.path())).unwrap();
+        assert_eq!(place, chosen.path().join("Keyorra"));
+        assert!(places.set(Some(&chosen.path().join("missing"))).is_err());
+        let again = SyncPlace::load(data.path());
+        assert_eq!(again.current(), Some(chosen.path().join("Keyorra")));
     }
 
     #[test]

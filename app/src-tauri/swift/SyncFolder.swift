@@ -2,6 +2,7 @@
 // file coordination with the sync client, and change notifications. Called from Rust
 // (src/syncfolder.rs) through C. Nothing here touches the keychain.
 
+import AppKit
 import CoreServices
 import Foundation
 import SystemConfiguration
@@ -135,4 +136,17 @@ public func ks_computer_name(_ out: UnsafeMutablePointer<UInt8>, _ cap: Int) -> 
         }
     }
     return bytes.count
+}
+
+/// Puts `text` on the general pasteboard marked concealed and transient, so clipboard
+/// managers skip it (nspasteboard.org markers).
+@_cdecl("ks_pasteboard_set_concealed")
+public func ks_pasteboard_set_concealed(_ text: UnsafePointer<CChar>) -> Int32 {
+    let pasteboard = NSPasteboard.general
+    pasteboard.clearContents()
+    let item = NSPasteboardItem()
+    item.setString(String(cString: text), forType: .string)
+    item.setString("", forType: NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"))
+    item.setString("", forType: NSPasteboard.PasteboardType("org.nspasteboard.TransientType"))
+    return pasteboard.writeObjects([item]) ? SF_READY : SF_FAILED
 }
