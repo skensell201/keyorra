@@ -5,6 +5,7 @@
 pub mod cbor;
 pub mod chunk;
 pub mod clock;
+pub mod engine;
 pub mod envelope;
 pub mod error;
 #[cfg(any(test, feature = "test-utils"))]
@@ -21,6 +22,8 @@ pub mod secret_key;
 pub mod segment;
 pub mod siblings;
 pub mod snapshot;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod testkit;
 pub mod transport;
 pub mod vv;
 
