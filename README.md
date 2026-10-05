@@ -11,7 +11,8 @@ Design: [docs/superpowers/specs/2026-10-02-keepsake-mvp-design.md](docs/superpow
 - `crates/keepsake-session` — desktop-app logic (unlock throttling, auto-lock,
   clipboard clearing, import flow) over the core, without any UI framework.
 - `app/` — macOS app: Tauri 2 shell (`app/src-tauri`) + React UI (`app/src`).
-- `extension/` — browser extension for Chromium browsers and Firefox (TypeScript).
+- `extension/` — browser extension for Chromium browsers, Firefox and Safari (TypeScript).
+- `safari/` — Xcode project for "Keepsake for Safari.app", which carries the extension into Safari.
 
 ## Development
 
@@ -25,7 +26,7 @@ cd app && pnpm tauri build --bundles app
 ## Browser extension
 
 ```bash
-cd extension && pnpm install && pnpm test && pnpm build   # dist/chromium, dist/firefox
+cd extension && pnpm install && pnpm test && pnpm build   # dist/chromium, dist/firefox, dist/safari
 ```
 
 1. In Keepsake: Settings… → Browsers → **Connect browsers** (installs the native host
@@ -43,6 +44,28 @@ cd extension && pnpm install && pnpm test && pnpm build   # dist/chromium, dist/
 7. Card and address fields get the icon too. Cards and addresses are offered only on https
    pages, this Mac or the local network. Payment fields inside separate iframes (e.g. Stripe
    Elements) are filled one field at a time.
+
+### Safari
+
+Safari loads web extensions only from inside a Mac app, so the extension ships in
+"Keepsake for Safari.app" (`safari/`). Its app extension relays each message to the Keepsake
+app's socket and starts Keepsake if it isn't running; no host manifest is involved.
+
+```bash
+safari/build.sh                         # builds extension/dist/safari and the app, installs it to /Applications
+KEEPSAKE_TEAM=ABCDE12345 safari/build.sh  # same, signed with your Apple Developer team
+```
+
+1. Without a team the build is signed ad hoc: in Safari, Settings… → Advanced → "Show features
+   for web developers", then Develop → **Allow Unsigned Extensions** (needed again after every
+   Safari restart).
+2. Open "Keepsake for Safari" → **Open Safari Extensions Settings** → turn on Keepsake and allow
+   it on websites.
+3. Pair as above: Keepsake toolbar icon → **Connect**; the app shows the request as "Safari".
+
+The app extension is sandboxed. Its one exception (`safari/Keepsake for Safari Extension/Extension.entitlements`)
+allows connecting to the app's socket and nothing else; `safari/check/sandbox-check.sh` checks
+it against the running app.
 
 Security model: see the spec, section "Cryptography".
 
