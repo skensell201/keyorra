@@ -4,16 +4,16 @@
 
 **Goal:** Sync becomes part of the desktop session. A vault can turn sync on (and get its Emergency Kit data and a setup code), another Mac joins with the master password and the setup code, the main Mac approves it after comparing key codes, sync runs only while the vault is unlocked and continues after every unlock, and a vault can turn sync off and join again: the same account merges by record id (a record changed on both sides keeps both versions), another account's vault is carried over into the new one with the old file kept aside, and the main Mac can start a new account with new keys. Device signing keys stay on their Mac: they are sealed to a Secure Enclave key, so a keychain or disk restored on another Mac opens nothing and the device retires its id.
 
-**Builds on:** A1d-1 (`docs/superpowers/plans/2026-10-05-keyorra-sync-a1d-1.md`), applied on `feat/sync-design`.
+**Builds on:** `feat/sync-design` at `ae39c08`: A1d-1 (`docs/superpowers/plans/2026-10-05-keyorra-sync-a1d-1.md`) with the fixes of its data-safety review (`13e9ee8`, `b9c46ad`, `09fd953`) and the root trust log fix (`ae39c08`). The bridge's API from those fixes is used here: `enable`/`join` return `Enabled`/`Joined` with the first round's result, rounds return a `RoundReport`, `DeviceKeyStore` has `store -> Result` and `forget`, the store has `delete_sealed_meta`.
 
-**Verified:** every task was applied in order in a scratch worktree on top of A1d-1; the full workspace suite passes (605 tests, 4 ignored), `cargo clippy --workspace --all-targets -- -D warnings` is clean (this compiles the Swift helper), and the adversary and convergence property tests pass at 2000 cases in release. The one test that touches the real Secure Enclave and login keychain is `#[ignore]` and is run by hand (Task 6).
+**Verified:** every task was applied in order in a scratch worktree on top of A1d-1; the full workspace suite passes after every task (622 tests, 4 ignored at the end), `cargo clippy --workspace --all-targets -- -D warnings` is clean (this compiles the Swift helper), and the adversary and convergence property tests pass at 2000 cases in release. The one test that touches the real Secure Enclave and login keychain is `#[ignore]` and is run by hand (Task 6).
 
 **Architecture:**
 
-- `keyorra-core`: `Store::check_password`, `delete_sealed_meta`, `record_changes` (by hand, for rejoining) and `rotate_keys` (new account key and vault keys, everything re-encrypted in one transaction).
+- `keyorra-core`: `Store::check_password`, `record_changes` (by hand, for rejoining) and `rotate_keys` (new account key and vault keys, everything re-encrypted in one transaction).
 - `keyorra-sync`: `Transport` for `Box<T>` (the app chooses the transport at run time).
-- `keyorra-session::sync`: `SetupCode` (Secret Key + the main device's id and key code), `EnclaveDeviceKeys` (device keys sealed to an `Enclave`), and `merge`: `disable`, `rejoin`, `carry_over`, `start_new_account`. `Synced` gains `status`, `setup_code` and `change_password` (main device only).
-- `keyorra-session::session::sync`: the `SyncLink` the app supplies (transport, device keys, device name), and the session commands `enable_sync`, `join_sync`, `sync_now`, `sync_status`, `approve_device`, `disable_sync`, `emergency_kit`, `start_new_sync_account`; hooks in `unlock`, `unlock_with_touch_id`, `lock`, `create_vault`, `change_password`.
+- `keyorra-session::sync`: `SetupCode` (Secret Key + the main device's id and key code), `EnclaveDeviceKeys` (device keys sealed to an `Enclave`), and `merge`: `disable`, `rejoin`, `carry_over`, `start_new_account`. `Synced` gains `status`, `setup_code` and `change_password` (main device only). `disable` takes the base of a record with an unsynced local change from what sync has (so a rejoin writes it); a conflict copy made when rejoining gets its own copies of the local attachments.
+- `keyorra-session::session::sync`: the `SyncLink` the app supplies (transport, device keys, device name), and the session commands `enable_sync`, `join_sync`, `sync_now`, `sync_status` (with the last round's notices: changes undone, records waiting), `approve_device`, `disable_sync`, `emergency_kit`, `start_new_sync_account`; hooks in `unlock`, `unlock_with_touch_id`, `lock`, `create_vault`, `change_password`.
 - App: `ks_device_enclave_create` in `swift/TouchId.swift`, `MacEnclave`, the `device-keys` keychain item and `device_keys()`, ready for the folder transport (A2) to build a `SyncLink`.
 
 **Tech Stack:** unchanged. The app gains the dev-dependency `ed25519-dalek` for its manual test.
@@ -71,6 +71,9 @@ Visible to the user (to confirm):
 
 Internal:
 
+- **Rejoining never loses an edit made just before sync was turned off.** `disable` keeps, for a record whose local change sync had not taken yet, the fingerprint of what sync has (or none), so the rejoin sees it as changed here and writes it (or makes a conflict copy). Found while porting onto the review fixes; regression test.
+- **A conflict copy made when rejoining keeps the local attachments** (new attachment records bound to the copy). Regression test.
+- **What a round undid or could not show is kept for the Sync screen** (`SyncStatusDto::notices`, cleared on lock); A3 decides how to show it.
 - **No local write before the first round read the store.** A device that just joined knows no vault yet; a change waits until the first successful round (otherwise it was dropped as "not found").
 - **A vault created while synced** goes through `Engine::create_vault` (its id commits to its key) when the engine can write; otherwise it is created locally and adopted when written.
 - **The old database** (another account) is moved aside with its SQLite companions as `keyorra.db.pre-sync-YYYYMMDD` (`-2`, `-3`… if taken), and the Touch ID record is deleted (it wrapped the old key).
@@ -121,12 +124,12 @@ The three tests at the end of `sync_tests.rs` (`the_password_can_be_checked_with
 
 ```diff
 diff --git a/crates/keyorra-core/src/store/sync_tests.rs b/crates/keyorra-core/src/store/sync_tests.rs
-index a93c504..b075c87 100644
+index 31e5403..2624ee1 100644
 --- a/crates/keyorra-core/src/store/sync_tests.rs
 +++ b/crates/keyorra-core/src/store/sync_tests.rs
-@@ -192,3 +192,63 @@ fn the_meta_writer_writes_what_the_store_reads() {
-         b"state"
-     );
+@@ -313,3 +313,63 @@ fn a_real_version_1_database_migrates_with_everything() {
+     assert!(store.pending_changes().unwrap().is_empty());
+     assert_eq!(std::fs::read(sibling(&path, ".bak-v1")).unwrap(), v1);
  }
 +
 +#[test]
@@ -196,7 +199,7 @@ Apply:
 
 ```diff
 diff --git a/crates/keyorra-core/src/store/mod.rs b/crates/keyorra-core/src/store/mod.rs
-index 9dad7de..624aa18 100644
+index ce6c1b5..4eaecf9 100644
 --- a/crates/keyorra-core/src/store/mod.rs
 +++ b/crates/keyorra-core/src/store/mod.rs
 @@ -13,6 +13,7 @@ use crate::import::{ImportPlan, ImportReport};
@@ -207,7 +210,7 @@ index 9dad7de..624aa18 100644
  mod sync;
  #[cfg(test)]
  mod sync_tests;
-@@ -731,6 +732,27 @@ fn insert_attachment(
+@@ -733,6 +734,27 @@ fn insert_attachment(
      Ok(())
  }
  
@@ -236,10 +239,10 @@ index 9dad7de..624aa18 100644
      conn: &Connection,
      item_id: Uuid,
 diff --git a/crates/keyorra-core/src/store/sync.rs b/crates/keyorra-core/src/store/sync.rs
-index 5d2c5f4..af8f16f 100644
+index a9cd723..79da4e8 100644
 --- a/crates/keyorra-core/src/store/sync.rs
 +++ b/crates/keyorra-core/src/store/sync.rs
-@@ -310,6 +310,30 @@ impl Store {
+@@ -356,12 +356,30 @@ impl Store {
          Ok(())
      }
  
@@ -248,12 +251,12 @@ index 5d2c5f4..af8f16f 100644
 +        crypto::unlock(&self.header, password).map(drop)
 +    }
 +
-+    pub fn delete_sealed_meta(&mut self, name: &str) -> Result<()> {
-+        self.conn
-+            .execute("DELETE FROM meta WHERE key = ?1", [sealed_meta_key(name)])?;
-+        Ok(())
-+    }
-+
+     pub fn delete_sealed_meta(&mut self, name: &str) -> Result<()> {
+         self.conn
+             .execute("DELETE FROM meta WHERE key = ?1", [sealed_meta_key(name)])?;
+         Ok(())
+     }
+ 
 +    /// Records changes by hand (rejoining an account: what changed while sync was off).
 +    pub fn record_changes(&mut self, changes: &[Change]) -> Result<()> {
 +        let tx = self.conn.unchecked_transaction()?;
@@ -399,7 +402,7 @@ impl Store {
 
 - [ ] **Step 3: Run and commit.**
 
-`cargo test -p keyorra-core` green (137 + 17). Commit: `Core A1d-2: check the password, record changes by hand, rotate every key`.
+`cargo test -p keyorra-core` green (143 + 17). Commit: `Core A1d-2: check the password, record changes by hand, rotate every key`.
 
 ---
 
@@ -483,16 +486,16 @@ Commit: `Sync A1d-2: Transport for Box<T>`.
 
 - [ ] **Step 1: Failing tests.**
 
-Apply the tests (join with the setup code alone; turning sync off keeps everything and records nothing; the main device cannot turn sync off under other devices; **rejoining merges by record id and keeps both sides of a double edit**; another account's vault cannot rejoin; carrying another account's vault over; the main device starts a new account with new keys):
+Apply the tests (join with the setup code alone; turning sync off keeps everything and records nothing; the main device cannot turn sync off under other devices; **rejoining merges by record id and keeps both sides of a double edit**; another account's vault cannot rejoin; carrying another account's vault over; the main device starts a new account with new keys; **an unsynced edit survives turning sync off and rejoining**; **a rejoin conflict copy keeps its attachments**):
 
 ```diff
 diff --git a/crates/keyorra-session/src/sync/tests.rs b/crates/keyorra-session/src/sync/tests.rs
-index de9b7ca..e64d028 100644
+index 36f9a4f..64cf87b 100644
 --- a/crates/keyorra-session/src/sync/tests.rs
 +++ b/crates/keyorra-session/src/sync/tests.rs
-@@ -259,3 +259,262 @@ fn vaults_created_while_synced_get_committed_ids() {
-     assert!(names.contains("Work"));
-     assert!(laptop.store.vaults().unwrap().iter().any(|v| v.id == id));
+@@ -550,3 +550,366 @@ fn review_a1d_i5_a_failed_join_leaves_no_file() {
+     assert!(!path.exists());
+     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
  }
 +
 +// ---- setup code, turning sync off and on, other accounts (plan A1d-2) ----
@@ -535,7 +538,11 @@ index de9b7ca..e64d028 100644
 +    let path = dir.path().join("j.db");
 +    let mut keys = MemoryDeviceKeys::default();
 +    let sk = *code.secret_key.as_bytes();
-+    let (store, synced) = join(
++    let Joined {
++        store,
++        synced,
++        first_round,
++    } = join(
 +        &path,
 +        PW,
 +        KdfParams::INSECURE_FAST,
@@ -549,6 +556,7 @@ index de9b7ca..e64d028 100644
 +        NOW_MS,
 +    )
 +    .unwrap();
++    first_round.unwrap();
 +    let mut laptop = Device {
 +        _dir: dir,
 +        path,
@@ -633,7 +641,8 @@ index de9b7ca..e64d028 100644
 +        cheap_unlock(PW, *sk.as_bytes()),
 +        NOW_MS + 71,
 +    )
-+    .unwrap();
++    .unwrap()
++    .synced;
 +    let mut laptop = Device {
 +        _dir,
 +        path,
@@ -732,7 +741,7 @@ index de9b7ca..e64d028 100644
 +        &mut main.synced,
 +        main_device(&MemoryTransport::new()).0.synced,
 +    );
-+    let (synced, kit) = start_new_account(
++    let Enabled { synced, kit, .. } = start_new_account(
 +        &mut main.store,
 +        Some(synced),
 +        fresh.clone(),
@@ -752,6 +761,104 @@ index de9b7ca..e64d028 100644
 +    approve_all(&mut main, &mut newcomer, NOW_MS + 111);
 +    assert_eq!(titles(&newcomer.store), titles(&main.store));
 +    assert!(titles(&newcomer.store).contains("before sync"));
++}
++
++/// An edit not synced yet when sync is turned off is written when the vault rejoins (it is
++/// not mistaken for what the account already had).
++#[test]
++fn an_unsynced_edit_survives_turning_sync_off_and_rejoining() {
++    let (transport, mut main, laptop) = pair();
++    let Device {
++        _dir,
++        path,
++        mut store,
++        synced,
++        mut keys,
++    } = laptop;
++    retitle(
++        &mut store,
++        "before sync",
++        "edited just before turning sync off",
++    );
++    disable(&mut store, Some(synced), &mut keys).unwrap();
++    let kit = main.synced.emergency_kit();
++    let (id, sk) = SecretKey::parse(&kit.secret_key).unwrap();
++    let synced = rejoin(
++        &mut store,
++        &sk,
++        &id,
++        Some(&main.synced.root_pin()),
++        transport.clone(),
++        &mut keys,
++        "Laptop",
++        cheap_unlock(PW, *sk.as_bytes()),
++        NOW_MS + 120,
++    )
++    .unwrap()
++    .synced;
++    let mut laptop = Device {
++        _dir,
++        path,
++        store,
++        synced,
++        keys,
++    };
++    approve_all(&mut main, &mut laptop, NOW_MS + 121);
++    assert!(titles(&main.store).contains("edited just before turning sync off"));
++    assert_eq!(titles(&laptop.store), titles(&main.store));
++}
++
++/// The conflict copy made when rejoining keeps the local version's attachments.
++#[test]
++fn a_rejoin_conflict_copy_keeps_its_attachments() {
++    let (transport, mut main, laptop) = pair();
++    let Device {
++        _dir,
++        path,
++        mut store,
++        synced,
++        mut keys,
++    } = laptop;
++    disable(&mut store, Some(synced), &mut keys).unwrap();
++    let local = item_id(&store, "before sync");
++    store
++        .add_attachment(local, "mine.txt", b"local bytes", 130)
++        .unwrap();
++    retitle(&mut store, "before sync", "edited here");
++    retitle(&mut main.store, "before sync", "edited there");
++    round(&mut main, NOW_MS + 131);
++    let kit = main.synced.emergency_kit();
++    let (id, sk) = SecretKey::parse(&kit.secret_key).unwrap();
++    let synced = rejoin(
++        &mut store,
++        &sk,
++        &id,
++        Some(&main.synced.root_pin()),
++        transport.clone(),
++        &mut keys,
++        "Laptop",
++        cheap_unlock(PW, *sk.as_bytes()),
++        NOW_MS + 132,
++    )
++    .unwrap()
++    .synced;
++    let mut laptop = Device {
++        _dir,
++        path,
++        store,
++        synced,
++        keys,
++    };
++    approve_all(&mut main, &mut laptop, NOW_MS + 133);
++    let copy = laptop
++        .store
++        .get_item(item_id(&laptop.store, "edited here"))
++        .unwrap();
++    assert_eq!(copy.attachments.len(), 1);
++    assert_eq!(
++        &laptop.store.get_attachment(copy.attachments[0].id).unwrap()[..],
++        b"local bytes"
++    );
 +}
 ```
 
@@ -882,11 +989,11 @@ mod tests {
 
 - [ ] **Step 3: Device keys sealed to the Secure Enclave.**
 
-`DeviceKeyStore::store` now reports failure and `forget` drops an id:
+The module doc of `keys.rs` now names where keys live:
 
 ```diff
 diff --git a/crates/keyorra-session/src/sync/keys.rs b/crates/keyorra-session/src/sync/keys.rs
-index b234063..8c5f67a 100644
+index 892e2e8..c52ac22 100644
 --- a/crates/keyorra-session/src/sync/keys.rs
 +++ b/crates/keyorra-session/src/sync/keys.rs
 @@ -1,6 +1,6 @@
@@ -899,45 +1006,6 @@ index b234063..8c5f67a 100644
  
  use std::collections::BTreeMap;
  use std::sync::{Arc, Mutex};
-@@ -12,7 +12,9 @@ use zeroize::Zeroizing;
- 
- pub trait DeviceKeyStore: Send {
-     fn load(&self, device: &DeviceId) -> Option<SigningKey>;
--    fn store(&mut self, device: DeviceId, key: &SigningKey);
-+    fn store(&mut self, device: DeviceId, key: &SigningKey) -> Result<(), String>;
-+    /// The id is no longer used here (sync turned off, or a new account).
-+    fn forget(&mut self, device: &DeviceId);
-     /// Another handle to the same keys (the engine keeps one to store a new id's key when it
-     /// retires the old one).
-     fn boxed_clone(&self) -> Box<dyn DeviceKeyStore>;
-@@ -31,11 +33,16 @@ impl DeviceKeyStore for MemoryDeviceKeys {
-             .map(|k| SigningKey::from_bytes(k))
-     }
- 
--    fn store(&mut self, device: DeviceId, key: &SigningKey) {
-+    fn store(&mut self, device: DeviceId, key: &SigningKey) -> Result<(), String> {
-         self.0
-             .lock()
-             .unwrap()
-             .insert(device, Zeroizing::new(key.to_bytes()));
-+        Ok(())
-+    }
-+
-+    fn forget(&mut self, device: &DeviceId) {
-+        self.0.lock().unwrap().remove(device);
-     }
- 
-     fn boxed_clone(&self) -> Box<dyn DeviceKeyStore> {
-@@ -50,7 +57,8 @@ impl DeviceKeys for EngineKeys {
-     fn holds(&self, device: &DeviceId) -> bool {
-         self.0.load(device).is_some()
-     }
-+    /// A failure leaves the new id without a stored key: the next restart retires it again.
-     fn store(&mut self, device: DeviceId, key: &SigningKey) {
--        self.0.store(device, key);
-+        let _ = self.0.store(device, key);
-     }
- }
 ```
 
 Create `crates/keyorra-session/src/sync/enclave_keys.rs` (one enclave key per Mac, one sealed record per device id; tests: a key comes back on the same Mac; a keychain restored on another Mac opens nothing):
@@ -1193,8 +1261,8 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use super::{
-    enable, join_store, load_config, open_account, DeviceKeyStore, EmergencyKit, Synced, BASE,
-    CONFIG, MEMO, OUTBOX,
+    enable, join_store, load_config, open_account, DeviceKeyStore, Enabled, RoundReport, Synced,
+    BASE, CONFIG, MEMO, OUTBOX,
 };
 use keyorra_core::crypto::Key;
 
@@ -1298,6 +1366,21 @@ fn save_base(store: &mut Store, base: &Base) -> Result<()> {
     Ok(())
 }
 
+/// The fingerprint of what sync shows of a record.
+fn synced_print(view: &View, id: Uuid) -> Option<[u8; 32]> {
+    if let Some(v) = view.vaults.get(&id) {
+        return Some(vault_print(&v.name, v.deleted));
+    }
+    let v = view.items.get(&id)?;
+    let p = v.payload.as_ref()?;
+    let mut item = serde_json::from_slice::<Item>(&p.item_json).ok()?;
+    item.id = id;
+    item.vault_id = v.vault_id?;
+    let deleted_at = (v.state == keyorra_sync::present::ItemState::Trashed)
+        .then(|| p.deleted_at.map_or(0, |d| d as i64));
+    Some(item_print(&item, deleted_at))
+}
+
 /// Rejoining: if the item changed here and in the account since `base`, keep this device's
 /// version as a conflict copy (written as a new record) and let the account's version stand.
 pub(super) fn copy_if_both_changed(
@@ -1331,6 +1414,11 @@ pub(super) fn copy_if_both_changed(
     if theirs_print == *base_print || theirs_print == item_print(&local, local_deleted) {
         return Ok(false);
     }
+    let attachments: Vec<(String, Vec<u8>)> = local
+        .attachments
+        .iter()
+        .filter_map(|a| Some((a.name.clone(), store.get_attachment(a.id).ok()?.to_vec())))
+        .collect();
     let mut copy = local;
     copy.id = Uuid::new_v4();
     copy.attachments.clear();
@@ -1340,6 +1428,10 @@ pub(super) fn copy_if_both_changed(
         from_device: data_encoding::HEXLOWER.encode(&device),
     });
     store.save_item(&copy)?;
+    // The copy's own attachment records (an attachment is bound to its item).
+    for (name, bytes) in attachments {
+        store.add_attachment(copy.id, &name, &bytes, copy.updated_at)?;
+    }
     Ok(true)
 }
 
@@ -1362,8 +1454,18 @@ pub fn disable<T: Transport>(
         Some(s) => Some(s.engine.device()),
         None => load_config(store).ok().map(|c| c.device),
     };
+    // Records with local changes sync has not taken yet: the base is what sync has of them
+    // (or nothing), so a rejoin writes them.
+    let pending = store.pending_changes()?;
+    let (mut base, _) = prints(store)?;
+    let view = synced.as_ref().map(|s| s.engine.view());
+    for change in pending {
+        match view.as_ref().and_then(|v| synced_print(v, change.id)) {
+            Some(print) => base.insert(change.id, print),
+            None => base.remove(&change.id),
+        };
+    }
     forget(store)?;
-    let (base, _) = prints(store)?;
     save_base(store, &base)?;
     if let Some(device) = device {
         keys.forget(&device);
@@ -1380,6 +1482,12 @@ fn forget(store: &mut Store) -> Result<()> {
     Ok(())
 }
 
+/// A vault that rejoined its account: `first_round` as for [`super::Enabled`].
+pub struct Rejoined<T: Transport> {
+    pub synced: Synced<T>,
+    pub first_round: Result<RoundReport>,
+}
+
 /// Joins the account this store belonged to (sync was turned off here): same account key
 /// required. A new device id joins and waits for approval.
 #[allow(clippy::too_many_arguments)]
@@ -1393,7 +1501,7 @@ pub fn rejoin<T: Transport>(
     device_name: &str,
     unlock: impl FnMut(&Header) -> Result<Key>,
     wall_ms: u64,
-) -> Result<Synced<T>> {
+) -> Result<Rejoined<T>> {
     if super::is_enabled(store)? {
         return Err(Error::Refused("sync is already on".into()));
     }
@@ -1404,7 +1512,7 @@ pub fn rejoin<T: Transport>(
         ));
     }
     let base = load_base(store)?.unwrap_or_default();
-    join_store(
+    let (synced, first_round) = join_store(
         store,
         transport,
         keys,
@@ -1414,7 +1522,11 @@ pub fn rejoin<T: Transport>(
         account_key,
         Some(base),
         wall_ms,
-    )
+    )?;
+    Ok(Rejoined {
+        synced,
+        first_round,
+    })
 }
 
 /// Copies the live items of `from` (with attachments) into `to`, as new records in new
@@ -1455,7 +1567,7 @@ pub fn start_new_account<T: Transport, U: Transport>(
     password: &str,
     kdf: KdfParams,
     wall_ms: u64,
-) -> Result<(Synced<T>, EmergencyKit)> {
+) -> Result<Enabled<T>> {
     let device = match &old {
         Some(s) => Some(s.engine.device()),
         None => load_config(store).ok().map(|c| c.device),
@@ -1473,11 +1585,11 @@ pub fn start_new_account<T: Transport, U: Transport>(
 
 - [ ] **Step 5: The bridge.**
 
-Apply (module declarations; `open_account` and `join_store` shared by `join` and `rejoin`; the `base` of a rejoin and the conflict copy when both sides changed; **no local write before the first round read the store** (`caught_up`), found by the rejoin test: a fresh joiner's change to a vault it did not know yet was dropped as "not found"; `setup_code`):
+Apply (module declarations; `open_account` and `join_store` shared by `join` and `rejoin`, which clean up after themselves on an error and commit before the first round; the `base` of a rejoin and the conflict copy when both sides changed; **no local write before the first round read the store** (`caught_up`), found by the rejoin test: a fresh joiner's change to a vault it did not know yet could not be written; `setup_code`; `SyncStatus`, `SyncDevice`, `Synced::status` and `Synced::change_password` for Task 4):
 
 ```diff
 diff --git a/crates/keyorra-session/src/sync/mod.rs b/crates/keyorra-session/src/sync/mod.rs
-index 9945dc9..9ba0183 100644
+index dfd8fc5..241301e 100644
 --- a/crates/keyorra-session/src/sync/mod.rs
 +++ b/crates/keyorra-session/src/sync/mod.rs
 @@ -15,7 +15,10 @@
@@ -1491,13 +1603,13 @@ index 9945dc9..9ba0183 100644
  #[cfg(test)]
  mod tests;
  
-@@ -39,11 +42,16 @@ use serde::{Deserialize, Serialize};
+@@ -40,11 +43,16 @@ use serde::{Deserialize, Serialize};
  use uuid::Uuid;
  use zeroize::Zeroizing;
  
 +pub use enclave_keys::{Enclave, EnclaveDeviceKeys};
  pub use keys::{DeviceKeyStore, MemoryDeviceKeys};
-+pub use merge::{carry_over, disable, rejoin, start_new_account};
++pub use merge::{carry_over, disable, rejoin, start_new_account, Rejoined};
 +pub use setup::SetupCode;
  
  const CONFIG: &str = "sync:config";
@@ -1508,7 +1620,37 @@ index 9945dc9..9ba0183 100644
  
  /// What this device knows about its synced account (sealed meta `sync:config`).
  #[derive(Clone, Debug, Serialize, Deserialize)]
-@@ -80,6 +88,12 @@ pub struct Synced<T: Transport> {
+@@ -58,6 +66,29 @@ struct SyncConfig {
+     secret_key_id: String,
+ }
+ 
++/// Sync as the UI shows it.
++#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct SyncStatus {
++    pub main_device: bool,
++    /// This device self-joined and waits for the main device.
++    pub waiting_for_approval: bool,
++    /// This device's key code (compared on the main device before approving it).
++    pub key_code: String,
++    pub devices: Vec<SyncDevice>,
++    pub alarms: usize,
++}
++
++#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
++#[serde(rename_all = "camelCase")]
++pub struct SyncDevice {
++    pub id: String,
++    pub name: String,
++    pub approved: bool,
++    pub main: bool,
++    pub this_device: bool,
++}
++
+ /// What the user writes down when sync is enabled (spec §7.6). The location is the
+ /// transport's (plan A2/A3 add it).
+ pub struct EmergencyKit {
+@@ -150,6 +181,12 @@ pub struct Synced<T: Transport> {
      engine: Engine<OsRng>,
      transport: T,
      config: SyncConfig,
@@ -1521,31 +1663,22 @@ index 9945dc9..9ba0183 100644
  }
  
  fn random_id() -> [u8; 16] {
-@@ -134,7 +148,7 @@ pub fn enable<T: Transport>(
-     let account_id = random_id();
-     let device = random_id();
-     let signer = new_signer();
--    keys.store(device, &signer);
-+    keys.store(device, &signer).map_err(Error::Refused)?;
-     let (secret_key, secret_key_id) = SecretKey::generate(&mut OsRng);
-     let account_key = store.account_key_copy()?;
-     let root_key = signer.verifying_key();
-@@ -205,6 +219,8 @@ pub fn enable<T: Transport>(
+@@ -261,6 +298,8 @@ pub fn enable<T: Transport>(
          engine,
          transport,
          config,
 +        base: None,
 +        caught_up: false,
      };
-     synced.round(store, wall_ms)?;
-     Ok((synced, kit))
-@@ -229,18 +245,53 @@ pub fn join<T: Transport>(
+     synced.commit(store)?;
+     let first_round = synced.round(store, wall_ms);
+@@ -375,15 +414,62 @@ pub fn join<T: Transport>(
      unlock: impl FnMut(&Header) -> Result<Key>,
      wall_ms: u64,
- ) -> Result<(Store, Synced<T>)> {
+ ) -> Result<Joined<T>> {
 +    let (header, account_key) = open_account(&transport, pin, unlock)?;
 +    let mut store = Store::create_with_account_key(path, password, local_kdf, account_key.clone())?;
-+    let synced = join_store(
++    match join_store(
 +        &mut store,
 +        transport,
 +        keys,
@@ -1555,8 +1688,18 @@ index 9945dc9..9ba0183 100644
 +        account_key,
 +        None,
 +        wall_ms,
-+    )?;
-+    Ok((store, synced))
++    ) {
++        Ok((synced, first_round)) => Ok(Joined {
++            store,
++            synced,
++            first_round,
++        }),
++        Err(e) => {
++            drop(store);
++            remove_database(path);
++            Err(e)
++        }
++    }
 +}
 +
 +/// The account header the transport holds, unlocked: (header, account key).
@@ -1577,7 +1720,9 @@ index 9945dc9..9ba0183 100644
 +    Ok((joined.file.header.clone(), joined.account_key))
 +}
 +
-+/// A new device id for `store` in the account: self-joins and waits for approval.
++/// A new device id for `store` in the account: self-joins and waits for approval. On an
++/// error nothing of sync is left in the store and the key is forgotten; otherwise sync is
++/// committed and the first round's result is returned with it.
 +#[allow(clippy::too_many_arguments)]
 +fn join_store<T: Transport>(
 +    store: &mut Store,
@@ -1589,49 +1734,61 @@ index 9945dc9..9ba0183 100644
 +    account_key: Key,
 +    base: Option<merge::Base>,
 +    wall_ms: u64,
-+) -> Result<Synced<T>> {
++) -> Result<(Synced<T>, Result<RoundReport>)> {
      let device = random_id();
-     let signer = new_signer();
--    keys.store(device, &signer);
-+    keys.store(device, &signer).map_err(Error::Refused)?;
-     let root_key = VerifyingKey::from_bytes(&header.root_key)
-         .map_err(|_| Error::Malformed("main device key".into()))?;
-     let mut engine = Engine::join(
-@@ -248,7 +299,7 @@ pub fn join<T: Transport>(
-         signer,
-         device_name,
-         header.account_id,
--        joined.account_key,
-+        account_key,
-         header.root_device,
-         root_key,
-         OsRng,
-@@ -264,15 +315,21 @@ pub fn join<T: Transport>(
-         secret_key: *secret_key.as_bytes(),
-         secret_key_id: secret_key_id.to_owned(),
+     let started = (|| -> Result<Synced<T>> {
+         let signer = new_signer();
+@@ -395,7 +481,7 @@ pub fn join<T: Transport>(
+             signer,
+             device_name,
+             header.account_id,
+-            joined.account_key,
++            account_key,
+             header.root_device,
+             root_key,
+             OsRng,
+@@ -416,25 +502,31 @@ pub fn join<T: Transport>(
+             engine,
+             transport,
+             config,
++            base,
++            caught_up: false,
+         };
+-        synced.commit(&mut store)?;
++        if let Some(base) = &synced.base {
++            // What changed here while sync was off is written once the device may write.
++            let changed = merge::changed_since(store, base)?;
++            synced.commit(store)?;
++            store.record_changes(&changed)?;
++        } else {
++            synced.commit(store)?;
++        }
+         Ok(synced)
+     })();
+     let mut synced = match started {
+         Ok(s) => s,
+         Err(e) => {
+-            drop(store);
+             keys.forget(&device);
+-            remove_database(path);
++            let _ = store.delete_sealed_meta(OUTBOX);
++            let _ = store.delete_sealed_meta(CONFIG);
++            let _ = store.set_sync_tracking(false);
+             return Err(e);
+         }
      };
--    save_config(&mut store, &config)?;
-+    save_config(store, &config)?;
-     store.set_sync_tracking(true)?;
-+    if let Some(base) = &base {
-+        // What changed here while sync was off is written once the device may write.
-+        store.record_changes(&merge::changed_since(store, base)?)?;
-+    }
-     let mut synced = Synced {
-         engine,
-         transport,
-         config,
-+        base,
-+        caught_up: false,
-     };
--    synced.round(&mut store, wall_ms)?;
--    Ok((store, synced))
-+    synced.round(store, wall_ms)?;
-+    Ok(synced)
+-    let first_round = synced.round(&mut store, wall_ms);
+-    Ok(Joined {
+-        store,
+-        synced,
+-        first_round,
+-    })
++    let first_round = synced.round(store, wall_ms);
++    Ok((synced, first_round))
  }
  
- /// Continues sync after a restart (the store unlocked). The device key comes from `keys`; if
-@@ -315,6 +372,8 @@ pub fn resume<T: Transport>(
+ /// Removes a database file this module created, with SQLite's companions.
+@@ -487,6 +579,8 @@ pub fn resume<T: Transport>(
          engine,
          transport,
          config,
@@ -1640,20 +1797,20 @@ index 9945dc9..9ba0183 100644
      })
  }
  
-@@ -346,6 +405,9 @@ impl<T: Transport> Synced<T> {
-     pub fn round(&mut self, store: &mut Store, wall_ms: u64) -> Result<Vec<Event>> {
-         self.write_changes(store, wall_ms)?;
+@@ -519,6 +613,9 @@ impl<T: Transport> Synced<T> {
+         let mut report = RoundReport::default();
+         let before = self.write_changes(store, wall_ms, &mut report);
          let synced = self.engine.sync(&self.transport, wall_ms);
 +        if synced.is_ok() {
 +            self.caught_up = true;
 +        }
          // What could not be written before (the engine was still reading its own stream).
-         self.write_changes(store, wall_ms)?;
-         self.show(store)?;
-@@ -357,22 +419,26 @@ impl<T: Transport> Synced<T> {
-     /// The store's recorded changes, as versions. A change the engine cannot take yet (it
-     /// is still reading its own stream after a restart, or conflict copies are owed) stays.
-     fn write_changes(&mut self, store: &mut Store, wall_ms: u64) -> Result<()> {
+         let after = self.write_changes(store, wall_ms, &mut report);
+         // While the engine reads its streams again after a restart, its view lacks this
+@@ -548,10 +645,11 @@ impl<T: Transport> Synced<T> {
+         wall_ms: u64,
+         report: &mut RoundReport,
+     ) -> Result<()> {
 -        if !self.engine.can_write() {
 +        if !self.caught_up || !self.engine.can_write() {
              return Ok(());
@@ -1662,11 +1819,21 @@ index 9945dc9..9ba0183 100644
 +        let mut all = true;
          for change in store.pending_changes()? {
              match self.write_change(store, change, wall_ms) {
-                 Ok(()) | Err(Error::NotFound(_)) => done.push(change),
+                 Ok(Outcome::Written) => done.push(change),
+@@ -559,9 +657,10 @@ impl<T: Transport> Synced<T> {
+                     done.push(change);
+                     report.reverted.push((change, reason));
+                 }
 -                Err(Error::Refused(_)) => {}
 +                Err(Error::Refused(_)) => all = false,
-                 Err(e) => return Err(e),
-             }
+                 Err(Error::NotFound(reason)) => {
+                     if still_here(store, change)? {
++                        all = false;
+                         report.failed.push((change.id, reason));
+                     } else {
+                         done.push(change);
+@@ -575,10 +674,13 @@ impl<T: Transport> Synced<T> {
+             return Ok(());
          }
          store.clear_changes(&done)?;
 +        if all && self.base.take().is_some() {
@@ -1675,13 +1842,13 @@ index 9945dc9..9ba0183 100644
          Ok(())
      }
  
--    fn write_change(&mut self, store: &Store, change: Change, wall_ms: u64) -> Result<()> {
-+    fn write_change(&mut self, store: &mut Store, change: Change, wall_ms: u64) -> Result<()> {
+-    fn write_change(&mut self, store: &Store, change: Change, wall_ms: u64) -> Result<Outcome> {
++    fn write_change(&mut self, store: &mut Store, change: Change, wall_ms: u64) -> Result<Outcome> {
          let view = self.engine.view();
+         let now_secs = wall_ms / 1000;
          match change.kind {
-             ChangeKind::Vault => {
-@@ -396,6 +462,17 @@ impl<T: Transport> Synced<T> {
-                 }
+@@ -615,6 +717,17 @@ impl<T: Transport> Synced<T> {
+                 Ok(Outcome::Written)
              }
              ChangeKind::Item => {
 +                if let Some(base) = &self.base {
@@ -1692,16 +1859,80 @@ index 9945dc9..9ba0183 100644
 +                        change.id,
 +                        self.config.device,
 +                    )? {
-+                        return Ok(());
++                        return Ok(Outcome::Written);
 +                    }
 +                }
                  let synced = view.items.get(&change.id);
-                 match store.item_state(change.id)? {
-                     Some((item, None)) => {
-@@ -498,6 +575,15 @@ impl<T: Transport> Synced<T> {
+                 let shown = |state: ItemState| {
+                     synced.filter(|v| v.state == state).and_then(|v| {
+@@ -719,6 +832,79 @@ impl<T: Transport> Synced<T> {
          }
      }
  
++    /// A new master password for the account (main device only): a new header epoch.
++    /// `account_key` is the store's (the same as the account's).
++    pub fn change_password(
++        &mut self,
++        account_key: &Key,
++        password: &str,
++        kdf: KdfParams,
++        wall_ms: u64,
++    ) -> Result<()> {
++        if !self.engine.is_root() {
++            return Err(Error::Refused(
++                "the master password is changed on the main device".into(),
++            ));
++        }
++        let current = self
++            .engine
++            .current_header()
++            .cloned()
++            .ok_or_else(|| Error::NotFound("account header".into()))?;
++        let mut salt = [0u8; 16];
++        OsRng.fill_bytes(&mut salt);
++        let sk = SecretKey::from_bytes(self.config.secret_key);
++        let keys = derive_sync_keys(password, &salt, kdf, &sk, &self.config.account_id)?;
++        let mut header = Header {
++            epoch: current.epoch + 1,
++            kdf,
++            salt,
++            wrapped_account_key: Vec::new(),
++            ..current
++        };
++        header.wrapped_account_key = wrap_account_key(&keys.kek, account_key, &header, &mut OsRng);
++        self.engine.publish_header(header, wall_ms)
++    }
++
++    /// What the UI shows about sync.
++    pub fn status(&self) -> SyncStatus {
++        let trust = self.engine.trust();
++        let mut devices: Vec<SyncDevice> = trust
++            .devices()
++            .iter()
++            .map(|(id, d)| SyncDevice {
++                id: data_encoding::HEXLOWER.encode(id),
++                name: d.name.clone(),
++                approved: true,
++                main: *id == trust.root(),
++                this_device: *id == self.engine.device(),
++            })
++            .collect();
++        devices.extend(trust.unapproved().iter().map(|(id, d)| SyncDevice {
++            id: data_encoding::HEXLOWER.encode(id),
++            name: d.name.clone(),
++            approved: false,
++            main: false,
++            this_device: *id == self.engine.device(),
++        }));
++        SyncStatus {
++            main_device: self.engine.is_root(),
++            waiting_for_approval: !trust.devices().contains_key(&self.engine.device()),
++            key_code: self.engine.key_fingerprint(),
++            devices,
++            alarms: self.engine.alarms().len(),
++        }
++    }
++
 +    /// The setup code for adding a device (secret: it carries the Secret Key).
 +    pub fn setup_code(&self) -> SetupCode {
 +        SetupCode {
@@ -1724,7 +1955,7 @@ index 9945dc9..9ba0183 100644
 
 ### Task 4: Sync in the session
 
-**Files:** Create `crates/keyorra-session/src/session/sync.rs`, `crates/keyorra-session/src/session/sync_tests.rs`; modify `crates/keyorra-session/src/session/mod.rs`, `crates/keyorra-session/src/sync/mod.rs`.
+**Files:** Create `crates/keyorra-session/src/session/sync.rs`, `crates/keyorra-session/src/session/sync_tests.rs`; modify `crates/keyorra-session/src/session/mod.rs`.
 
 - [ ] **Step 1: Failing tests.**
 
@@ -1952,119 +2183,7 @@ fn joining_from_a_vault_of_another_account_carries_it_over() {
 }
 ```
 
-- [ ] **Step 2: Status and password on the bridge.**
-
-Apply (`SyncStatus`, `SyncDevice`, `Synced::status`, `Synced::change_password`):
-
-```diff
-diff --git a/crates/keyorra-session/src/sync/mod.rs b/crates/keyorra-session/src/sync/mod.rs
-index 9ba0183..0840263 100644
---- a/crates/keyorra-session/src/sync/mod.rs
-+++ b/crates/keyorra-session/src/sync/mod.rs
-@@ -65,6 +65,29 @@ struct SyncConfig {
-     secret_key_id: String,
- }
- 
-+/// Sync as the UI shows it.
-+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-+#[serde(rename_all = "camelCase")]
-+pub struct SyncStatus {
-+    pub main_device: bool,
-+    /// This device self-joined and waits for the main device.
-+    pub waiting_for_approval: bool,
-+    /// This device's key code (compared on the main device before approving it).
-+    pub key_code: String,
-+    pub devices: Vec<SyncDevice>,
-+    pub alarms: usize,
-+}
-+
-+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-+#[serde(rename_all = "camelCase")]
-+pub struct SyncDevice {
-+    pub id: String,
-+    pub name: String,
-+    pub approved: bool,
-+    pub main: bool,
-+    pub this_device: bool,
-+}
-+
- /// What the user writes down when sync is enabled (spec §7.6). The location is the
- /// transport's (plan A2/A3 add it).
- pub struct EmergencyKit {
-@@ -575,6 +598,70 @@ impl<T: Transport> Synced<T> {
-         }
-     }
- 
-+    /// A new master password for the account (main device only): a new header epoch.
-+    /// `account_key` is the store's (the same as the account's).
-+    pub fn change_password(
-+        &mut self,
-+        account_key: &Key,
-+        password: &str,
-+        kdf: KdfParams,
-+        wall_ms: u64,
-+    ) -> Result<()> {
-+        if !self.engine.is_root() {
-+            return Err(Error::Refused(
-+                "the master password is changed on the main device".into(),
-+            ));
-+        }
-+        let current = self
-+            .engine
-+            .current_header()
-+            .cloned()
-+            .ok_or_else(|| Error::NotFound("account header".into()))?;
-+        let mut salt = [0u8; 16];
-+        OsRng.fill_bytes(&mut salt);
-+        let sk = SecretKey::from_bytes(self.config.secret_key);
-+        let keys = derive_sync_keys(password, &salt, kdf, &sk, &self.config.account_id)?;
-+        let mut header = Header {
-+            epoch: current.epoch + 1,
-+            kdf,
-+            salt,
-+            wrapped_account_key: Vec::new(),
-+            ..current
-+        };
-+        header.wrapped_account_key = wrap_account_key(&keys.kek, account_key, &header, &mut OsRng);
-+        self.engine.publish_header(header, wall_ms)
-+    }
-+
-+    /// What the UI shows about sync.
-+    pub fn status(&self) -> SyncStatus {
-+        let trust = self.engine.trust();
-+        let mut devices: Vec<SyncDevice> = trust
-+            .devices()
-+            .iter()
-+            .map(|(id, d)| SyncDevice {
-+                id: data_encoding::HEXLOWER.encode(id),
-+                name: d.name.clone(),
-+                approved: true,
-+                main: *id == trust.root(),
-+                this_device: *id == self.engine.device(),
-+            })
-+            .collect();
-+        devices.extend(trust.unapproved().iter().map(|(id, d)| SyncDevice {
-+            id: data_encoding::HEXLOWER.encode(id),
-+            name: d.name.clone(),
-+            approved: false,
-+            main: false,
-+            this_device: *id == self.engine.device(),
-+        }));
-+        SyncStatus {
-+            main_device: self.engine.is_root(),
-+            waiting_for_approval: !trust.devices().contains_key(&self.engine.device()),
-+            key_code: self.engine.key_fingerprint(),
-+            devices,
-+            alarms: self.engine.alarms().len(),
-+        }
-+    }
-+
-     /// The setup code for adding a device (secret: it carries the Secret Key).
-     pub fn setup_code(&self) -> SetupCode {
-         SetupCode {
-```
-
-- [ ] **Step 3: The session's sync commands.**
+- [ ] **Step 2: The session's sync commands.**
 
 Create `crates/keyorra-session/src/session/sync.rs`:
 
@@ -2123,6 +2242,9 @@ pub struct SyncStatusDto {
     /// Set but not running (e.g. the transport could not be opened); shown with a retry.
     pub error: Option<String>,
     pub status: Option<SyncStatus>,
+    /// From the last round: local changes sync could not take and undid (shown once), and
+    /// records that wait or could not be shown.
+    pub notices: Vec<String>,
 }
 
 fn sync_error(e: keyorra_sync::Error) -> CmdError {
@@ -2226,12 +2348,29 @@ impl Session {
         }
     }
 
+    /// Keeps what the UI shows about the last round.
+    fn note_round(&mut self, round: keyorra_sync::Result<s::RoundReport>) {
+        match round {
+            Ok(report) => {
+                self.sync_error = None;
+                self.sync_notices = report
+                    .reverted
+                    .iter()
+                    .map(|(_, why)| why.clone())
+                    .chain(report.failed.iter().map(|(id, why)| format!("{id}: {why}")))
+                    .collect();
+            }
+            Err(e) => self.sync_error = Some(sync_error(e).message),
+        }
+    }
+
     pub fn sync_status(&self) -> CmdResult<SyncStatusDto> {
         let store = self.store()?;
         Ok(SyncStatusDto {
             enabled: s::is_enabled(store).map_err(sync_error)?,
             error: self.sync_error.clone(),
             status: self.synced.as_ref().map(|x| x.status()),
+            notices: self.sync_notices.clone(),
         })
     }
 
@@ -2239,10 +2378,8 @@ impl Session {
     pub fn sync_now(&mut self, now: u64) -> CmdResult<SyncStatusDto> {
         let store = self.store.as_mut().ok_or_else(locked)?;
         if let Some(synced) = self.synced.as_mut() {
-            match synced.round(store, wall_ms(now)) {
-                Ok(_) => self.sync_error = None,
-                Err(e) => self.sync_error = Some(sync_error(e).message),
-            }
+            let round = synced.round(store, wall_ms(now));
+            self.note_round(round);
             self.watchtower_count = None;
         }
         self.sync_status()
@@ -2258,7 +2395,12 @@ impl Session {
         let kdf = self.kdf;
         let store = self.store.as_mut().ok_or_else(locked)?;
         store.check_password(password)?;
-        let (synced, kit) = s::enable(
+        let s::Enabled {
+            synced,
+            kit,
+            first_round,
+            ..
+        } = s::enable(
             store,
             transport,
             keys.as_mut(),
@@ -2274,6 +2416,7 @@ impl Session {
             setup_code: synced.setup_code().to_text().to_string(),
         };
         self.synced = Some(synced);
+        self.note_round(first_round);
         Ok(dto)
     }
 
@@ -2341,7 +2484,11 @@ impl Session {
                     std::fs::create_dir_all(dir)
                         .map_err(|e| CmdError::new(ErrorKind::Other, e.to_string()))?;
                 }
-                let (store, synced) = s::join(
+                let s::Joined {
+                    store,
+                    synced,
+                    first_round,
+                } = s::join(
                     &self.path,
                     password,
                     self.kdf,
@@ -2357,6 +2504,7 @@ impl Session {
                 .map_err(sync_error)?;
                 self.store = Some(store);
                 self.synced = Some(synced);
+                self.note_round(first_round);
                 self.password_verified_at = Some(now);
                 self.keyring.delete();
                 Ok(())
@@ -2378,8 +2526,9 @@ impl Session {
                     wall_ms(now),
                 );
                 match result {
-                    Ok(synced) => {
-                        self.synced = Some(synced);
+                    Ok(rejoined) => {
+                        self.synced = Some(rejoined.synced);
+                        self.note_round(rejoined.first_round);
                         Ok(())
                     }
                     Err(keyorra_sync::Error::Refused(m)) if m.contains("another account") => {
@@ -2406,7 +2555,11 @@ impl Session {
         );
         let joining = self.path.with_extension("joining");
         let _ = std::fs::remove_file(&joining);
-        let (mut new_store, synced) = s::join(
+        let s::Joined {
+            store: mut new_store,
+            synced,
+            ..
+        } = s::join(
             &joining,
             password,
             self.kdf,
@@ -2492,7 +2645,12 @@ impl Session {
         let kdf = self.kdf;
         let old = self.synced.take();
         let store = self.store.as_mut().ok_or_else(locked)?;
-        let (synced, kit) = s::start_new_account(
+        let s::Enabled {
+            synced,
+            kit,
+            first_round,
+            ..
+        } = s::start_new_account(
             store,
             old,
             transport,
@@ -2511,6 +2669,7 @@ impl Session {
             setup_code: synced.setup_code().to_text().to_string(),
         };
         self.synced = Some(synced);
+        self.note_round(first_round);
         Ok(dto)
     }
 
@@ -2564,13 +2723,13 @@ mod tests {
 }
 ```
 
-- [ ] **Step 4: Hooks.**
+- [ ] **Step 3: Hooks.**
 
-Apply (fields; `resume_sync` after both unlock paths; `lock` drops sync; `create_vault` through sync; `change_password` refused on other devices and published by the main device):
+Apply (fields; `resume_sync` after both unlock paths; `lock` drops sync and its notices; `create_vault` through sync; `change_password` refused on other devices and published by the main device):
 
 ```diff
 diff --git a/crates/keyorra-session/src/session/mod.rs b/crates/keyorra-session/src/session/mod.rs
-index b994bd7..357c755 100644
+index 8b66fab..a3944c2 100644
 --- a/crates/keyorra-session/src/session/mod.rs
 +++ b/crates/keyorra-session/src/session/mod.rs
 @@ -25,6 +25,9 @@ mod bridge;
@@ -2583,7 +2742,7 @@ index b994bd7..357c755 100644
  #[cfg(test)]
  mod tests;
  #[cfg(test)]
-@@ -84,8 +87,16 @@ pub struct Session {
+@@ -84,8 +87,18 @@ pub struct Session {
      keyring: Box<dyn Keyring>,
      /// When the master password was last entered (or the Touch ID record says so).
      password_verified_at: Option<u64>,
@@ -2593,6 +2752,8 @@ index b994bd7..357c755 100644
 +    synced: Option<crate::sync::Synced<sync::BoxedTransport>>,
 +    /// Why sync is not running (shown with a retry).
 +    sync_error: Option<String>,
++    /// What the last round undid or could not show.
++    sync_notices: Vec<String>,
  }
  
 +pub use sync::{BoxedTransport, EmergencyKitDto, SyncLink, SyncStatusDto};
@@ -2600,17 +2761,18 @@ index b994bd7..357c755 100644
  impl Session {
      /// `kdf` is `KdfParams::DEFAULT` in the app; tests pass cheap parameters.
      pub fn new(path: PathBuf, kdf: KdfParams, now: u64) -> Self {
-@@ -114,6 +125,9 @@ impl Session {
+@@ -114,6 +127,10 @@ impl Session {
              watchtower_count: None,
              keyring: Box::new(NoKeyring),
              password_verified_at: None,
 +            sync_link: None,
 +            synced: None,
 +            sync_error: None,
++            sync_notices: Vec::new(),
          }
      }
  
-@@ -177,6 +191,7 @@ impl Session {
+@@ -177,6 +194,7 @@ impl Session {
                  self.store = Some(store);
                  self.password_verified_at = Some(now);
                  self.rearm_touch_id(now);
@@ -2618,7 +2780,7 @@ index b994bd7..357c755 100644
                  Ok(())
              }
              Err(keyorra_core::Error::WrongPassword) => {
-@@ -301,6 +316,7 @@ impl Session {
+@@ -301,6 +319,7 @@ impl Session {
          let _ = store.purge_expired(now as i64);
          self.store = Some(store);
          self.password_verified_at = Some(record.verified_at);
@@ -2626,16 +2788,17 @@ index b994bd7..357c755 100644
          Ok(())
      }
  
-@@ -326,6 +342,8 @@ impl Session {
+@@ -326,6 +345,9 @@ impl Session {
  
      /// Drops the store; its keys are wiped on drop.
      pub fn lock(&mut self) {
 +        // Sync runs only while unlocked; its state is in the store.
 +        self.synced = None;
++        self.sync_notices.clear();
          self.store = None;
          self.breaches.clear();
          self.watchtower_count = None;
-@@ -382,10 +400,17 @@ impl Session {
+@@ -382,10 +404,17 @@ impl Session {
                  "The new password must be different",
              ));
          }
@@ -2653,7 +2816,7 @@ index b994bd7..357c755 100644
                  self.password_verified_at = Some(now);
                  // Replace the Touch ID record, like 1Password does after a password change.
                  self.rearm_touch_id(now);
-@@ -440,6 +465,13 @@ impl Session {
+@@ -440,6 +469,13 @@ impl Session {
          if name.is_empty() {
              return Err(CmdError::new(ErrorKind::Invalid, "Vault name is required"));
          }
@@ -2669,9 +2832,9 @@ index b994bd7..357c755 100644
              id: info.id,
 ```
 
-- [ ] **Step 5: Run and commit.**
+- [ ] **Step 4: Run and commit.**
 
-`cargo test -p keyorra-session` green (200 when verified). Commit: `Session A1d-2: sync commands, only while unlocked`.
+`cargo test -p keyorra-session` green (209 when verified). Commit: `Session A1d-2: sync commands, only while unlocked`.
 
 ---
 
@@ -2899,7 +3062,7 @@ Commit: `docs: A1d-2 device keys in the Secure Enclave, setup code, leaving and 
 
 - [ ] **Step 1: Run.**
 
-`cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test --workspace` (605 passed, 4 ignored when verified); `PROPTEST_CASES=2000 cargo test --release -p keyorra-sync -- adversary convergence`.
+`cargo fmt --all --check`; `cargo clippy --workspace --all-targets -- -D warnings`; `cargo test --workspace` (622 passed, 4 ignored when verified); `PROPTEST_CASES=2000 cargo test --release -p keyorra-sync -- adversary convergence`.
 
 - [ ] **Step 2: Check.**
 
