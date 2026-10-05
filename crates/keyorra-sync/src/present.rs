@@ -71,19 +71,24 @@ fn state(s: &Sibling) -> ItemState {
     }
 }
 
-/// Spec §3.5 for items. A sibling is *stale* when another sibling has seen its content (its
-/// `content_from` is covered by that sibling's version): it only trashed or restored content
-/// that the other side then kept or replaced.
+/// Spec §3.5 for items. A sibling is *stale* when another sibling with a different content
+/// origin (or a tombstone) has seen its content (its `content_from` is covered by that
+/// sibling's version): it only trashed or restored content that the other side then replaced
+/// or deleted.
 ///
 /// Shown: a purge if there is one (purge is final), else the best live sibling (an edit beats a
 /// delete), else the best trashed one, where "best" prefers fresh over stale siblings, then the
 /// higher HLC, then the higher author id. Every other sibling becomes a copy unless it is stale
 /// or its content is already shown. With a purge, only live siblings can become copies.
 pub fn present_item(record_id: Uuid, set: &SiblingSet) -> ItemPresentation<'_> {
+    // `o` covers `s` when it has seen `s`'s content and carries other content (or none): two
+    // versions with the same content origin never cover each other, or two devices that both
+    // collapsed the same conflict would hide each other next to a third edit.
     let stale = |s: &Sibling| {
         payload(s).is_some_and(|p| {
             set.siblings().iter().any(|o| {
                 !std::ptr::eq(o, s)
+                    && payload(o).is_none_or(|q| q.content_from != p.content_from)
                     && matches!(
                         compare(&p.content_from, &o.version.vector),
                         Causality::Equal | Causality::Before
@@ -359,6 +364,30 @@ mod tests {
             summary(&present_item(ID, &s)),
             (ItemState::Live, Some(B), vec![])
         );
+    }
+
+    #[test]
+    fn two_collapses_of_the_same_content_do_not_hide_each_other() {
+        // Review counterexample, reduced: A and C both collapsed a conflict to C's edit "t3"
+        // (content_from C:1); B's concurrent edit "t6" arrives. Neither collapse is stale, so
+        // "t3" stays visible or becomes the copy, next to "t6".
+        let s = set(vec![
+            sib(A, 2, &[(A, 2), (C, 1)], item("t3", None, &[(C, 1)])),
+            sib(C, 2, &[(A, 1), (C, 2)], item("t3", None, &[(C, 1)])),
+            edit(B, 1, &[(B, 1)], "t6"),
+        ]);
+        let p = present_item(ID, &s);
+        let mut titles: Vec<String> = p
+            .visible
+            .into_iter()
+            .chain(p.copies.iter().map(|c| c.source))
+            .map(|s| match &s.doc {
+                Doc::Item(x) => String::from_utf8(x.item_json.to_vec()).unwrap(),
+                _ => String::new(),
+            })
+            .collect();
+        titles.sort();
+        assert_eq!(titles, [r#"{"title":"t3"}"#, r#"{"title":"t6"}"#]);
     }
 
     #[test]

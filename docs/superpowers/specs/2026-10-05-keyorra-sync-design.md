@@ -237,8 +237,11 @@ values without `updated_at` (`deleted_at` is outside the JSON).
 
 Every item version also carries `content_from`: the version vector of the write that last
 changed its content. An edit sets it to its own vector; trashing and restoring keep it. A
-sibling is **stale** when another sibling's version covers its `content_from`: it only
-trashed or restored content that the other side then kept or replaced. (Revised while
+sibling is **stale** when another sibling with a different `content_from` (or a tombstone)
+has a version that covers its `content_from`: it only trashed or restored content that the
+other side then replaced or deleted. Siblings with the same `content_from` never make each
+other stale (two devices that collapsed the same conflict would otherwise hide each other
+next to a third concurrent edit; found by review of A1b). (Revised while
 planning A1b: comparing a trashed sibling's content with the *concurrent* edit cannot tell a
 pure delete from an edit-then-delete, because a pure delete carries the old content.)
 

@@ -224,8 +224,8 @@ changes (section 10).
 Ranks: `(hlc, author)` compared as `(u64, bytes16)`, higher wins.
 
 **Items.** A sibling is *live* (no `deleted_at`), *trashed* (`deleted_at` set) or *purged*
-(tombstone). It is *stale* when another sibling's vector covers (≥ in every entry) its
-`content_from`. Siblings are ordered fresh before stale, then by rank. Shown: the first
+(tombstone). It is *stale* when another sibling that is a tombstone or has a different
+`content_from` has a vector covering (≥ in every entry) its `content_from`. Siblings are ordered fresh before stale, then by rank. Shown: the first
 purged sibling if any; else the first live one; else the first trashed one. Every other
 sibling becomes a conflict copy unless it is stale, its content equals content already shown
 (the shown sibling's or an earlier copy's; JSON values compared without `updated_at`), or

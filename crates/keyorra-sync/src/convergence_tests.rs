@@ -270,3 +270,72 @@ fn tombstones_and_vaults_survive_the_replay_too() {
     assert!(view.vaults[&vault].revived);
     let _ = Doc::Tombstone;
 }
+
+/// The review's oracle: on every item record that is not purged, every edit (a version whose
+/// `content_from` is its own vector) that no other edit of the record dominates must still be
+/// visible somewhere (as the item or as a conflict copy, live or in Recently Deleted).
+fn assert_no_lost_edit(fold: &Fold, view: &View) {
+    let titles: BTreeSet<String> = view
+        .items
+        .keys()
+        .filter_map(|i| title_of(view, *i))
+        .collect();
+    let mut records: Vec<Uuid> = fold
+        .retained()
+        .filter(|a| a.kind == RecordKind::Item)
+        .map(|a| a.record_id)
+        .collect();
+    records.dedup();
+    for record in records {
+        if view
+            .items
+            .get(&record)
+            .is_none_or(|v| v.state == ItemState::Purged)
+        {
+            continue;
+        }
+        let edits: Vec<_> = fold
+            .retained()
+            .filter(|a| a.kind == RecordKind::Item && a.record_id == record)
+            .filter_map(|a| match &a.doc {
+                Doc::Item(p) if p.content_from == a.version.vector => Some((a, p)),
+                _ => None,
+            })
+            .collect();
+        for (a, p) in &edits {
+            let dominated = edits.iter().any(|(b, _)| {
+                crate::vv::compare(&a.version.vector, &b.version.vector)
+                    == crate::vv::Causality::Before
+            });
+            if dominated {
+                continue;
+            }
+            let v: serde_json::Value = serde_json::from_slice(&p.item_json).unwrap();
+            let title = v["title"].as_str().unwrap_or_default();
+            assert!(
+                titles.contains(title),
+                "edit {title:?} of {record} was lost; visible: {titles:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn review_counterexample_stale_rule_loses_an_edit() {
+    let ops = vec![
+        Op::Sync { dev: 2 },
+        Op::Save { dev: 0, item: 0 },
+        Op::Sync { dev: 0 },
+        Op::Save { dev: 2, item: 0 },
+        Op::Sync { dev: 2 },
+        Op::Sync { dev: 2 },
+        Op::Save { dev: 1, item: 0 },
+        Op::Sync { dev: 0 },
+    ];
+    for faults in [Faults::NONE, Faults::CHAOS] {
+        let (c, _) = run(3, 16642519616933440452, faults, &ops);
+        c.assert_converged();
+        let view = c.devices[0].view();
+        assert_no_lost_edit(c.devices[0].fold(), &view);
+    }
+}
