@@ -43,7 +43,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-pub use enclave_keys::{Enclave, EnclaveDeviceKeys};
+pub use enclave_keys::{Enclave, EnclaveDeviceKeys, EnclaveError};
 pub use keys::{DeviceKeyStore, MemoryDeviceKeys};
 pub use merge::{carry_over, disable, rejoin, start_new_account, Rejoined};
 pub use setup::SetupCode;
@@ -555,7 +555,17 @@ pub fn resume<T: Transport>(
         Some(b) => EngineMemo::from_bytes(&b)?,
         None => EngineMemo::default(),
     };
-    let signer = keys.load(&config.device).unwrap_or_else(new_signer);
+    // No key here: the engine retires the id on its first round. A key that cannot be read
+    // now is not "no key": sync waits (review A1d-2 I3).
+    let signer = match keys.load(&config.device) {
+        Ok(Some(key)) => key,
+        Ok(None) => new_signer(),
+        Err(e) => {
+            return Err(Error::Refused(format!(
+                "this Mac's device key could not be read: {e}"
+            )))
+        }
+    };
     let root_key = VerifyingKey::from_bytes(&config.root_key)
         .map_err(|_| Error::Malformed("main device key".into()))?;
     let mut engine = Engine::resume(

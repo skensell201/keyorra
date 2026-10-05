@@ -190,12 +190,22 @@ pub fn keychain_delete(name: &str) -> Result<(), Failure> {
     check(unsafe { ffi::ks_keychain_delete(service(name).as_ptr()) })
 }
 
+/// A keychain read as the session wants it: no item is `Ok(None)`, any other failure is an
+/// error (review A1d-2 I3).
+fn found(result: Result<Vec<u8>, Failure>) -> Result<Option<Vec<u8>>, String> {
+    match result {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(Failure::NotFound) => Ok(None),
+        Err(e) => Err(format!("{e:?}")),
+    }
+}
+
 /// The login keychain as the session's Touch ID store.
 pub struct MacKeyring;
 
 impl keyorra_session::touchid::Keyring for MacKeyring {
-    fn load(&self) -> Option<Vec<u8>> {
-        keychain_load(SERVICE).ok()
+    fn load(&self) -> Result<Option<Vec<u8>>, String> {
+        found(keychain_load(SERVICE))
     }
     fn save(&self, data: &[u8]) -> Result<(), String> {
         keychain_save(SERVICE, data).map_err(|e| format!("{e:?}"))
@@ -216,8 +226,8 @@ pub const DEVICE_KEYS_SERVICE: &str = if cfg!(debug_assertions) {
 pub struct DeviceKeysKeyring;
 
 impl keyorra_session::touchid::Keyring for DeviceKeysKeyring {
-    fn load(&self) -> Option<Vec<u8>> {
-        keychain_load(DEVICE_KEYS_SERVICE).ok()
+    fn load(&self) -> Result<Option<Vec<u8>>, String> {
+        found(keychain_load(DEVICE_KEYS_SERVICE))
     }
     fn save(&self, data: &[u8]) -> Result<(), String> {
         keychain_save(DEVICE_KEYS_SERVICE, data).map_err(|e| format!("{e:?}"))
@@ -234,8 +244,17 @@ impl keyorra_session::sync::Enclave for MacEnclave {
     fn create(&self) -> Result<(Vec<u8>, [u8; 65]), String> {
         create_device_key().map_err(|e| format!("{e:?}"))
     }
-    fn agree(&self, blob: &[u8], peer: &[u8; 65]) -> Result<Zeroizing<[u8; 32]>, String> {
-        agree(blob, peer, "Keyorra sync").map_err(|e| format!("{e:?}"))
+    fn agree(
+        &self,
+        blob: &[u8],
+        peer: &[u8; 65],
+    ) -> Result<Zeroizing<[u8; 32]>, keyorra_session::sync::EnclaveError> {
+        use keyorra_session::sync::EnclaveError;
+        agree(blob, peer, "Keyorra sync").map_err(|e| match e {
+            // The key is not this Mac's (restored from another one) or is gone.
+            Failure::Invalid | Failure::NotFound => EnclaveError::Invalid,
+            other => EnclaveError::Failed(format!("{other:?}")),
+        })
     }
 }
 
@@ -279,8 +298,8 @@ mod tests {
         use keyorra_session::sync::{DeviceKeyStore, EnclaveDeviceKeys};
         struct TestItem;
         impl keyorra_session::touchid::Keyring for TestItem {
-            fn load(&self) -> Option<Vec<u8>> {
-                keychain_load("app.keyorra.mac.device-keys.test").ok()
+            fn load(&self) -> Result<Option<Vec<u8>>, String> {
+                found(keychain_load("app.keyorra.mac.device-keys.test"))
             }
             fn save(&self, data: &[u8]) -> Result<(), String> {
                 keychain_save("app.keyorra.mac.device-keys.test", data)
@@ -296,7 +315,7 @@ mod tests {
         );
         let key = ed25519_dalek::SigningKey::from_bytes(&[7; 32]);
         keys.store([1; 16], &key).unwrap();
-        assert_eq!(keys.load(&[1; 16]).unwrap().to_bytes(), [7; 32]);
+        assert_eq!(keys.load(&[1; 16]).unwrap().unwrap().to_bytes(), [7; 32]);
         keychain_delete("app.keyorra.mac.device-keys.test").unwrap();
     }
 

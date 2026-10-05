@@ -509,8 +509,8 @@ fn review_a1d_i5_enable_succeeds_when_the_first_round_fails() {
 struct BrokenKeys;
 
 impl DeviceKeyStore for BrokenKeys {
-    fn load(&self, _: &DeviceId) -> Option<ed25519_dalek::SigningKey> {
-        None
+    fn load(&self, _: &DeviceId) -> std::result::Result<Option<ed25519_dalek::SigningKey>, String> {
+        Ok(None)
     }
     fn store(
         &mut self,
@@ -912,4 +912,33 @@ fn a_rejoin_conflict_copy_keeps_its_attachments() {
         &laptop.store.get_attachment(copy.attachments[0].id).unwrap()[..],
         b"local bytes"
     );
+}
+
+struct UnreadableKeys;
+
+impl DeviceKeyStore for UnreadableKeys {
+    fn load(&self, _: &DeviceId) -> std::result::Result<Option<ed25519_dalek::SigningKey>, String> {
+        Err("keychain locked".into())
+    }
+    fn store(
+        &mut self,
+        _: DeviceId,
+        _: &ed25519_dalek::SigningKey,
+    ) -> std::result::Result<(), String> {
+        Err("keychain locked".into())
+    }
+    fn forget(&mut self, _: &DeviceId) {}
+    fn boxed_clone(&self) -> Box<dyn DeviceKeyStore> {
+        Box::new(UnreadableKeys)
+    }
+}
+
+/// Review A1d-2 I3: a device key that cannot be read right now does not retire the id.
+#[test]
+fn review_a1d2_i3_an_unreadable_device_key_does_not_retire_the_id() {
+    let (transport, _main, laptop) = pair();
+    let Device { path, _dir, .. } = laptop;
+    let mut store = Store::open(&path).unwrap();
+    store.unlock(PW).unwrap();
+    assert!(resume(&store, transport, &UnreadableKeys).is_err());
 }

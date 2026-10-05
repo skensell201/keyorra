@@ -211,8 +211,11 @@ impl Session {
     }
 
     fn touch_id_record(&self) -> Option<touchid::Record> {
+        // Touch ID only: an item that cannot be read now just means "use the password".
         self.keyring
             .load()
+            .ok()
+            .flatten()
             .and_then(|bytes| touchid::Record::from_bytes(&bytes))
     }
 

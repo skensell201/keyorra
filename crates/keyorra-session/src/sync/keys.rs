@@ -11,7 +11,9 @@ use keyorra_sync::DeviceId;
 use zeroize::Zeroizing;
 
 pub trait DeviceKeyStore: Send {
-    fn load(&self, device: &DeviceId) -> Option<SigningKey>;
+    /// `Ok(None)`: this Mac holds no usable key for `device` (the engine retires the id).
+    /// `Err`: it could not be read now; nothing must be decided on it (review A1d-2 I3).
+    fn load(&self, device: &DeviceId) -> Result<Option<SigningKey>, String>;
     fn store(&mut self, device: DeviceId, key: &SigningKey) -> Result<(), String>;
     /// The id is no longer used here (sync turned off, a join that failed).
     fn forget(&mut self, device: &DeviceId);
@@ -25,12 +27,13 @@ pub trait DeviceKeyStore: Send {
 pub struct MemoryDeviceKeys(pub Arc<Mutex<BTreeMap<DeviceId, Zeroizing<[u8; 32]>>>>);
 
 impl DeviceKeyStore for MemoryDeviceKeys {
-    fn load(&self, device: &DeviceId) -> Option<SigningKey> {
-        self.0
+    fn load(&self, device: &DeviceId) -> Result<Option<SigningKey>, String> {
+        Ok(self
+            .0
             .lock()
             .unwrap()
             .get(device)
-            .map(|k| SigningKey::from_bytes(k))
+            .map(|k| SigningKey::from_bytes(k)))
     }
 
     fn store(&mut self, device: DeviceId, key: &SigningKey) -> Result<(), String> {
@@ -54,8 +57,9 @@ impl DeviceKeyStore for MemoryDeviceKeys {
 pub(super) struct EngineKeys(pub Box<dyn DeviceKeyStore>);
 
 impl DeviceKeys for EngineKeys {
+    /// Only a key known to be gone counts as missing; one that cannot be read now is held.
     fn holds(&self, device: &DeviceId) -> bool {
-        self.0.load(device).is_some()
+        !matches!(self.0.load(device), Ok(None))
     }
     /// A failure leaves the new id without a stored key: the next restart retires it again.
     fn store(&mut self, device: DeviceId, key: &SigningKey) {
