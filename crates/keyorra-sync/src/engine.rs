@@ -83,6 +83,9 @@ pub enum Alarm {
         seq: u64,
         by: DeviceId,
     },
+    /// The main device approved this device's id with a key that is not this device's: the
+    /// joining segment was replaced on the way. This device does not write.
+    ApprovedWithAnotherKey,
     /// `count` devices joined with the Emergency Kit and await the main device's decision
     /// ([`Trust::unapproved`]). Their records count for nobody meanwhile.
     Unapproved { count: usize },
@@ -93,7 +96,9 @@ impl Alarm {
     pub fn stream(&self) -> Option<DeviceId> {
         match self {
             Alarm::Rollback { stream, .. } | Alarm::Fork { stream, .. } => Some(*stream),
-            Alarm::Unapproved { .. } | Alarm::Disputed { .. } => None,
+            Alarm::Unapproved { .. } | Alarm::Disputed { .. } | Alarm::ApprovedWithAnotherKey => {
+                None
+            }
         }
     }
 }
@@ -119,6 +124,10 @@ impl fmt::Display for Alarm {
                 "{} claims another history of {} at {seq}",
                 short(by),
                 short(stream)
+            ),
+            Alarm::ApprovedWithAnotherKey => f.write_str(
+                "the main device approved this device with another key: its joining request \
+                 was replaced; join again and compare the code",
             ),
             Alarm::Unapproved { count } => write!(
                 f,
@@ -425,6 +434,9 @@ impl<R: RngCore + CryptoRng> Engine<R> {
     /// about devices awaiting approval if it lists more than the user has seen.
     pub fn alarms(&self) -> Vec<Alarm> {
         let mut alarms = self.alarms.clone();
+        if self.approved_with_another_key() {
+            alarms.push(Alarm::ApprovedWithAnotherKey);
+        }
         let count = self.trust.unapproved().len();
         if count > self.unapproved_seen {
             alarms.push(Alarm::Unapproved { count });
@@ -464,7 +476,19 @@ impl<R: RngCore + CryptoRng> Engine<R> {
     /// Whether this device's next entry would count: approved and not removed, or
     /// self-joined and not (yet) decided on (then it counts only here until approved).
     pub fn can_write(&self) -> bool {
-        self.trust.admits(&self.device, self.next_seq)
+        self.trust.admits(&self.device, self.next_seq) && !self.approved_with_another_key()
+    }
+
+    fn approved_with_another_key(&self) -> bool {
+        self.trust
+            .key(&self.device)
+            .is_some_and(|k| k != self.signer.verifying_key())
+    }
+
+    /// The code to show on this device while it waits for approval
+    /// ([`crate::trust::key_fingerprint`]).
+    pub fn key_fingerprint(&self) -> String {
+        crate::trust::key_fingerprint(&self.signer.verifying_key())
     }
 
     /// Whether this is the main device, the one that approves and removes devices.
@@ -586,11 +610,25 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         self.write_entry(entry, wall_ms)
     }
 
-    /// Approves a device that self-joined, with the key its `SelfJoin` carries.
-    pub fn approve(&mut self, device: DeviceId, wall_ms: u64) -> Result<()> {
+    /// Approves a device that self-joined, with the key its `SelfJoin` carries, once the user
+    /// confirmed that `expected_fingerprint` is the code shown on the joining device (the
+    /// store could have replaced its joining segment).
+    pub fn approve(
+        &mut self,
+        device: DeviceId,
+        expected_fingerprint: &str,
+        wall_ms: u64,
+    ) -> Result<()> {
         let Some(u) = self.trust.unapproved().get(&device).cloned() else {
             return Err(Error::NotFound("no such device awaiting approval".into()));
         };
+        if crate::trust::key_fingerprint(&u.key) != expected_fingerprint {
+            return Err(Error::Refused(
+                "the code does not match the one shown on the joining device; its request may \
+                 have been replaced"
+                    .into(),
+            ));
+        }
         self.endorse(device, &u.key, &u.name, wall_ms)
     }
 

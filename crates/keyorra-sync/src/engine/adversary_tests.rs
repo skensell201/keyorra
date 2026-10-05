@@ -36,6 +36,11 @@ const STOLEN: usize = HONEST;
 const ITEMS: usize = 3;
 /// Sorts before the main device's id.
 const THIEF: DeviceId = [0; 16];
+/// The code the thief's device shows (the main device's user compares it).
+fn thief_code() -> String {
+    crate::trust::key_fingerprint(&signer(7).verifying_key())
+}
+
 /// No sync round may take longer (a trust computation that does not terminate shows here).
 const ROUND_LIMIT: Duration = Duration::from_secs(5);
 
@@ -404,7 +409,10 @@ impl World {
                 self.thief_push();
             }
             Op::ApproveThief => {
-                if self.c.devices[0].approve(THIEF, clock).is_ok() {
+                if self.c.devices[0]
+                    .approve(THIEF, &thief_code(), clock)
+                    .is_ok()
+                {
                     self.thief_approved = true;
                 }
             }
@@ -434,6 +442,7 @@ impl World {
                         "device {i}: {alarm}"
                     );
                 }
+                Alarm::ApprovedWithAnotherKey => panic!("device {i}: {alarm}"),
                 Alarm::Rollback { .. } | Alarm::Unapproved { .. } => {}
             }
             assert!(self.c.devices[i].accept_alarm(&alarm));

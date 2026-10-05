@@ -813,7 +813,10 @@ fn a_self_joined_device_is_pending_until_the_main_device_decides() {
     // Accepting the alarm only notes it; approving brings the pending edit in.
     assert!(c.devices[1].accept_alarm(&Alarm::Unapproved { count: 1 }));
     assert!(c.devices[1].alarms().is_empty());
-    c.devices[0].approve(device_id(5), c.clocks[0]).unwrap();
+    let code = kit.key_fingerprint();
+    c.devices[0]
+        .approve(device_id(5), &code, c.clocks[0])
+        .unwrap();
     assert!(c.devices[0].alarms().is_empty(), "approving resolves it");
     c.heal();
     for i in 0..3 {

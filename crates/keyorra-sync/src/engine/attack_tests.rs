@@ -723,3 +723,34 @@ fn review_v1_an_approved_device_cannot_take_over_a_vault_key() {
         }
     }
 }
+
+#[test]
+fn review_w3_approval_checks_the_key_shown_on_the_joining_device() {
+    let mut c = Cluster::new(2, 1, Faults::NONE);
+    c.devices[0].create_vault("Personal", START_MS).unwrap();
+    c.heal();
+    // A thief with folder access puts its own SelfJoin where the genuine joiner's goes.
+    let mut thief = kit(device_id(5), 7);
+    thief.self_join(START_MS).unwrap();
+    thief.sync(&c.store, START_MS).unwrap();
+    let mut joiner = kit(device_id(5), 5);
+    joiner.forging = false;
+    joiner.self_join(START_MS).unwrap();
+    joiner.sync(&c.store, START_MS).unwrap();
+    c.sync(0).unwrap();
+    // The user compares the code shown on the joining Mac: it does not match.
+    let shown = joiner.key_fingerprint();
+    assert!(matches!(
+        c.devices[0].approve(device_id(5), &shown, c.clocks[0]),
+        Err(Error::Refused(_))
+    ));
+    // Had the main device approved the thief's key, the joiner notices and stops writing.
+    let thief_code = thief.key_fingerprint();
+    c.devices[0]
+        .approve(device_id(5), &thief_code, c.clocks[0])
+        .unwrap();
+    c.sync(0).unwrap();
+    joiner.sync(&c.store, START_MS).unwrap();
+    assert!(!joiner.can_write());
+    assert!(joiner.alarms().contains(&Alarm::ApprovedWithAnotherKey));
+}

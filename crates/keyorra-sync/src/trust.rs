@@ -27,6 +27,19 @@ use crate::entry::{verify_endorsement, Entry};
 use crate::fold::Admission;
 use crate::{AccountId, DeviceId};
 
+/// The short code of a device key that the user compares on the main device and on the
+/// joining device before approving: 48 bits of `SHA-256("keyorra/sync/v1/key-fingerprint\0"
+/// ‖ key)`, as `xxxx-xxxx-xxxx`.
+pub fn key_fingerprint(key: &VerifyingKey) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(crate::labels::tagged(
+        crate::labels::KEY_FINGERPRINT,
+        &[key.as_bytes()],
+    ));
+    let hex = data_encoding::HEXLOWER.encode(&digest[..6]);
+    format!("{}-{}-{}", &hex[0..4], &hex[4..8], &hex[8..12])
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Introduction {
     Root,
@@ -76,6 +89,10 @@ impl fmt::Display for TrustError {
 }
 
 impl std::error::Error for TrustError {}
+
+/// Self-joined devices listed at most; further ones are ignored until some are decided on
+/// (an AK holder could otherwise create any number).
+pub const MAX_UNAPPROVED: usize = 64;
 
 /// A device that joined with the Emergency Kit and awaits the root's decision.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -163,6 +180,7 @@ impl Trust {
             || self.devices.contains_key(&device)
             || self.removed.contains(&device)
             || self.unapproved.contains_key(&device)
+            || self.unapproved.len() >= MAX_UNAPPROVED
         {
             return false;
         }
@@ -433,6 +451,16 @@ mod tests {
             .unwrap();
         assert!(t.admits(&D, 1));
         assert!(t.unapproved().is_empty());
+    }
+
+    #[test]
+    fn the_unapproved_list_is_capped() {
+        let mut t = base();
+        for k in 0..(MAX_UNAPPROVED as u8 + 10) {
+            let id: DeviceId = [0x80, k, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+            t.note_self_join(id, pk(&D), "kit");
+        }
+        assert_eq!(t.unapproved().len(), MAX_UNAPPROVED);
     }
 
     #[test]
