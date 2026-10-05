@@ -19,6 +19,7 @@ pub mod secret_key;
 pub mod segment;
 pub mod siblings;
 pub mod snapshot;
+pub mod transport;
 pub mod vv;
 
 pub use error::{Error, Result};
