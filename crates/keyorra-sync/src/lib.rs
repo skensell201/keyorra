@@ -15,6 +15,7 @@ pub mod pad;
 pub mod secret_key;
 pub mod segment;
 pub mod snapshot;
+pub mod vv;
 
 pub use error::{Error, Result};
 
