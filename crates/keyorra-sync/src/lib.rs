@@ -7,6 +7,8 @@ pub mod chunk;
 pub mod clock;
 pub mod envelope;
 pub mod error;
+#[cfg(any(test, feature = "test-utils"))]
+pub mod faults;
 pub mod fold;
 pub mod header;
 pub mod keys;
