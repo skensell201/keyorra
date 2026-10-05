@@ -25,7 +25,7 @@ export function App() {
     <>
       <div className="drag-region" data-tauri-drag-region />
       {status === "new" && <Setup onDone={() => setStatus("unlocked")} />}
-      {status === "locked" && <Unlock onUnlocked={() => setStatus("unlocked")} />}
+      {status === "locked" && <Unlock onUnlocked={() => setStatus("unlocked")} onStartOver={() => setStatus("new")} />}
       {status === "unlocked" && <Main onLock={lock} />}
     </>
   );
