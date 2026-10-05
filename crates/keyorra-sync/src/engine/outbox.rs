@@ -17,6 +17,95 @@ pub struct OutboxState {
     pub outbox: Vec<Vec<u8>>,
 }
 
+impl OutboxState {
+    /// Canonical CBOR (the app seals it with the account key).
+    pub fn to_bytes(&self) -> Vec<u8> {
+        let head = |h: &Head| Value::Array(vec![Value::Uint(h.seq), Value::bytes(h.hash)]);
+        crate::cbor::encode(&Value::map(vec![
+            ("device", Value::bytes(self.device)),
+            ("next_seq", Value::Uint(self.next_seq)),
+            ("sent", head(&self.sent)),
+            (
+                "own_hashes",
+                Value::Array(
+                    self.own_hashes
+                        .iter()
+                        .map(|(s, h)| Value::Array(vec![Value::Uint(*s), Value::bytes(h)]))
+                        .collect(),
+                ),
+            ),
+            (
+                "unsent",
+                match &self.unsent {
+                    None => Value::Null,
+                    Some(u) => Value::Array(vec![
+                        Value::bytes(&u.bytes),
+                        Value::Uint(u.versions as u64),
+                        Value::Uint(u.last_seq),
+                        Value::bytes(u.last_hash),
+                    ]),
+                },
+            ),
+            (
+                "outbox",
+                Value::Array(self.outbox.iter().map(Value::bytes).collect()),
+            ),
+        ]))
+    }
+
+    pub fn from_bytes(bytes: &[u8]) -> Result<OutboxState> {
+        let v = crate::cbor::decode(bytes)?;
+        let f = v.fields(&[
+            "device",
+            "next_seq",
+            "sent",
+            "own_hashes",
+            "unsent",
+            "outbox",
+        ])?;
+        let head = |v: &Value| -> Result<Head> {
+            let [s, h] = v.as_list()? else {
+                return Err(crate::error::malformed("head"));
+            };
+            Ok(Head {
+                seq: s.as_uint()?,
+                hash: h.as_array_of()?,
+            })
+        };
+        Ok(OutboxState {
+            device: f.get("device")?.as_array_of()?,
+            next_seq: f.get("next_seq")?.as_uint()?,
+            sent: head(f.get("sent")?)?,
+            own_hashes: f
+                .get("own_hashes")?
+                .as_list()?
+                .iter()
+                .map(|p| head(p).map(|h| (h.seq, h.hash)))
+                .collect::<Result<_>>()?,
+            unsent: match f.get("unsent")? {
+                Value::Null => None,
+                u => {
+                    let [b, n, s, h] = u.as_list()? else {
+                        return Err(crate::error::malformed("unsent"));
+                    };
+                    Some(SealedSegment {
+                        bytes: b.as_bytes()?.to_vec(),
+                        versions: n.as_uint()? as usize,
+                        last_seq: s.as_uint()?,
+                        last_hash: h.as_array_of()?,
+                    })
+                }
+            },
+            outbox: f
+                .get("outbox")?
+                .as_list()?
+                .iter()
+                .map(|b| b.as_bytes().map(<[u8]>::to_vec))
+                .collect::<Result<_>>()?,
+        })
+    }
+}
+
 /// Where A1d keeps [`OutboxState`] (in the same transaction as the local change).
 pub trait OutboxStore: Send {
     /// Persists `state`. On an error the engine appends nothing until a save succeeds, so it

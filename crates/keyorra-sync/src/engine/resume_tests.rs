@@ -19,7 +19,7 @@ fn title(view: &View, id: Uuid) -> String {
 fn restart(c: &mut Cluster, i: usize) {
     let e = &c.devices[i];
     let saved = Resumed {
-        outbox: e.outbox_state(),
+        outbox: OutboxState::from_bytes(&e.outbox_state().to_bytes()).unwrap(),
         own_segments: e.own_segments().clone(),
         memo: EngineMemo::from_bytes(&e.memo().to_bytes()).unwrap(),
     };
