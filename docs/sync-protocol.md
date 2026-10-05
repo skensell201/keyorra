@@ -264,8 +264,9 @@ edit: each missing copy (a new record; empty `content_from`), then a version of 
 shown sibling's content and `content_from` (an empty one replaced by the shown sibling's
 vector), or a tombstone if `r` is purged.
 For each attachment reference with `copied_from` in a shown copy whose record does not exist,
-a device that has the original attachment live writes it: the original payload with
-`item_id` = the copy.
+a device that has accepted a version of the original attachment with content writes it: the
+payload of the newest such version (highest rank), even if the original was removed since,
+with `item_id` = the copy.
 
 ## 10. Streams, entries and trust
 

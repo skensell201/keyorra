@@ -298,6 +298,21 @@ impl Fold {
         }
     }
 
+    /// The newest admitted content of an attachment, even if it was removed since: a conflict
+    /// copy keeps the attachments its version referred to.
+    fn newest_attachment_content(&self, id: Uuid) -> Option<&AttachmentPayload> {
+        self.retained
+            .get(&(RecordKind::Attachment, id))?
+            .iter()
+            .filter(|(_, admitted)| *admitted)
+            .filter_map(|(a, _)| match &a.doc {
+                Doc::Attachment(p) => Some((a.version.hlc, a.version.author, p)),
+                _ => None,
+            })
+            .max_by_key(|(hlc, author, _)| (*hlc, *author))
+            .map(|(_, _, p)| p)
+    }
+
     fn retained_of(&self, key: &RecordKey) -> Vec<&Accepted> {
         self.retained
             .get(key)
@@ -417,7 +432,7 @@ impl Fold {
                     if self.contains(RecordKind::Attachment, copy_att) {
                         continue;
                     }
-                    if let Some(source) = view.attachments.get(&original) {
+                    if let Some(source) = self.newest_attachment_content(original) {
                         let mut a = source.clone();
                         a.item_id = *id;
                         view.attachment_copies.push(AttachmentCopy {
@@ -856,6 +871,43 @@ mod tests {
         assert_eq!(proposed[0].id, new_att);
         assert_eq!(proposed[0].payload.item_id, copy.copy_id);
         assert_eq!(proposed[0].payload.key, Zeroizing::new([7; 32]));
+    }
+
+    #[test]
+    fn a_copy_keeps_an_attachment_that_was_removed_meanwhile() {
+        let mut f = Fold::default();
+        f.accept(attachment(A, 1), &AdmitAll).unwrap();
+        f.accept(item(A, 2, &[(A, 1)], 5, json("a", &[ATT])), &AdmitAll)
+            .unwrap();
+        f.accept(item(B, 1, &[(B, 1)], 9, json("b", &[])), &AdmitAll)
+            .unwrap();
+        let copy = f.view().resolutions[0].copies[0].clone();
+        f.accept(
+            Accepted {
+                stream: B,
+                seq: 2,
+                kind: RecordKind::Item,
+                record_id: copy.copy_id,
+                vault_id: copy.vault_id,
+                version: Version {
+                    vector: [(B, 1)].into_iter().collect(),
+                    hlc: 10,
+                    author: B,
+                },
+                doc: Doc::Item(copy.payload.clone()),
+            },
+            &AdmitAll,
+        )
+        .unwrap();
+        // The original attachment is removed before anyone writes the copy's record.
+        let mut removed = attachment(A, 3);
+        removed.version.vector.insert(A, 2);
+        removed.doc = Doc::Tombstone;
+        f.accept(removed, &AdmitAll).unwrap();
+        assert!(!f.view().attachments.contains_key(&ATT));
+        let proposed = f.view().attachment_copies;
+        assert_eq!(proposed.len(), 1);
+        assert_eq!(proposed[0].payload.item_id, copy.copy_id);
     }
 
     #[test]

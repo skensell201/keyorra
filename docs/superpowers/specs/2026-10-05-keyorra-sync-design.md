@@ -273,8 +273,9 @@ shows "(conflict from <device name>)" from the marker, because device names can 
 between devices at the moment of writing and the copy must be byte-identical everywhere.
 Its attachment references point to new ids `UUIDv8(SHA-256("keyorra/sync/v1/conflict-copy\0"
 ‖ copy_id ‖ attachment_id)[0..16])` and keep `copied_from = attachment_id`; any device that
-knows the original attachment record writes the copy's attachment record (same key and
-chunks, `item_id` = the copy), so a copy never waits for an attachment. Each copy derives
+knows the original attachment record writes the copy's attachment record (from the newest
+version with content, even if the original was removed since; same key and chunks,
+`item_id` = the copy), so a copy never waits for an attachment. Each copy derives
 from its sibling's *own* version, so the result is the same on every device and there is no
 invented "join author".
 
