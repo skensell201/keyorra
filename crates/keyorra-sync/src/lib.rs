@@ -26,6 +26,7 @@ pub mod snapshot;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod testkit;
 pub mod transport;
+pub mod trust;
 pub mod vv;
 
 pub use error::{Error, Result};
