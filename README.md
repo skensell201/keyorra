@@ -156,7 +156,9 @@ socket and nothing else; `safari/check/sandbox-check.sh` checks it against the r
 
 ## Roadmap
 
-- Sync between your devices
+- Sync between your devices, end-to-end encrypted, your choice of transport:
+  iCloud Drive or any synced folder (Dropbox, Google Drive, Syncthing) first, then a
+  self-hosted Keyorra server for Linux (single binary or Docker), then WebDAV and S3
 - iPhone app
 - Sharing vaults with family
 - Passkeys

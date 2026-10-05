@@ -30,7 +30,15 @@ everything from their 1Password account (all vaults) and stop using 1Password.
 
 **Not in the MVP (roadmap, in order)**
 
-1. Self-hosted sync server (Rust, deployable to the user's Proxmox VM)
+1. Sync (revised 2026-10-05). One sync engine that exchanges per-item encrypted records
+   (revision, tombstone, conflict = keep both), over pluggable transports; every transport
+   only ever sees ciphertext:
+   - a. iCloud Drive (first; no account or server; also reachable from the iPhone app);
+   - b. any synced folder: Dropbox, Google Drive, OneDrive, Syncthing (same code as a.);
+   - c. self-hosted Keyorra server: one Rust binary / Docker image for any Linux box
+     (VPS, home server, Proxmox, Raspberry Pi), SQLite, HTTPS, device pairing, push
+     updates; needed later for sharing;
+   - d. WebDAV (Nextcloud, Synology) and S3-compatible storage (Backblaze B2, R2, MinIO)
 2. iPhone app with AutoFill provider
 3. Vault sharing between users
 4. Passkeys
