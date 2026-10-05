@@ -4,6 +4,15 @@
 
 use std::path::Path;
 
+/// How a coordinated access touches a file.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Access {
+    Read,
+    /// The file is created or replaced (the temp file is renamed onto it).
+    Write,
+    Delete,
+}
+
 /// What a file is, without opening it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FileState {
@@ -23,6 +32,18 @@ pub trait Availability: Send + Sync {
     /// Starts downloading a file that is not on this Mac; returns at once.
     fn request_download(&self, path: &Path) {
         let _ = path;
+    }
+    /// Runs `f`, which reads, writes or deletes `path`, the way the provider wants file
+    /// access coordinated with its sync client (`NSFileCoordinator` in the app). Directory
+    /// listings are not coordinated.
+    fn coordinate(
+        &self,
+        path: &Path,
+        access: Access,
+        f: &mut dyn FnMut() -> std::io::Result<()>,
+    ) -> std::io::Result<()> {
+        let _ = (path, access);
+        f()
     }
 }
 

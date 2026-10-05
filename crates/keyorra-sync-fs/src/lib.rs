@@ -23,7 +23,7 @@ use keyorra_sync::snapshot::{snapshot_name, SnapshotHeader};
 use keyorra_sync::transport::{AppendOutcome, Fetched, Transport};
 use keyorra_sync::{DeviceId, Error, Result};
 
-pub use avail::{Availability, FileState, LocalDisk};
+pub use avail::{Access, Availability, FileState, LocalDisk};
 use names::*;
 use write::{choose_temp_dir, write_file, Mode};
 
@@ -137,9 +137,14 @@ impl FolderTransport {
                 return Ok(Fetched::Missing);
             }
         }
-        match std::fs::read(path) {
-            Ok(bytes) if bytes.is_empty() => Ok(Fetched::Pending),
-            Ok(bytes) => Ok(Fetched::Ready(bytes)),
+        let mut bytes = Vec::new();
+        let read = self.availability.coordinate(path, Access::Read, &mut || {
+            bytes = std::fs::read(path)?;
+            Ok(())
+        });
+        match read {
+            Ok(()) if bytes.is_empty() => Ok(Fetched::Pending),
+            Ok(()) => Ok(Fetched::Ready(bytes)),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Fetched::Missing),
             Err(e) => Err(io("reading the folder", e)),
         }
@@ -162,7 +167,9 @@ impl FolderTransport {
     }
 
     fn write(&self, dest: &Path, bytes: &[u8], mode: Mode) -> std::io::Result<()> {
-        write_file(&self.tmp, dest, bytes, mode)
+        self.availability.coordinate(dest, Access::Write, &mut || {
+            write_file(&self.tmp, dest, bytes, mode)
+        })
     }
 
     fn remove(&self, path: &Path) -> Result<()> {
@@ -174,7 +181,13 @@ impl FolderTransport {
                     .unwrap_or_default(),
             )),
         ] {
-            match std::fs::remove_file(&p) {
+            if p.symlink_metadata().is_err() {
+                continue;
+            }
+            let removed = self
+                .availability
+                .coordinate(&p, Access::Delete, &mut || std::fs::remove_file(&p));
+            match removed {
                 Ok(()) => {}
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                 Err(e) => return Err(io("deleting from the folder", e)),

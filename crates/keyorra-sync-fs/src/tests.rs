@@ -351,3 +351,44 @@ fn devices_converge_despite_conflict_copies_and_evicted_files() {
     assert_eq!(c.devices[0].view(), c.devices[1].view());
     assert!(c.devices[1].view().items.contains_key(&id));
 }
+
+/// Plan A2-2: every read, write and delete of a file goes through the provider's
+/// coordination (`NSFileCoordinator` in the app).
+#[test]
+fn every_file_access_is_coordinated() {
+    #[derive(Default)]
+    struct Recorder(Mutex<Vec<(Access, PathBuf)>>);
+    impl Availability for Recorder {
+        fn coordinate(
+            &self,
+            path: &Path,
+            access: Access,
+            f: &mut dyn FnMut() -> std::io::Result<()>,
+        ) -> std::io::Result<()> {
+            self.0.lock().unwrap().push((access, path.to_path_buf()));
+            f()
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let rec = Arc::new(Recorder::default());
+    let t = FolderTransport::open(dir.path(), None, rec.clone()).unwrap();
+    rec.0.lock().unwrap().clear();
+    let segs = some_segments();
+    t.append(&segs[0]).unwrap();
+    t.segments(&device_id(0), 0).unwrap();
+    t.delete_segment(&device_id(0), 1).unwrap();
+    let seg = dir
+        .path()
+        .join("streams")
+        .join("01".repeat(16))
+        .join(names::segment_file(1));
+    let log = rec.0.lock().unwrap().clone();
+    assert_eq!(
+        log,
+        vec![
+            (Access::Write, seg.clone()),
+            (Access::Read, seg.clone()),
+            (Access::Delete, seg),
+        ]
+    );
+}
