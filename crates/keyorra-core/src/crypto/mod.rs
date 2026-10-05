@@ -3,7 +3,7 @@ mod kdf;
 mod key;
 mod keys;
 
-pub use aead::{open, seal, NONCE_LEN};
+pub use aead::{open, seal, seal_with_nonce, NONCE_LEN};
 pub use kdf::{derive_kek, KdfParams};
 pub use key::Key;
 pub use keys::{
