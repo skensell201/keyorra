@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="880" height="200" viewBox="0 0 880 200" role="img" aria-label="Keyorra: a free, local-first password manager for your Mac">
+  <defs>
+    <linearGradient id="g" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#5B8CFF"/>
+      <stop offset="1" stop-color="#2F5FE0"/>
+    </linearGradient>
+  </defs>
+  <g transform="translate(20 20) scale(0.15625)">
+    <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#g)"/>
+    <circle cx="512" cy="430" r="120" fill="#F5F7FB"/>
+    <path d="M457 470 H567 L607 720 H417 Z" fill="#F5F7FB"/>
+  </g>
+  <text x="200" y="104" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="64" font-weight="700" letter-spacing="-1.5" fill="#0f172a">Keyorra</text>
+  <text x="202" y="146" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="24" fill="#475569">A free, local-first password manager for your Mac</text>
+</svg>

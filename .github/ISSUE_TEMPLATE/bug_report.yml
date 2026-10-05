@@ -1,0 +1,56 @@
+name: Bug report
+description: Something in Keyorra doesn't work as expected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Found a security problem? Please report it privately instead:
+        https://github.com/skensell201/keyorra/security/advisories/new
+        Never paste real passwords, vault files or one-time codes here.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened?
+      description: What did you do, what did you expect, and what happened instead?
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Open …
+        2. Click …
+    validations:
+      required: true
+  - type: dropdown
+    id: component
+    attributes:
+      label: Where
+      options:
+        - Mac app
+        - Chrome / Chromium extension
+        - Firefox extension
+        - Safari extension
+        - Import
+        - Other
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: Keyorra version
+      placeholder: "0.1.0"
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: macOS version and browser (if relevant)
+      placeholder: "macOS 15.5, Chrome 140"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Screenshots or logs
+      description: Optional. Remove any personal data first.
