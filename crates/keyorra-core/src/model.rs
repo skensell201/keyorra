@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -109,6 +111,22 @@ pub struct Item {
     pub attachments: Vec<AttachmentRef>,
     pub created_at: i64,
     pub updated_at: i64,
+    /// Set on a conflict copy (sync, spec §3.5): which item and version it was copied from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conflict: Option<ConflictInfo>,
+    /// Fields written by a newer app: kept as they are, so an older one does not drop them
+    /// when it saves the item (sync, spec §3.6).
+    #[serde(flatten)]
+    pub extra: BTreeMap<String, serde_json::Value>,
+}
+
+/// Where a conflict copy comes from: the original item, the version copied (hex of its
+/// version hash) and the device that wrote that version (hex id).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConflictInfo {
+    pub of: Uuid,
+    pub version: String,
+    pub from_device: String,
 }
 
 impl Item {
@@ -128,6 +146,8 @@ impl Item {
             attachments: Vec::new(),
             created_at: now,
             updated_at: now,
+            conflict: None,
+            extra: BTreeMap::new(),
         }
     }
 
@@ -265,6 +285,24 @@ mod tests {
             }],
         });
         item
+    }
+
+    #[test]
+    fn unknown_fields_and_the_conflict_marker_survive_a_round_trip() {
+        let mut json = serde_json::to_value(login()).unwrap();
+        json["future_field"] = serde_json::json!({"x": 1});
+        json["conflict"] = serde_json::json!({
+            "of": "60606060-6060-6060-6060-606060606060",
+            "version": "abcd",
+            "from_device": "0101",
+        });
+        let item: Item = serde_json::from_value(json.clone()).unwrap();
+        assert_eq!(item.conflict.as_ref().unwrap().version, "abcd");
+        assert_eq!(item.extra["future_field"], serde_json::json!({"x": 1}));
+        assert_eq!(serde_json::to_value(&item).unwrap(), json);
+        // Without them, the JSON is as before.
+        let plain = serde_json::to_value(login()).unwrap();
+        assert!(plain.get("conflict").is_none());
     }
 
     #[test]
