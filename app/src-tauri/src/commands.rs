@@ -8,8 +8,10 @@ use keepsake_session::dto::{
     GeneratorRequest, ImportPreview, ImportResult, ItemFilter, ItemSummary, TotpCode, VaultDto,
 };
 use keepsake_session::watchtower::Report;
-use keepsake_session::{CmdError, CmdResult, ErrorKind, PairedBrowser, Settings, Status};
-use tauri::{AppHandle, State};
+use keepsake_session::{
+    CmdError, CmdResult, ErrorKind, PairedBrowser, QuickCopy, Settings, Status,
+};
+use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use uuid::Uuid;
 
@@ -26,14 +28,37 @@ pub fn create_vault_file(state: State<'_, AppState>, password: String) -> CmdRes
 }
 
 #[tauri::command(async)]
-pub fn unlock(state: State<'_, AppState>, password: String) -> CmdResult<()> {
-    lock_session(&state).unlock(&password, now())
+pub fn unlock(app: AppHandle, state: State<'_, AppState>, password: String) -> CmdResult<()> {
+    lock_session(&state).unlock(&password, now())?;
+    // Both windows (main and quick search) follow the lock state.
+    let _ = app.emit("unlocked", ());
+    Ok(())
 }
 
 #[tauri::command(async)]
-pub fn lock(state: State<'_, AppState>) -> CmdResult<()> {
+pub fn lock(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
     lock_session(&state).lock();
+    let _ = app.emit("locked", ());
     Ok(())
+}
+
+#[tauri::command(async)]
+pub fn quick_copy(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    id: Uuid,
+    what: QuickCopy,
+) -> CmdResult<()> {
+    let mut session = lock_session(&state);
+    let text = session.copy_quick(id, what, now())?;
+    app.clipboard()
+        .write_text(text)
+        .map_err(|e| CmdError::new(ErrorKind::Other, format!("Clipboard: {e}")))
+}
+
+#[tauri::command(async)]
+pub fn quick_hide(app: AppHandle) {
+    crate::quick::hide(&app);
 }
 
 #[tauri::command(async)]

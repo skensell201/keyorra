@@ -1,7 +1,9 @@
 mod bridge;
 mod commands;
 pub mod native_host;
+mod quick;
 mod screen;
+mod tray;
 
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -31,6 +33,7 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(quick::plugin())
         .setup(|app| {
             let path = app.path().app_data_dir()?.join("keepsake.db");
             app.manage(AppState(Mutex::new(Session::new(
@@ -38,6 +41,14 @@ pub fn run() {
                 KdfParams::DEFAULT,
                 now(),
             ))));
+            // After `manage`: both call commands that need the session. Neither is essential;
+            // without them Keepsake still works from its main window.
+            if let Err(e) = tray::install(app.handle()) {
+                eprintln!("keepsake: menu bar icon unavailable: {e}");
+            }
+            if let Err(e) = quick::install(app.handle()) {
+                eprintln!("keepsake: quick search unavailable: {e}");
+            }
             let handle = app.handle().clone();
             std::thread::spawn(move || housekeeping(handle));
             if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
@@ -59,6 +70,8 @@ pub fn run() {
             commands::delete_vault,
             commands::watchtower,
             commands::check_breaches,
+            commands::quick_copy,
+            commands::quick_hide,
             commands::items,
             commands::item,
             commands::new_item,
@@ -80,8 +93,26 @@ pub fn run() {
             commands::paired_browsers,
             commands::remove_paired_browser,
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running Keepsake");
+        .on_window_event(|window, event| {
+            // Closing the main window keeps Keepsake in the menu bar; Quit is in the tray menu.
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if window.label() == "main" {
+                    api.prevent_close();
+                    let _ = window.hide();
+                }
+            }
+        })
+        .build(tauri::generate_context!())
+        .expect("error while building Keepsake")
+        .run(|app, event| {
+            if let tauri::RunEvent::Reopen {
+                has_visible_windows: false,
+                ..
+            } = event
+            {
+                tray::show_main(app);
+            }
+        });
 }
 
 /// Every two seconds: lock when idle (and tell the window), clear the clipboard once our copy
