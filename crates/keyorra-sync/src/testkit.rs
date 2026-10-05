@@ -7,7 +7,7 @@ use rand::rngs::StdRng;
 use rand::SeedableRng;
 use uuid::Uuid;
 
-use crate::engine::{Engine, StaticDirectory};
+use crate::engine::Engine;
 use crate::error::Result;
 use crate::faults::{Faults, Faulty};
 use crate::fold::View;
@@ -15,6 +15,7 @@ use crate::transport::MemoryTransport;
 use crate::DeviceId;
 
 pub const ACCOUNT_ID: [u8; 16] = [0x10; 16];
+pub const ACCOUNT_KEY: [u8; 32] = [0x30; 32];
 /// 2026-09-21, a fixed start so runs repeat.
 pub const START_MS: u64 = 1_790_000_000_000;
 
@@ -22,7 +23,6 @@ pub struct Cluster {
     pub store: MemoryTransport,
     pub links: Vec<Faulty<MemoryTransport>>,
     pub devices: Vec<Engine<StdRng>>,
-    pub directory: StaticDirectory,
     /// Wall clock of each device (they may disagree).
     pub clocks: Vec<u64>,
 }
@@ -31,22 +31,60 @@ pub fn device_id(i: usize) -> DeviceId {
     [i as u8 + 1; 16]
 }
 
+pub fn signer(i: usize) -> SigningKey {
+    SigningKey::from_bytes(&[0x40 + i as u8; 32])
+}
+
+pub fn device_name(i: usize) -> String {
+    format!("Device {i}")
+}
+
 impl Cluster {
+    /// Device 0 creates the account and approves every other device; all are in step.
     pub fn new(n: usize, seed: u64, faults: Faults) -> Cluster {
+        let mut c = Cluster::unapproved(n, seed, faults);
+        for i in 1..n {
+            let key = c.devices[i].verifying_key();
+            c.devices[0]
+                .endorse(device_id(i), &key, &device_name(i), START_MS)
+                .unwrap();
+        }
+        c.heal();
+        for link in &c.links {
+            link.set_faults(faults);
+        }
+        c
+    }
+
+    /// Device 0 creates the account; the others have joined but nobody approved them yet.
+    pub fn unapproved(n: usize, seed: u64, faults: Faults) -> Cluster {
         let store = MemoryTransport::new();
-        let mut directory = StaticDirectory::default();
         let mut devices = Vec::new();
         let mut links = Vec::new();
         for i in 0..n {
-            let signer = SigningKey::from_bytes(&[0x40 + i as u8; 32]);
-            directory.0.insert(device_id(i), signer.verifying_key());
-            devices.push(Engine::new(
-                device_id(i),
-                signer,
-                ACCOUNT_ID,
-                Key::from_bytes([0x30; 32]),
-                StdRng::seed_from_u64(seed.wrapping_add(i as u64)),
-            ));
+            let rng = StdRng::seed_from_u64(seed.wrapping_add(i as u64));
+            let key = Key::from_bytes(ACCOUNT_KEY);
+            devices.push(if i == 0 {
+                Engine::create_account(
+                    device_id(0),
+                    signer(0),
+                    &device_name(0),
+                    ACCOUNT_ID,
+                    key,
+                    rng,
+                    START_MS,
+                )
+            } else {
+                Engine::join(
+                    device_id(i),
+                    signer(i),
+                    &device_name(i),
+                    ACCOUNT_ID,
+                    key,
+                    device_id(0),
+                    rng,
+                )
+            });
             links.push(Faulty::new(
                 store.clone(),
                 faults,
@@ -57,13 +95,12 @@ impl Cluster {
             store,
             links,
             devices,
-            directory,
             clocks: vec![START_MS; n],
         }
     }
 
     pub fn sync(&mut self, i: usize) -> Result<()> {
-        self.devices[i].sync(&self.links[i], &self.directory, self.clocks[i])
+        self.devices[i].sync(&self.links[i], self.clocks[i])
     }
 
     /// Advances every wall clock.
@@ -98,7 +135,9 @@ impl Cluster {
         for (i, d) in self.devices.iter().enumerate().skip(1) {
             assert_eq!(d.view(), first, "device {i} differs from device 0");
         }
-        assert!(!first.owes_copies(), "conflict copies left to materialise");
+        if self.devices.iter().any(|d| d.can_write()) {
+            assert!(!first.owes_copies(), "conflict copies left to materialise");
+        }
     }
 
     /// A minimal item JSON, as the local store would write it.

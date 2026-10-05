@@ -1,11 +1,12 @@
 use uuid::Uuid;
 
 use super::*;
-use crate::cbor::Value;
+use crate::entry::Entry;
 use crate::envelope::Version;
 use crate::faults::Faults;
+use crate::faults::{Overlay, Rollback};
 use crate::payload::conflict_marker;
-use crate::testkit::{device_id, Cluster, START_MS};
+use crate::testkit::{device_id, device_name, signer, Cluster, ACCOUNT_ID, ACCOUNT_KEY, START_MS};
 
 const ITEM: Uuid = Uuid::from_bytes([0x60; 16]);
 
@@ -180,12 +181,11 @@ impl Transport for Upto<'_> {
             })
             .collect())
     }
-    fn head(&self, stream: &DeviceId) -> Result<Option<u64>> {
-        self.inner.head(stream)
-    }
-
     fn append(&self, segment: &[u8]) -> Result<AppendOutcome> {
         self.inner.append(segment)
+    }
+    fn head(&self, stream: &DeviceId) -> Result<Option<u64>> {
+        self.inner.head(stream)
     }
 }
 
@@ -194,57 +194,40 @@ fn a_deleted_copy_stays_deleted_when_another_device_also_wrote_it() {
     let (mut c, vault) = shared(2);
     let (a, b) = (device_id(0), device_id(1));
     // Both edit and push without seeing each other.
+    let json = |t: &str| Cluster::item_json(ITEM, t, &[]);
     c.devices[0]
-        .save_item(
-            vault,
-            ITEM,
-            &Cluster::item_json(ITEM, "A", &[]),
-            c.clocks[0],
-        )
+        .save_item(vault, ITEM, &json("A"), c.clocks[0])
         .unwrap();
     c.devices[1]
-        .save_item(
-            vault,
-            ITEM,
-            &Cluster::item_json(ITEM, "B", &[]),
-            c.clocks[1],
-        )
+        .save_item(vault, ITEM, &json("B"), c.clocks[1])
         .unwrap();
-    let a_head = c.devices[0].sent.0;
-    let b_head = c.devices[1].sent.0;
-    let only_own_a = Upto {
+    let (a0, b0) = (c.devices[0].sent.seq, c.devices[1].sent.seq);
+    let hide_b = Upto {
         inner: &c.store,
         stream: b,
-        last_seq: b_head,
+        last_seq: b0,
     };
-    c.devices[0]
-        .sync(&only_own_a, &c.directory, c.clocks[0])
-        .unwrap();
-    let only_own_b = Upto {
+    c.devices[0].sync(&hide_b, c.clocks[0]).unwrap();
+    let hide_a = Upto {
         inner: &c.store,
         stream: a,
-        last_seq: a_head,
+        last_seq: a0,
     };
-    c.devices[1]
-        .sync(&only_own_b, &c.directory, c.clocks[1])
-        .unwrap();
+    c.devices[1].sync(&hide_a, c.clocks[1]).unwrap();
+    let (a1, b1) = (c.devices[0].sent.seq, c.devices[1].sent.seq);
     // Each now sees the other's edit (and nothing else) and writes the same copy.
-    let a_view = Upto {
+    let b_edit = Upto {
         inner: &c.store,
         stream: b,
-        last_seq: b_head + 1,
+        last_seq: b1,
     };
-    c.devices[0]
-        .sync(&a_view, &c.directory, c.clocks[0])
-        .unwrap();
-    let b_view = Upto {
+    c.devices[0].sync(&b_edit, c.clocks[0]).unwrap();
+    let a_edit = Upto {
         inner: &c.store,
         stream: a,
-        last_seq: a_head + 1,
+        last_seq: a1,
     };
-    c.devices[1]
-        .sync(&b_view, &c.directory, c.clocks[1])
-        .unwrap();
+    c.devices[1].sync(&a_edit, c.clocks[1]).unwrap();
     let copy = c.devices[0].view().conflict_copies()[0];
     assert_eq!(c.devices[1].view().conflict_copies(), vec![copy]);
     // A deletes the copy for good; B's own copy must not bring it back.
@@ -416,15 +399,14 @@ fn a_segment_breaking_the_rules_blocks_its_stream() {
     env.check().unwrap();
     let at = StreamPosition {
         device_id: device_id(1),
-        first_seq: 1,
-        prev_hash: chain_genesis(&crate::testkit::ACCOUNT_ID, &device_id(1)),
+        first_seq: c.devices[1].sent.seq + 1,
+        prev_hash: c.devices[1].sent.hash,
     };
-    let signer = SigningKey::from_bytes(&[0x41; 32]);
-    let k_seg = segment_key(&Key::from_bytes([0x30; 32]), &crate::testkit::ACCOUNT_ID);
-    let entry = Value::map(vec![("put", env.to_value())]);
+    let k_seg = segment_key(&Key::from_bytes(ACCOUNT_KEY), &ACCOUNT_ID);
+    let entry = Entry::Put(env).to_value();
     let mut rng = rand::rngs::OsRng;
-    let seg = seal_segment(&k_seg, &signer, &at, vec![entry], &mut rng).unwrap();
-    c.store.append(&seg).unwrap();
+    let seg = seal_segment(&k_seg, &signer(1), &at, vec![entry], &mut rng).unwrap();
+    assert_eq!(c.store.append(&seg).unwrap(), AppendOutcome::Appended);
     c.sync(0).unwrap();
     let events = c.devices[0].take_events();
     assert!(events
@@ -474,12 +456,11 @@ impl Transport for BrokenStream<'_> {
         }
         self.inner.segments(stream, after)
     }
-    fn head(&self, stream: &DeviceId) -> Result<Option<u64>> {
-        self.inner.head(stream)
-    }
-
     fn append(&self, segment: &[u8]) -> Result<AppendOutcome> {
         self.inner.append(segment)
+    }
+    fn head(&self, stream: &DeviceId) -> Result<Option<u64>> {
+        self.inner.head(stream)
     }
 }
 
@@ -520,7 +501,7 @@ fn a_failed_listing_does_not_let_the_next_edit_swallow_a_conflict() {
         inner: &c.store,
         broken: device_id(2),
     };
-    let _ = c.devices[0].sync(&broken, &c.directory, c.clocks[0]);
+    let _ = c.devices[0].sync(&broken, c.clocks[0]);
     c.devices[0]
         .save_item(
             vault,
@@ -562,9 +543,7 @@ fn a_failed_listing_is_an_event_and_other_streams_are_still_read() {
         inner: &c.store,
         broken: device_id(1),
     };
-    c.devices[0]
-        .sync(&broken, &c.directory, c.clocks[0])
-        .unwrap();
+    c.devices[0].sync(&broken, c.clocks[0]).unwrap();
     let events = c.devices[0].take_events();
     assert!(events
         .iter()
@@ -627,9 +606,7 @@ fn stalls_and_clock_warnings_are_reported_once() {
         last_seq: 0,
     };
     for _ in 0..3 {
-        d.devices[2]
-            .sync(&only_a, &d.directory, d.clocks[2])
-            .unwrap();
+        d.devices[2].sync(&only_a, d.clocks[2]).unwrap();
     }
     let waiting = d.devices[2]
         .take_events()
@@ -642,18 +619,8 @@ fn stalls_and_clock_warnings_are_reported_once() {
 #[test]
 fn after_an_own_stream_conflict_the_device_stops_pushing() {
     let (mut c, vault) = shared(1);
-    // Another copy of this device already wrote at its next position.
-    let mut twin = Engine::new(
-        device_id(0),
-        SigningKey::from_bytes(&[0x40; 32]),
-        crate::testkit::ACCOUNT_ID,
-        Key::from_bytes([0x30; 32]),
-        rand::rngs::OsRng,
-    );
-    twin.sent = c.devices[0].sent;
-    twin.next_seq = c.devices[0].next_seq;
-    twin.vault_keys = c.devices[0].vault_keys.clone();
-    twin.fold = c.devices[0].fold.clone();
+    // Another copy of this device (a restored backup) already wrote at its next position.
+    let mut twin = clone_of(&c.devices[0]);
     twin.save_item(
         vault,
         ITEM,
@@ -683,25 +650,439 @@ fn after_an_own_stream_conflict_the_device_stops_pushing() {
     assert!(!c.devices[0].is_idle());
 }
 
+/// A second engine with the same id, key and state: a cloned or restored Mac.
+fn clone_of(e: &Engine<rand::rngs::StdRng>) -> Engine<rand::rngs::OsRng> {
+    let i = (e.device[0] - 1) as usize;
+    let mut twin = Engine::join(
+        e.device,
+        signer(i),
+        &device_name(i),
+        ACCOUNT_ID,
+        Key::from_bytes(ACCOUNT_KEY),
+        e.trust.root(),
+        rand::rngs::OsRng,
+    );
+    twin.sent = e.sent;
+    twin.own_ends = e.own_ends.clone();
+    twin.next_seq = e.next_seq;
+    twin.vault_keys = e.vault_keys.clone();
+    twin.fold = e.fold.clone();
+    twin.trust = e.trust.clone();
+    twin.heads = e.heads.clone();
+    twin.ends = e.ends.clone();
+    twin.last_checkpoint = e.last_checkpoint.clone();
+    twin
+}
+
 #[test]
-fn an_injected_admission_policy_hides_cut_versions() {
+fn a_removed_devices_later_changes_stop_counting_everywhere() {
+    let (mut c, vault) = shared(3);
+    c.devices[0].revoke(device_id(1), c.clocks[0]).unwrap();
+    // Device 1 has not heard of it yet and keeps editing.
+    c.devices[1]
+        .save_item(
+            vault,
+            ITEM,
+            &Cluster::item_json(ITEM, "after the cut", &[]),
+            c.clocks[1],
+        )
+        .unwrap();
+    c.heal();
+    c.assert_converged();
+    for d in &c.devices {
+        assert_eq!(title(&d.view(), ITEM), "base");
+    }
+    assert!(!c.devices[1].can_write());
+    assert!(matches!(
+        c.devices[1].save_item(
+            vault,
+            ITEM,
+            &Cluster::item_json(ITEM, "x", &[]),
+            c.clocks[1]
+        ),
+        Err(Error::Refused(_))
+    ));
+}
+
+#[test]
+fn an_unapproved_device_reads_but_cannot_write() {
+    let mut c = Cluster::unapproved(2, 4, Faults::NONE);
+    let vault = c.devices[0].create_vault("Personal", START_MS).unwrap();
+    c.devices[0]
+        .save_item(
+            vault,
+            ITEM,
+            &Cluster::item_json(ITEM, "base", &[]),
+            START_MS,
+        )
+        .unwrap();
+    c.sync(0).unwrap();
+    c.sync(1).unwrap();
+    // The root's stream verifies with the key in its own Genesis.
+    assert_eq!(title(&c.devices[1].view(), ITEM), "base");
+    assert!(!c.devices[1].can_write());
+    assert!(matches!(
+        c.devices[1].save_item(vault, ITEM, &Cluster::item_json(ITEM, "x", &[]), START_MS),
+        Err(Error::Refused(_))
+    ));
+    let key = c.devices[1].verifying_key();
+    c.devices[0]
+        .endorse(device_id(1), &key, &device_name(1), START_MS)
+        .unwrap();
+    c.heal();
+    assert!(c.devices[1].can_write());
+    c.devices[1]
+        .save_item(
+            vault,
+            ITEM,
+            &Cluster::item_json(ITEM, "approved", &[]),
+            c.clocks[1],
+        )
+        .unwrap();
+    c.heal();
+    c.assert_converged();
+    assert_eq!(title(&c.devices[0].view(), ITEM), "approved");
+}
+
+#[test]
+fn approval_can_come_from_any_approved_device() {
+    let mut c = Cluster::unapproved(3, 5, Faults::NONE);
+    let key1 = c.devices[1].verifying_key();
+    c.devices[0]
+        .endorse(device_id(1), &key1, &device_name(1), START_MS)
+        .unwrap();
+    c.heal();
+    let key2 = c.devices[2].verifying_key();
+    c.devices[1]
+        .endorse(device_id(2), &key2, &device_name(2), c.clocks[1])
+        .unwrap();
+    c.heal();
+    let info = c.devices[0].trust().device(&device_id(2)).unwrap().clone();
+    assert_eq!(
+        info.introduced,
+        crate::trust::Introduction::Endorsed {
+            by: device_id(1),
+            at_seq: info_seq(&c, 1)
+        }
+    );
+    assert!(c.devices[2].can_write());
+}
+
+/// The sequence number of device `i`'s last confirmed entry.
+fn info_seq(c: &Cluster, i: usize) -> u64 {
+    c.devices[i].sent.seq
+}
+
+#[test]
+fn a_self_join_works_and_alarms_every_other_device() {
+    let mut c = Cluster::unapproved(3, 6, Faults::NONE);
+    let key1 = c.devices[1].verifying_key();
+    c.devices[0]
+        .endorse(device_id(1), &key1, &device_name(1), START_MS)
+        .unwrap();
+    c.heal();
+    c.devices[2].self_join(c.clocks[2]).unwrap();
+    assert!(c.devices[2].can_write());
+    c.heal();
+    for i in [0, 1] {
+        let events = c.devices[i].take_events();
+        let alarms: Vec<_> = events
+            .iter()
+            .filter(|e| matches!(e, Event::SelfJoined { device, .. } if *device == device_id(2)))
+            .collect();
+        assert_eq!(alarms.len(), 1, "device {i}");
+    }
+    assert!(!c.devices[2]
+        .take_events()
+        .iter()
+        .any(|e| matches!(e, Event::SelfJoined { .. })));
+    // A self-join must be a stream's first entry.
+    assert!(matches!(
+        c.devices[2].self_join(c.clocks[2]),
+        Err(Error::Refused(_))
+    ));
+}
+
+#[test]
+fn a_device_can_remove_itself() {
+    let (mut c, vault) = shared(2);
+    c.devices[1].revoke(device_id(1), c.clocks[1]).unwrap();
+    assert!(!c.devices[1].can_write());
+    c.heal();
+    let cut = c.devices[0]
+        .trust()
+        .device(&device_id(1))
+        .unwrap()
+        .cut
+        .unwrap();
+    assert!(
+        cut < info_seq(&c, 1),
+        "the revocation itself is after the cut"
+    );
+    assert!(matches!(
+        c.devices[1].save_item(
+            vault,
+            ITEM,
+            &Cluster::item_json(ITEM, "x", &[]),
+            c.clocks[1]
+        ),
+        Err(Error::Refused(_))
+    ));
+}
+
+#[test]
+fn a_rolled_back_stream_pauses_syncing() {
     let (mut c, vault) = shared(2);
     c.devices[1]
         .save_item(
             vault,
             ITEM,
-            &Cluster::item_json(ITEM, "from B", &[]),
+            &Cluster::item_json(ITEM, "newer", &[]),
             c.clocks[1],
         )
         .unwrap();
-    c.heal();
-    assert_eq!(title(&c.devices[0].view(), ITEM), "from B");
-    struct Cut(DeviceId);
-    impl crate::fold::Admission for Cut {
-        fn admits(&self, stream: &DeviceId, _: u64) -> bool {
-            *stream != self.0
-        }
+    c.sync(1).unwrap();
+    c.sync(0).unwrap();
+    let received = c.devices[0].heads[&device_id(1)].seq;
+    let restored_backup = Rollback {
+        inner: c.store.clone(),
+        stream: device_id(1),
+        keep_through: received - 1,
+    };
+    let err = c.devices[0]
+        .sync(&restored_backup, c.clocks[0])
+        .unwrap_err();
+    assert!(matches!(err, Error::Refused(_)));
+    assert!(matches!(
+        c.devices[0].alarm(),
+        Some(Alarm::Rollback { stream, .. }) if *stream == device_id(1)
+    ));
+    // Paused until the user decides.
+    assert!(matches!(
+        c.devices[0].sync(&c.store, c.clocks[0]),
+        Err(Error::Refused(_))
+    ));
+    c.devices[0].clear_alarm();
+    c.devices[0].sync(&c.store, c.clocks[0]).unwrap();
+}
+
+#[test]
+fn a_rollback_of_the_own_stream_is_noticed_before_writing() {
+    let (mut c, vault) = shared(1);
+    let sent = c.devices[0].sent.seq;
+    let restored_backup = Rollback {
+        inner: c.store.clone(),
+        stream: device_id(0),
+        keep_through: sent - 1,
+    };
+    c.devices[0]
+        .save_item(
+            vault,
+            ITEM,
+            &Cluster::item_json(ITEM, "x", &[]),
+            c.clocks[0],
+        )
+        .unwrap();
+    let _ = c.devices[0].sync(&restored_backup, c.clocks[0]);
+    assert!(matches!(
+        c.devices[0].alarm(),
+        Some(Alarm::Rollback { stream, .. }) if *stream == device_id(0)
+    ));
+}
+
+#[test]
+fn a_fork_is_detected_through_another_devices_checkpoint() {
+    let (mut c, vault) = shared(3);
+    // A clone of device 1 writes into a copy of the store that device 0 is shown.
+    let side = c.store.deep_copy();
+    let mut clone = clone_of(&c.devices[1]);
+    clone
+        .save_item(
+            vault,
+            ITEM,
+            &Cluster::item_json(ITEM, "clone", &[]),
+            c.clocks[1],
+        )
+        .unwrap();
+    clone.push(&side);
+    c.devices[1]
+        .save_item(
+            vault,
+            ITEM,
+            &Cluster::item_json(ITEM, "real", &[]),
+            c.clocks[1],
+        )
+        .unwrap();
+    c.sync(1).unwrap();
+    let partitioned = Overlay {
+        base: c.store.clone(),
+        overlay: side,
+        stream: device_id(1),
+    };
+    c.devices[0].sync(&partitioned, c.clocks[0]).unwrap();
+    assert!(
+        c.devices[0].alarm().is_none(),
+        "one history alone looks fine"
+    );
+    // Device 2 sees the real history and says so in its next checkpoint.
+    c.sync(2).unwrap();
+    let other = Uuid::from_bytes([0x61; 16]);
+    c.devices[2]
+        .save_item(
+            vault,
+            other,
+            &Cluster::item_json(other, "x", &[]),
+            c.clocks[2],
+        )
+        .unwrap();
+    c.sync(2).unwrap();
+    let _ = c.devices[0].sync(&partitioned, c.clocks[0]);
+    assert!(matches!(
+        c.devices[0].alarm(),
+        Some(Alarm::Fork { stream, .. }) if *stream == device_id(1)
+    ));
+}
+
+#[test]
+fn a_segment_that_does_not_continue_the_chain_is_a_fork() {
+    let (mut c, vault) = shared(2);
+    let side = c.store.deep_copy();
+    let mut clone = clone_of(&c.devices[1]);
+    clone
+        .save_item(
+            vault,
+            ITEM,
+            &Cluster::item_json(ITEM, "clone", &[]),
+            c.clocks[1],
+        )
+        .unwrap();
+    clone.push(&side);
+    // Device 0 first sees the clone's history...
+    let partitioned = Overlay {
+        base: c.store.clone(),
+        overlay: side,
+        stream: device_id(1),
+    };
+    c.devices[0].sync(&partitioned, c.clocks[0]).unwrap();
+    // ...then the real device writes twice and device 0 is shown the real stream.
+    for t in ["real 1", "real 2"] {
+        c.devices[1]
+            .save_item(vault, ITEM, &Cluster::item_json(ITEM, t, &[]), c.clocks[1])
+            .unwrap();
+        c.sync(1).unwrap();
     }
-    c.devices[0].set_admission(Box::new(Cut(device_id(1))));
-    assert_eq!(title(&c.devices[0].view(), ITEM), "base");
+    let _ = c.devices[0].sync(&c.store, c.clocks[0]);
+    assert!(matches!(c.devices[0].alarm(), Some(Alarm::Fork { .. })));
+}
+
+#[test]
+fn withheld_changes_are_reported_after_a_day() {
+    let (mut c, vault) = shared(3);
+    c.devices[1]
+        .save_item(
+            vault,
+            ITEM,
+            &Cluster::item_json(ITEM, "hidden", &[]),
+            c.clocks[1],
+        )
+        .unwrap();
+    c.sync(1).unwrap();
+    let before = c.devices[0].heads[&device_id(1)].seq;
+    // Device 2 receives it and writes; device 0 is never shown device 1's new segment.
+    c.sync(2).unwrap();
+    let other = Uuid::from_bytes([0x61; 16]);
+    c.devices[2]
+        .save_item(
+            vault,
+            other,
+            &Cluster::item_json(other, "x", &[]),
+            c.clocks[2],
+        )
+        .unwrap();
+    c.sync(2).unwrap();
+    let withholding = Upto {
+        inner: &c.store,
+        stream: device_id(1),
+        last_seq: before,
+    };
+    c.devices[0].sync(&withholding, c.clocks[0]).unwrap();
+    let count = |events: Vec<Event>| {
+        events
+            .iter()
+            .filter(|e| matches!(e, Event::Withheld { from, .. } if *from == device_id(1)))
+            .count()
+    };
+    assert_eq!(count(c.devices[0].take_events()), 0);
+    c.clocks[0] += WITHHELD_AFTER_MS + 1;
+    c.devices[0].sync(&withholding, c.clocks[0]).unwrap();
+    c.devices[0].sync(&withholding, c.clocks[0]).unwrap();
+    assert_eq!(count(c.devices[0].take_events()), 1);
+    // Delivered at last: the claim is settled.
+    c.devices[0].sync(&c.store, c.clocks[0]).unwrap();
+    assert!(c.devices[0].claims.is_empty());
+}
+
+#[test]
+fn a_waiting_record_does_not_hold_back_other_records_of_the_stream() {
+    let (mut c, vault) = shared(3);
+    // Device 2 creates a vault that device 0 is not shown yet.
+    let hidden_vault = c.devices[2].create_vault("Later", c.clocks[2]).unwrap();
+    c.sync(2).unwrap();
+    let hidden_head = c.devices[0].heads[&device_id(2)].seq;
+    c.sync(1).unwrap();
+    let other = Uuid::from_bytes([0x61; 16]);
+    // One segment of device 1: an item in the hidden vault, then an item in the shared one.
+    c.devices[1]
+        .save_item(
+            hidden_vault,
+            other,
+            &Cluster::item_json(other, "waits", &[]),
+            c.clocks[1],
+        )
+        .unwrap();
+    c.devices[1]
+        .save_item(
+            vault,
+            ITEM,
+            &Cluster::item_json(ITEM, "flows", &[]),
+            c.clocks[1],
+        )
+        .unwrap();
+    c.sync(1).unwrap();
+    let hide_vault = Upto {
+        inner: &c.store,
+        stream: device_id(2),
+        last_seq: hidden_head,
+    };
+    c.devices[0].sync(&hide_vault, c.clocks[0]).unwrap();
+    let view = c.devices[0].view();
+    assert_eq!(title(&view, ITEM), "flows");
+    assert!(!view.items.contains_key(&other));
+    c.devices[0].sync(&c.store, c.clocks[0]).unwrap();
+    assert_eq!(title(&c.devices[0].view(), other), "waits");
+}
+
+#[test]
+fn a_read_only_device_still_writes_checkpoints_now_and_then() {
+    let (mut c, vault) = shared(2);
+    let before = c.devices[1].sent.seq;
+    for n in 0..3 {
+        c.devices[0]
+            .save_item(
+                vault,
+                ITEM,
+                &Cluster::item_json(ITEM, &format!("v{n}"), &[]),
+                c.clocks[0],
+            )
+            .unwrap();
+        c.sync(0).unwrap();
+        c.sync(1).unwrap();
+    }
+    assert_eq!(
+        c.devices[1].sent.seq, before,
+        "no checkpoint within the hour"
+    );
+    c.clocks[1] += CHECKPOINT_EVERY_MS;
+    c.sync(1).unwrap();
+    assert_eq!(c.devices[1].sent.seq, before + 1);
 }
