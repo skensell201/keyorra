@@ -206,6 +206,10 @@ impl<T: Transport> Transport for Faulty<T> {
         self.inner.end_round()
     }
 
+    fn inventory(&self) -> Result<Vec<crate::transport::InventoryEntry>> {
+        self.inner.inventory()
+    }
+
     fn append(&self, segment: &[u8]) -> Result<AppendOutcome> {
         let f = self.faults();
         if self.roll(f.fail_before_append) {
@@ -319,6 +323,10 @@ impl<T: Transport> Transport for Rollback<T> {
     fn end_round(&self) {
         self.inner.end_round()
     }
+
+    fn inventory(&self) -> Result<Vec<crate::transport::InventoryEntry>> {
+        self.inner.inventory()
+    }
 }
 
 /// A store that shows one stream from another store: one side of a fork (two histories of
@@ -415,6 +423,10 @@ impl<T: Transport, U: Transport> Transport for Overlay<T, U> {
 
     fn end_round(&self) {
         self.base.end_round()
+    }
+
+    fn inventory(&self) -> Result<Vec<crate::transport::InventoryEntry>> {
+        self.base.inventory()
     }
 }
 

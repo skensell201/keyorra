@@ -19,6 +19,16 @@ pub enum Fetched<T> {
     Missing,
 }
 
+/// One file as the store holds it, for "what the folder sees" (spec §9.2).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct InventoryEntry {
+    /// Relative to the account's place (`streams/<device>/<seq>.seg`, …).
+    pub path: String,
+    pub size: u64,
+    /// The name is one Keyorra reads; `false`: an unknown file, ignored.
+    pub counted: bool,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AppendOutcome {
     Appended,
@@ -81,6 +91,10 @@ pub trait Transport {
     fn begin_round(&self) {}
     /// The round is over: calls until the next round have no round budget (review A2 I1).
     fn end_round(&self) {}
+    /// Every file of the account as stored (names and sizes only, nothing is read).
+    fn inventory(&self) -> Result<Vec<InventoryEntry>> {
+        Ok(Vec::new())
+    }
 }
 
 /// A boxed transport (the app picks the transport at run time).
@@ -141,6 +155,9 @@ impl<T: Transport + ?Sized> Transport for Box<T> {
     }
     fn end_round(&self) {
         (**self).end_round()
+    }
+    fn inventory(&self) -> Result<Vec<InventoryEntry>> {
+        (**self).inventory()
     }
 }
 
@@ -312,6 +329,42 @@ impl Transport for MemoryTransport {
             .chunks
             .get(name)
             .map_or(Fetched::Missing, |b| Fetched::Ready(b.clone())))
+    }
+
+    fn inventory(&self) -> Result<Vec<InventoryEntry>> {
+        let entry = |path: String, size: usize| InventoryEntry {
+            path,
+            size: size as u64,
+            counted: true,
+        };
+        let hex = |d: &DeviceId| data_encoding::HEXLOWER.encode(d);
+        let mut out = Vec::new();
+        for (device, segs) in self.streams.lock().unwrap().iter() {
+            for (seq, b) in segs {
+                out.push(entry(
+                    format!("streams/{}/{seq:016x}.seg", hex(device)),
+                    b.len(),
+                ));
+            }
+        }
+        let files = self.files.lock().unwrap();
+        for (name, b) in &files.headers {
+            out.push(entry(format!("account/{name}"), b.len()));
+        }
+        if let Some(b) = &files.root_head {
+            out.push(entry("account/root.head".into(), b.len()));
+        }
+        for (name, b) in &files.snapshots {
+            let author = SnapshotHeader::parse(b)
+                .map(|h| hex(&h.author))
+                .unwrap_or_default();
+            out.push(entry(format!("snapshots/{author}/{name}.snap"), b.len()));
+        }
+        for (name, b) in &files.chunks {
+            out.push(entry(format!("chunks/{}/{name}", &name[..2]), b.len()));
+        }
+        out.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(out)
     }
 
     fn append(&self, segment: &[u8]) -> Result<AppendOutcome> {

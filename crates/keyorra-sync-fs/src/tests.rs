@@ -571,3 +571,38 @@ fn review_a2_i6_chunk_state_does_not_read() {
     assert_eq!(*a.1.lock().unwrap(), 0, "nothing read");
     assert!(a.0.requested.lock().unwrap().contains(&away_path));
 }
+
+/// Plan A3: "what the folder sees": every file with its size, unknown ones marked, nothing
+/// read, symlinks and temp files left out.
+#[test]
+fn the_inventory_lists_files_and_marks_strangers() {
+    let dir = tempfile::tempdir().unwrap();
+    let t = folder(dir.path());
+    let segs = some_segments();
+    t.append(&segs[0]).unwrap();
+    let chunk = t.put_chunk(b"KYC1 abc").unwrap();
+    std::fs::write(
+        dir.path()
+            .join("streams")
+            .join("01".repeat(16))
+            .join("x (1).seg"),
+        b"x",
+    )
+    .unwrap();
+    let inv = t.inventory().unwrap();
+    let find = |p: &str| inv.iter().find(|e| e.path == p).cloned();
+    let seg = find(&format!("streams/{}/0000000000000001.seg", "01".repeat(16))).unwrap();
+    assert!(seg.counted);
+    assert_eq!(seg.size, segs[0].len() as u64);
+    assert!(
+        find(&format!("chunks/{}/{chunk}", &chunk[..2]))
+            .unwrap()
+            .counted
+    );
+    assert!(
+        !find(&format!("streams/{}/x (1).seg", "01".repeat(16)))
+            .unwrap()
+            .counted
+    );
+    assert!(find("README-KEYORRA.txt").is_some());
+}

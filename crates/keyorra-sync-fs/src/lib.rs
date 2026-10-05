@@ -22,7 +22,7 @@ use keyorra_sync::chunk::chunk_name;
 use keyorra_sync::header::MAX_HEADER_FILE_LEN;
 use keyorra_sync::segment::{max_segment_len, SegmentHeader, HEADER_LEN};
 use keyorra_sync::snapshot::{max_snapshot_len, snapshot_name, SnapshotHeader};
-use keyorra_sync::transport::{AppendOutcome, Fetched, Transport};
+use keyorra_sync::transport::{AppendOutcome, Fetched, InventoryEntry, Transport};
 use keyorra_sync::{DeviceId, Error, Result};
 
 pub use avail::{Access, Availability, FileState, LocalDisk};
@@ -331,6 +331,45 @@ impl FolderTransport {
         Ok(None)
     }
 
+    /// Files under `rel` (at most three levels: `streams/<device>/<file>`), without
+    /// following symlinks or reading anything; the temp directory is left out.
+    fn inventory_dir(&self, rel: &Path, depth: usize, out: &mut Vec<InventoryEntry>) -> Result<()> {
+        self.check_time()?;
+        let dir = self.root.join(rel);
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(e) => e,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(io("listing the folder", e)),
+        };
+        for entry in entries.flatten() {
+            if out.len() >= self.max_entries {
+                return Err(Error::Transport("the folder holds too many files".into()));
+            }
+            let Ok(kind) = entry.file_type() else {
+                continue;
+            };
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if kind.is_symlink() || (depth == 0 && name == NOSYNC_TMP) {
+                continue;
+            }
+            let path = rel.join(&name);
+            if kind.is_dir() {
+                if depth < 2 {
+                    self.inventory_dir(&path, depth + 1, out)?;
+                }
+                continue;
+            }
+            let size = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            let text = path.to_string_lossy().replace('\\', "/");
+            out.push(InventoryEntry {
+                counted: counted(&text),
+                path: text,
+                size,
+            });
+        }
+        Ok(())
+    }
+
     fn chunk_path(&self, name: &str) -> PathBuf {
         self.root.join(CHUNKS).join(&name[..2]).join(name)
     }
@@ -526,10 +565,30 @@ impl Transport for FolderTransport {
         self.fetch(&self.chunk_path(name), max_chunk_len())
     }
 
+    fn inventory(&self) -> Result<Vec<InventoryEntry>> {
+        let mut out = Vec::new();
+        self.inventory_dir(Path::new(""), 0, &mut out)?;
+        out.sort_by(|a, b| a.path.cmp(&b.path));
+        Ok(out)
+    }
+
     fn chunk_state(&self, name: &str) -> Result<Fetched<()>> {
         if !is_chunk_name(name) {
             return Ok(Fetched::Missing);
         }
         self.state(&self.chunk_path(name))
+    }
+}
+
+/// Whether a path (relative to the account folder) is a name Keyorra reads.
+fn counted(path: &str) -> bool {
+    let parts: Vec<&str> = path.split('/').collect();
+    match parts.as_slice() {
+        [README] => true,
+        [ACCOUNT, f] => *f == ROOT_HEAD || is_header_file(f),
+        [STREAMS, d, f] => parse_device_dir(d).is_some() && parse_segment_file(f).is_some(),
+        [SNAPSHOTS, d, f] => parse_device_dir(d).is_some() && parse_snapshot_file(f).is_some(),
+        [CHUNKS, p, f] => is_chunk_name(f) && f.starts_with(p) && p.len() == 2,
+        _ => false,
     }
 }
