@@ -1,0 +1,22 @@
+[package]
+name = "keyorra-sync"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+publish = false
+description = "Keyorra sync: wire formats and (later) the sync engine. Pure: no I/O, no OS APIs."
+
+[dependencies]
+data-encoding = "2"
+ed25519-dalek = { version = "2", features = ["zeroize"] }
+hkdf = "0.12"
+keyorra-core = { path = "../keyorra-core" }
+rand = "0.8"
+sha2 = "0.10"
+thiserror = "2"
+uuid = "1"
+zeroize = "1"
+
+[dev-dependencies]
+keyorra-core = { path = "../keyorra-core", features = ["test-utils"] }
+serde_json = "1"
