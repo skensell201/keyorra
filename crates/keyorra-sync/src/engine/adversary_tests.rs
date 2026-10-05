@@ -792,8 +792,12 @@ fn check(seed: u64, ops: &[Op]) {
                 );
             }
         }
-        if w.swapped {
-            assert!(!w.thief_approved, "a swapped join was approved");
+        // A swapped join is approved only with the key the thief's device shows (the
+        // genuine joiner deletes the impostor's segment from its own stream, review F1).
+        if w.thief_approved {
+            if let Some(k) = trust.key(&THIEF) {
+                assert_eq!(k, signer(7).verifying_key(), "approved another key");
+            }
         }
         assert_nothing_unaccounted(d.fold(), &view);
         assert_no_lost_edit(d.fold(), &view, trust, &all);

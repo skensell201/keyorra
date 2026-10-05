@@ -434,7 +434,7 @@ pub struct Engine<R> {
     outbox_unsaved: bool,
     bootstrap_tried: bool,
     /// The own head and wall time last written to the root head file (main device).
-    root_head_written: (u64, u64, usize),
+    root_head_written: (u64, u64, usize, u64),
     /// The main device's time in its head file, as last seen advancing (other devices).
     root_time: Option<RootTime>,
     /// The main device's trust entries applied so far, in its stream's order (for snapshots).
@@ -552,7 +552,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             own_segments: BTreeMap::new(),
             outbox_unsaved: false,
             bootstrap_tried: false,
-            root_head_written: (0, 0, 0),
+            root_head_written: (0, 0, 0, 0),
             root_time: None,
             root_log: Vec::new(),
             #[cfg(test)]

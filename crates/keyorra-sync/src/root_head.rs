@@ -4,7 +4,7 @@
 //!
 //! ```text
 //! file = canonical({ "account_id": bytes16, "seq": uint, "hash": bytes32, "at_ms": uint,
-//!                    "pending": [[seq, entry], …], "sig": bytes64 })
+//!                    "devices": uint, "pending": [[seq, entry], …], "sig": bytes64 })
 //! sig  = Ed25519(root_sk, "keyorra/sync/v1/root-head\0" ‖ canonical(file without "sig"))
 //! ```
 //!
@@ -13,7 +13,10 @@
 //! noticed (review I1). `pending` lists the main device's removals (`revoke` entries) that
 //! are written but not yet confirmed in its stream, with their positions: a squatter who
 //! keeps the main device's next position occupied cannot hold a removal back (review F1).
-//! Readers apply them at once and reconcile when the stream delivers them.
+//! Readers apply them at once and reconcile when the stream delivers them. `devices` counts
+//! the approved devices other than the main one: a device joining with the Emergency Kit
+//! alone is refused while there are any, and must use the setup code of one of them
+//! (review F4).
 //!
 //! A reader only moves its advertised head forward, so an old file served later changes
 //! nothing.
@@ -35,6 +38,8 @@ const MAX_LEN: usize = 512;
 pub struct RootHead {
     pub head: Head,
     pub at_ms: u64,
+    /// Approved devices other than the main one, not removed.
+    pub devices: u64,
     pub pending: Vec<(u64, Entry)>,
 }
 
@@ -44,6 +49,7 @@ fn body(account_id: &AccountId, r: &RootHead) -> Value {
         ("seq", Value::Uint(r.head.seq)),
         ("hash", Value::bytes(r.head.hash)),
         ("at_ms", Value::Uint(r.at_ms)),
+        ("devices", Value::Uint(r.devices)),
         (
             "pending",
             Value::Array(
@@ -78,7 +84,15 @@ pub fn open_root_head(
     bytes: &[u8],
 ) -> Result<RootHead> {
     let value = cbor::decode_limited(bytes, MAX_LEN)?;
-    let f = value.fields(&["account_id", "seq", "hash", "at_ms", "pending", "sig"])?;
+    let f = value.fields(&[
+        "account_id",
+        "seq",
+        "hash",
+        "at_ms",
+        "devices",
+        "pending",
+        "sig",
+    ])?;
     let file_account: AccountId = f.get("account_id")?.as_array_of()?;
     if file_account != *account_id {
         return Err(Error::Refused("root head of another account".into()));
@@ -100,6 +114,7 @@ pub fn open_root_head(
             hash: f.get("hash")?.as_array_of()?,
         },
         at_ms: f.get("at_ms")?.as_uint()?,
+        devices: f.get("devices")?.as_uint()?,
         pending,
     };
     let sig: [u8; 64] = f.get("sig")?.as_array_of()?;
@@ -124,6 +139,7 @@ mod tests {
                 hash: [7; 32],
             },
             at_ms: 77,
+            devices: 2,
             pending: vec![(
                 43,
                 Entry::Revoke {

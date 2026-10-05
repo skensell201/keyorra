@@ -1243,7 +1243,9 @@ fn review_f3_a_frozen_partitioned_view_is_noticed_even_with_no_other_movement() 
         c.sync(0).unwrap();
         let id = Uuid::from_bytes([0x70 + day; 16]);
         let json = Cluster::item_json(id, "mine", &[]);
-        c.devices[1].save_item(vault, id, &json, c.clocks[1]).unwrap();
+        c.devices[1]
+            .save_item(vault, id, &json, c.clocks[1])
+            .unwrap();
         c.devices[1].sync(&frozen, c.clocks[1]).unwrap();
         warned |= c.devices[1]
             .take_events()

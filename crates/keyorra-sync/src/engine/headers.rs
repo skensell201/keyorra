@@ -233,18 +233,30 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             .filter(|(seq, e)| *seq > self.sent.seq && matches!(e, Entry::Revoke { .. }))
             .cloned()
             .collect();
-        let (seq, at, count) = self.root_head_written;
-        if seq == self.sent.seq && count == pending.len() && wall_ms < at + ROOT_HEARTBEAT_MS {
-            return;
-        }
+
+        let devices = self
+            .trust
+            .devices()
+            .iter()
+            .filter(|(d, info)| **d != self.device && info.cut.is_none())
+            .count() as u64;
         let file = RootHead {
             head: self.sent,
             at_ms: wall_ms,
+            devices,
             pending,
         };
+        let (seq, at, count, approved) = self.root_head_written;
+        if seq == self.sent.seq
+            && count == file.pending.len()
+            && approved == devices
+            && wall_ms < at + ROOT_HEARTBEAT_MS
+        {
+            return;
+        }
         let bytes = seal_root_head(&self.account_id, &file, &self.signer);
         if transport.put_root_head_file(&bytes).is_ok() {
-            self.root_head_written = (self.sent.seq, wall_ms, file.pending.len());
+            self.root_head_written = (self.sent.seq, wall_ms, file.pending.len(), devices);
         }
     }
 

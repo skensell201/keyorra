@@ -13,6 +13,7 @@ use keyorra_core::crypto::Key;
 
 use crate::error::{Error, Result};
 use crate::header::{Header, HeaderFile};
+use crate::root_head::open_root_head;
 use crate::secret_key::SecretKey;
 use crate::transport::Fetched;
 use crate::DeviceId;
@@ -58,14 +59,23 @@ pub struct Joined {
     pub file: HeaderFile,
     pub account_key: Key,
     pub roots_disagree: bool,
+    /// Joined with the Emergency Kit alone: the UI must ask the user to compare the main
+    /// device's key code with an existing device whenever one exists (review F4).
+    pub unpinned: bool,
 }
 
 /// Tries the candidates with `unlock`; the first that opens wins. With a `pin` (from the
 /// setup code of an existing device) only headers naming that main device are considered,
 /// the highest such epoch first. Without one (joining with the Emergency Kit alone) the
 /// newest header is trusted, whichever main device it names.
+///
+/// `root_head_file` is the store's root head file, if any. Without a pin it is checked with
+/// the chosen header's main device key: if that main device lists approved devices, joining
+/// without a setup code is refused (use the setup code of one of them); if it does not
+/// verify, the roots disagree (review F4).
 pub fn unlock_join_with(
     files: &[(String, Fetched<Vec<u8>>)],
+    root_head_file: Option<&[u8]>,
     pin: Option<&RootPin>,
     mut unlock: impl FnMut(&Header) -> Result<Key>,
 ) -> Result<Joined> {
@@ -97,14 +107,32 @@ pub fn unlock_join_with(
     }
     for candidate in candidates {
         if let Ok(account_key) = unlock(&candidate.header) {
-            let roots_disagree = all.iter().any(|h| {
+            let mut roots_disagree = all.iter().any(|h| {
                 h.header.root_device != candidate.header.root_device
                     || h.header.root_key != candidate.header.root_key
             });
+            if pin.is_none() {
+                if let Some(bytes) = root_head_file {
+                    let key = VerifyingKey::from_bytes(&candidate.header.root_key)
+                        .map_err(|_| Error::Refused("bad main device key".into()))?;
+                    match open_root_head(&candidate.header.account_id, &key, bytes) {
+                        Ok(r) if r.devices > 0 => {
+                            return Err(Error::Refused(
+                                "this account has other devices: join with the setup code \
+                                 shown on one of them"
+                                    .into(),
+                            ))
+                        }
+                        Ok(_) => {}
+                        Err(_) => roots_disagree = true,
+                    }
+                }
+            }
             return Ok(Joined {
                 file: candidate,
                 account_key,
                 roots_disagree,
+                unpinned: pin.is_none(),
             });
         }
     }
@@ -114,11 +142,12 @@ pub fn unlock_join_with(
 /// Joins with the master password and the Secret Key.
 pub fn unlock_join(
     files: &[(String, Fetched<Vec<u8>>)],
+    root_head_file: Option<&[u8]>,
     pin: Option<&RootPin>,
     password: &str,
     secret_key: &SecretKey,
 ) -> Result<Joined> {
-    unlock_join_with(files, pin, |h| {
+    unlock_join_with(files, root_head_file, pin, |h| {
         h.unlock(password, secret_key).map(|(k, _)| k)
     })
 }
@@ -175,7 +204,7 @@ mod tests {
     fn no_fallback_to_an_older_epoch() {
         let files = vec![file(1, 1, 10), file(2, 1, 20)];
         // Only the epoch-1 header would open (the old password): joining must fail.
-        let result = unlock_join_with(&files, None, |h| {
+        let result = unlock_join_with(&files, None, None, |h| {
             if h.salt[0] == 10 {
                 Ok(Key::from_bytes([1; 32]))
             } else {
@@ -183,7 +212,7 @@ mod tests {
             }
         });
         assert!(matches!(result, Err(Error::WrongPassword)));
-        let chosen = unlock_join_with(&files, None, |h| {
+        let chosen = unlock_join_with(&files, None, None, |h| {
             if h.salt[0] == 20 {
                 Ok(Key::from_bytes([2; 32]))
             } else {
@@ -193,7 +222,7 @@ mod tests {
         .unwrap();
         assert_eq!(chosen.file.header.epoch, 2);
         assert!(matches!(
-            unlock_join_with(&[], None, |_| unreachable!()),
+            unlock_join_with(&[], None, None, |_| unreachable!()),
             Err(Error::NotFound(_))
         ));
     }
@@ -201,7 +230,7 @@ mod tests {
     #[test]
     fn concurrent_epochs_try_the_next_author() {
         let files = vec![file(2, 1, 21), file(2, 2, 22)];
-        let chosen = unlock_join_with(&files, None, |h| {
+        let chosen = unlock_join_with(&files, None, None, |h| {
             if h.salt[0] == 22 {
                 Ok(Key::from_bytes([2; 32]))
             } else {
@@ -234,16 +263,70 @@ mod tests {
             ),
         };
         let joined =
-            unlock_join_with(&files, Some(&pin), |_| Ok(Key::from_bytes([1; 32]))).unwrap();
+            unlock_join_with(&files, None, Some(&pin), |_| Ok(Key::from_bytes([1; 32]))).unwrap();
         assert_eq!(joined.file.header.epoch, 1);
         assert!(joined.roots_disagree);
         // Without a pin (Emergency Kit only) the newest header wins, with a warning.
-        let joined = unlock_join_with(&files, None, |_| Ok(Key::from_bytes([1; 32]))).unwrap();
+        let joined =
+            unlock_join_with(&files, None, None, |_| Ok(Key::from_bytes([1; 32]))).unwrap();
         assert_eq!(joined.file.header.root_device, [9; 16]);
         assert!(joined.roots_disagree);
         let agreeing = vec![file_with_root(1, 1, real), file_with_root(2, 1, real)];
-        let joined = unlock_join_with(&agreeing, None, |_| Ok(Key::from_bytes([1; 32]))).unwrap();
+        let joined =
+            unlock_join_with(&agreeing, None, None, |_| Ok(Key::from_bytes([1; 32]))).unwrap();
         assert!(!joined.roots_disagree);
+    }
+
+    #[test]
+    fn review_f4_an_unpinned_join_is_flagged_and_refused_while_other_devices_exist() {
+        let root = SigningKey::from_bytes(&[1; 32]);
+        let real = root.verifying_key().to_bytes();
+        let files = vec![file_with_root(1, 1, real)];
+        let head = |devices| {
+            crate::root_head::seal_root_head(
+                &sample_header().account_id,
+                &crate::root_head::RootHead {
+                    head: crate::entry::Head {
+                        seq: 3,
+                        hash: [0; 32],
+                    },
+                    at_ms: 1,
+                    devices,
+                    pending: Vec::new(),
+                },
+                &root,
+            )
+        };
+        let open = |_: &Header| Ok(Key::from_bytes([1; 32]));
+        let joined = unlock_join_with(&files, Some(&head(0)), None, open).unwrap();
+        assert!(joined.unpinned && !joined.roots_disagree);
+        assert!(matches!(
+            unlock_join_with(&files, Some(&head(2)), None, open),
+            Err(Error::Refused(_))
+        ));
+        // A head file the header's main device did not sign: the roots disagree.
+        let other = crate::root_head::seal_root_head(
+            &sample_header().account_id,
+            &crate::root_head::RootHead {
+                head: crate::entry::Head {
+                    seq: 3,
+                    hash: [0; 32],
+                },
+                at_ms: 1,
+                devices: 0,
+                pending: Vec::new(),
+            },
+            &SigningKey::from_bytes(&[9; 32]),
+        );
+        let joined = unlock_join_with(&files, Some(&other), None, open).unwrap();
+        assert!(joined.roots_disagree);
+        // With a pin, other devices are fine.
+        let pin = RootPin {
+            device: [1; 16],
+            key_fingerprint: crate::trust::key_fingerprint(&root.verifying_key()),
+        };
+        let joined = unlock_join_with(&files, Some(&head(2)), Some(&pin), open).unwrap();
+        assert!(!joined.unpinned);
     }
 
     #[test]
@@ -251,6 +334,6 @@ mod tests {
         // `sample_header` uses test-only Argon2 parameters, below the floor for synced headers.
         let files = vec![file(1, 1, 10)];
         let sk = SecretKey::from_bytes([1; 16]);
-        assert!(unlock_join(&files, None, "pw", &sk).is_err());
+        assert!(unlock_join(&files, None, None, "pw", &sk).is_err());
     }
 }
