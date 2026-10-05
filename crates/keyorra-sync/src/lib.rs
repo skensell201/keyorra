@@ -11,6 +11,7 @@ pub mod keys;
 pub mod labels;
 pub mod pad;
 pub mod secret_key;
+pub mod segment;
 
 pub use error::{Error, Result};
 
