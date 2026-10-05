@@ -1,3 +1,4 @@
+import { ConfirmDialog } from "./ConfirmDialog";
 import { Keyhole } from "./Keyhole";
 import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
 import { api, errorMessage, isCmdError, type TouchIdState } from "../api";
@@ -61,6 +62,8 @@ export function Unlock({ onUnlocked, onStartOver }: Props) {
   }, [canTouch, touchUnlock]);
   const [unreadable, setUnreadable] = useState(false);
   const [confirmStartOver, setConfirmStartOver] = useState(false);
+  /** Where the unreadable file went, shown before setup starts. */
+  const [movedTo, setMovedTo] = useState<string | null>(null);
 
   useEffect(() => {
     if (wait <= 0) return;
@@ -98,14 +101,33 @@ export function Unlock({ onUnlocked, onStartOver }: Props) {
   }
 
   async function startOver() {
+    setConfirmStartOver(false);
     setBusy(true);
+    setError(null);
     try {
-      await api.startOver();
-      onStartOver();
+      setMovedTo(await api.startOver());
     } catch (err) {
       setError(errorMessage(err));
+    } finally {
       setBusy(false);
     }
+  }
+
+  if (movedTo !== null) {
+    return (
+      <div className="center">
+        <div className="card auth" role="group" aria-labelledby="moved-title">
+          <h1 id="moved-title">The old file was moved aside</h1>
+          <p className="muted">It is kept here, untouched:</p>
+          <p>
+            <code className="path">{movedTo}</code>
+          </p>
+          <button className="primary" autoFocus onClick={onStartOver}>
+            Set up a new vault
+          </button>
+        </div>
+      </div>
+    );
   }
 
   if (unreadable) {
@@ -122,14 +144,21 @@ export function Unlock({ onUnlocked, onStartOver }: Props) {
               {error}
             </p>
           )}
-          {confirmStartOver ? (
-            <button className="danger" onClick={startOver} disabled={busy}>
-              Move it aside and start over
-            </button>
-          ) : (
-            <button className="primary" onClick={() => setConfirmStartOver(true)}>
-              Start over…
-            </button>
+          <button className="primary" onClick={() => setConfirmStartOver(true)} disabled={busy}>
+            {busy ? "Moving…" : "Start over…"}
+          </button>
+          {confirmStartOver && (
+            <ConfirmDialog
+              title="Move the file aside and start over?"
+              confirmLabel="Move aside and start over"
+              cancelLabel="Back"
+              danger
+              focusCancel
+              onConfirm={startOver}
+              onCancel={() => setConfirmStartOver(false)}
+            >
+              Keepsake renames the unreadable file and sets up a new, empty vault. Nothing is deleted.
+            </ConfirmDialog>
           )}
         </div>
       </div>

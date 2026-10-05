@@ -241,6 +241,12 @@ pub fn watchtower(state: State<'_, AppState>) -> CmdResult<Report> {
     lock_session(&state).watchtower(now())
 }
 
+/// The sidebar badge: cached in the session until the next write, so it is cheap to ask.
+#[tauri::command(async)]
+pub fn watchtower_count(state: State<'_, AppState>) -> CmdResult<usize> {
+    lock_session(&state).watchtower_count()
+}
+
 /// Asks Have I Been Pwned about every unchecked password, without holding the session: only
 /// the first five hex characters of each SHA-1 leave the Mac.
 #[tauri::command(async)]
@@ -249,7 +255,7 @@ pub fn check_breaches(state: State<'_, AppState>) -> CmdResult<Report> {
     let hibp = Hibp::default();
     let mut results = Vec::with_capacity(hashes.len());
     for hash in hashes {
-        match hibp.breach_count_for_hash(&hash) {
+        match hibp.breach_count_for_hash(&hash.hex()) {
             Ok(count) => results.push((hash, count)),
             Err(e) => {
                 // Keep what we learned; the next check continues from there.

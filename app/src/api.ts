@@ -131,12 +131,6 @@ export interface WatchtowerReport {
   uncheckedPasswords: number;
 }
 
-/** Items with at least one Watchtower finding. */
-export function watchtowerCount(report: WatchtowerReport): number {
-  const lists = [report.breached, report.reused, report.weak, report.missingTwoFactor];
-  return new Set(lists.flatMap((list) => list.map((f) => f.item.id))).size;
-}
-
 export interface ImportPreview {
   vaults: { name: string; items: number }[];
   skipped: { title: string; reason: string }[];
@@ -181,6 +175,8 @@ export const api = {
   /** Moves an unreadable database aside; returns where it went. */
   startOver: () => invoke<string>("start_over"),
   watchtower: () => invoke<WatchtowerReport>("watchtower"),
+  /** Items Watchtower flags; cheap (cached until the next change). */
+  watchtowerCount: () => invoke<number>("watchtower_count"),
   checkBreaches: () => invoke<WatchtowerReport>("check_breaches"),
   items: (filter: ItemFilter) => invoke<ItemSummary[]>("items", { filter }),
   item: (id: string) => invoke<Item>("item", { id }),

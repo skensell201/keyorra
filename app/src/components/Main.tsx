@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import {
   api,
   errorMessage,
-  watchtowerCount,
   type Item,
   type ItemKind,
   type ItemSummary,
@@ -34,6 +33,7 @@ export function Main({ onLock }: { onLock: () => void }) {
   const [error, setError] = useState<string | null>(null);
   const [pairing, setPairing] = useState<PairingRequest | null>(null);
   const [report, setReport] = useState<WatchtowerReport | null>(null);
+  const [flagged, setFlagged] = useState<number | undefined>(undefined);
   const [deletingVault, setDeletingVault] = useState<Vault | null>(null);
   /** Runs once the user agreed to drop unsaved edits. */
   const [pendingLeave, setPendingLeave] = useState<(() => void) | null>(null);
@@ -91,17 +91,27 @@ export function Main({ onLock }: { onLock: () => void }) {
         if (seq === itemsSeq.current) setError(errorMessage(e));
       });
   }, [query, selection]);
-  const loadWatchtower = useCallback(
+  const watchtowerOpen = selection.kind === "watchtower";
+  const reportSeq = useRef(0);
+  /** The full report scores every password, so it is only loaded while Watchtower is open. */
+  const loadWatchtower = useCallback(() => {
+    const seq = ++reportSeq.current;
+    return api
+      .watchtower()
+      .then((r) => seq === reportSeq.current && setReport(r))
+      .catch(() => seq === reportSeq.current && setReport(null));
+  }, []);
+  const loadCount = useCallback(
     () =>
       api
-        .watchtower()
-        .then(setReport)
-        .catch(() => setReport(null)),
+        .watchtowerCount()
+        .then(setFlagged)
+        .catch(() => setFlagged(undefined)),
     [],
   );
   const refresh = useCallback(
-    () => Promise.all([loadVaults(), loadItems(), loadWatchtower()]),
-    [loadVaults, loadItems, loadWatchtower],
+    () => Promise.all([loadVaults(), loadItems(), loadCount(), watchtowerOpen ? loadWatchtower() : undefined]),
+    [loadVaults, loadItems, loadCount, loadWatchtower, watchtowerOpen],
   );
 
   useEffect(() => {
@@ -119,8 +129,16 @@ export function Main({ onLock }: { onLock: () => void }) {
   }, [refresh]);
   useEffect(() => {
     loadVaults();
-    loadWatchtower();
-  }, [loadVaults, loadWatchtower]);
+    loadCount();
+  }, [loadVaults, loadCount]);
+  useEffect(() => {
+    if (watchtowerOpen) {
+      loadWatchtower();
+    } else {
+      reportSeq.current++;
+      setReport(null);
+    }
+  }, [watchtowerOpen, loadWatchtower]);
   useEffect(() => {
     loadItems();
   }, [loadItems]);
@@ -185,7 +203,7 @@ export function Main({ onLock }: { onLock: () => void }) {
       <Sidebar
         vaults={vaults}
         selection={selection}
-        watchtowerCount={report ? watchtowerCount(report) : undefined}
+        watchtowerCount={flagged}
         onSelect={(s) =>
           leaveEditor(() => {
             setSelection(s);
@@ -194,7 +212,7 @@ export function Main({ onLock }: { onLock: () => void }) {
         }
         onNewVault={newVault}
         onRenameVault={renameVault}
-        onDeleteVault={askDeleteVault}
+        onDeleteVault={(v) => leaveEditor(() => askDeleteVault(v))}
         onImport={() => setImporting(true)}
         onLock={() => leaveEditor(onLock)}
         onSettings={() => setShowSettings(true)}
@@ -204,7 +222,10 @@ export function Main({ onLock }: { onLock: () => void }) {
           report={report}
           selectedId={pane.mode === "view" ? pane.id : null}
           onOpen={(id) => leaveEditor(() => setPane({ mode: "view", id }))}
-          onReport={setReport}
+          onReport={(r) => {
+            setReport(r);
+            void loadCount();
+          }}
         />
       ) : (
         <ItemList

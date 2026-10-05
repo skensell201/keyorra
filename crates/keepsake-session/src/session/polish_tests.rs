@@ -92,6 +92,66 @@ fn start_over_moves_the_file_aside_and_allows_setup() {
 }
 
 #[test]
+fn start_over_never_overwrites_an_earlier_aside_file() {
+    const JUNK: &[u8] = b"definitely not sqlite, just some text here....";
+    let (dir, mut s, path) = session_with_file(JUNK);
+    let taken = dir.path().join("keepsake.db.unreadable-5000");
+    std::fs::write(&taken, b"first").unwrap();
+    // A leftover sibling of the next name counts as taken too.
+    std::fs::write(
+        dir.path().join("keepsake.db.unreadable-5000-2-wal"),
+        b"old wal",
+    )
+    .unwrap();
+
+    let aside = s.start_over(5_000).unwrap();
+    assert_eq!(aside, dir.path().join("keepsake.db.unreadable-5000-3"));
+    assert_eq!(std::fs::read(&taken).unwrap(), b"first");
+    assert_eq!(std::fs::read(&aside).unwrap(), JUNK);
+    assert!(!path.exists());
+}
+
+#[test]
+fn move_aside_takes_the_companion_files_along() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("keepsake.db");
+    std::fs::write(&path, b"main").unwrap();
+    std::fs::write(sibling(&path, "-wal"), b"wal").unwrap();
+    let aside = sibling(&path, ".unreadable-1");
+    move_aside(&path, &aside, |a, b| std::fs::rename(a, b)).unwrap();
+    assert_eq!(std::fs::read(&aside).unwrap(), b"main");
+    assert_eq!(std::fs::read(sibling(&aside, "-wal")).unwrap(), b"wal");
+    assert!(!path.exists() && !sibling(&path, "-wal").exists());
+}
+
+#[test]
+fn a_failed_sibling_move_puts_everything_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("keepsake.db");
+    std::fs::write(&path, b"main").unwrap();
+    std::fs::write(sibling(&path, "-journal"), b"journal").unwrap();
+    std::fs::write(sibling(&path, "-wal"), b"wal").unwrap();
+    let aside = sibling(&path, ".unreadable-1");
+
+    let err = move_aside(&path, &aside, |from, to| {
+        if from.to_string_lossy().ends_with("-wal") {
+            Err(std::io::Error::other("disk on fire"))
+        } else {
+            std::fs::rename(from, to)
+        }
+    })
+    .unwrap_err();
+    assert!(err.to_string().contains("disk on fire"), "{err}");
+    assert_eq!(std::fs::read(&path).unwrap(), b"main");
+    assert_eq!(
+        std::fs::read(sibling(&path, "-journal")).unwrap(),
+        b"journal"
+    );
+    assert_eq!(std::fs::read(sibling(&path, "-wal")).unwrap(), b"wal");
+    assert!(!aside.exists() && !sibling(&aside, "-journal").exists());
+}
+
+#[test]
 fn start_over_never_moves_a_working_vault() {
     let (dir, mut s) = unlocked_session();
     assert_eq!(

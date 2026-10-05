@@ -4,13 +4,26 @@ interface Props {
   title: string;
   children: ReactNode;
   confirmLabel: string;
+  /** Defaults to "Cancel". */
+  cancelLabel?: string;
   danger?: boolean;
+  /** Focus the safe choice, so a repeated click or Enter can't confirm by accident. */
+  focusCancel?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }
 
 /** A small yes/no dialog; Escape cancels. */
-export function ConfirmDialog({ title, children, confirmLabel, danger, onConfirm, onCancel }: Props) {
+export function ConfirmDialog({
+  title,
+  children,
+  confirmLabel,
+  cancelLabel = "Cancel",
+  danger,
+  focusCancel,
+  onConfirm,
+  onCancel,
+}: Props) {
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => e.key === "Escape" && onCancel();
     window.addEventListener("keydown", onKey);
@@ -23,8 +36,10 @@ export function ConfirmDialog({ title, children, confirmLabel, danger, onConfirm
         <h2 id="confirm-title">{title}</h2>
         <div className="muted">{children}</div>
         <div className="modal-actions">
-          <button onClick={onCancel}>Cancel</button>
-          <button className={danger ? "danger" : "primary"} autoFocus onClick={onConfirm}>
+          <button autoFocus={focusCancel} onClick={onCancel}>
+            {cancelLabel}
+          </button>
+          <button className={danger ? "danger" : "primary"} autoFocus={!focusCancel} onClick={onConfirm}>
             {confirmLabel}
           </button>
         </div>

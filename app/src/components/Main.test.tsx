@@ -20,6 +20,8 @@ vi.mock("../api", async (importOriginal) => {
       createVault: vi.fn(),
       renameVault: vi.fn(),
       watchtower: vi.fn(),
+      watchtowerCount: vi.fn(),
+      touchIdState: vi.fn(),
       checkBreaches: vi.fn(),
       deleteVault: vi.fn(),
       deletedItems: vi.fn(),
@@ -77,6 +79,8 @@ beforeEach(() => {
   vi.mocked(api.deletedItems).mockReset().mockResolvedValue([{ ...github, id: "d1", title: "Old forum" }]);
   vi.mocked(api.restoreItem).mockReset().mockResolvedValue(undefined);
   vi.mocked(api.settings).mockReset().mockResolvedValue({ autoLockMinutes: 10, clipboardSeconds: 90 });
+  vi.mocked(api.watchtowerCount).mockReset().mockResolvedValue(1);
+  vi.mocked(api.touchIdState).mockReset().mockResolvedValue({ available: false, enabled: false, passwordDue: false });
 });
 
 const lastFilter = () => vi.mocked(api.items).mock.lastCall![0];
@@ -256,11 +260,49 @@ test("watchtower lists problems and opens the item", async () => {
   expect(api.item).toHaveBeenCalledWith("i1");
 });
 
-test("saving an item refreshes the watchtower", async () => {
+test("saving an item refreshes the watchtower count, not the report", async () => {
   const user = userEvent.setup();
   render(<Main onLock={vi.fn()} />);
   await user.click(await screen.findByText("GitHub"));
   await user.click(await screen.findByRole("button", { name: "Edit" }));
   await user.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(api.watchtowerCount).toHaveBeenCalledTimes(2));
+  expect(api.watchtower).not.toHaveBeenCalled();
+});
+
+test("the watchtower report loads only while Watchtower is open", async () => {
+  const user = userEvent.setup();
+  render(<Main onLock={vi.fn()} />);
+  expect(await screen.findByText("GitHub")).toBeInTheDocument();
+  await waitFor(() => expect(changedCallback).not.toBeNull());
+  expect(api.watchtower).not.toHaveBeenCalled();
+
+  await user.click(screen.getByRole("button", { name: /Watchtower/ }));
+  await waitFor(() => expect(api.watchtower).toHaveBeenCalledTimes(1));
+  act(() => changedCallback!());
   await waitFor(() => expect(api.watchtower).toHaveBeenCalledTimes(2));
+
+  await user.click(screen.getByRole("button", { name: "Favorites" }));
+  const counts = vi.mocked(api.watchtowerCount).mock.calls.length;
+  act(() => changedCallback!());
+  await waitFor(() => expect(vi.mocked(api.watchtowerCount).mock.calls.length).toBeGreaterThan(counts));
+  expect(api.watchtower).toHaveBeenCalledTimes(2);
+});
+
+test("deleting a vault asks about unsaved edits first", async () => {
+  const user = userEvent.setup();
+  render(<Main onLock={vi.fn()} />);
+  await user.click(await screen.findByRole("button", { name: /Work/ }));
+  await user.click(await screen.findByText("GitHub"));
+  await user.click(await screen.findByRole("button", { name: "Edit" }));
+  await user.type(screen.getByLabelText("Title"), " work");
+  await user.click(screen.getByRole("button", { name: "Delete Work" }));
+  expect(screen.getByRole("alertdialog", { name: "Discard changes?" })).toBeInTheDocument();
+  expect(screen.queryByRole("alertdialog", { name: 'Delete vault "Work"?' })).not.toBeInTheDocument();
+  await user.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Cancel" }));
+  expect(screen.getByLabelText("Title")).toHaveValue("GitHub work");
+
+  await user.click(screen.getByRole("button", { name: "Delete Work" }));
+  await user.click(screen.getByRole("button", { name: "Discard" }));
+  expect(screen.getByRole("alertdialog", { name: 'Delete vault "Work"?' })).toBeInTheDocument();
 });

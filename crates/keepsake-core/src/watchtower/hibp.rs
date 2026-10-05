@@ -60,11 +60,13 @@ impl Hibp {
     }
 }
 
+/// Raw SHA-1 of a password, for callers that keep hashes in memory.
+pub fn sha1(password: &str) -> [u8; 20] {
+    Sha1::digest(password.as_bytes()).into()
+}
+
 pub fn sha1_hex_upper(password: &str) -> String {
-    Sha1::digest(password.as_bytes())
-        .iter()
-        .map(|b| format!("{b:02X}"))
-        .collect()
+    sha1(password).iter().map(|b| format!("{b:02X}")).collect()
 }
 
 /// Parses `SUFFIX:COUNT` lines; padding lines have count 0.

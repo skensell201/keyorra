@@ -1,4 +1,4 @@
-import { act, render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 import { api } from "../api";
@@ -83,11 +83,24 @@ test("an unreadable database offers to start over", async () => {
   await user.click(screen.getByRole("button", { name: "Unlock" }));
   expect(await screen.findByRole("heading", { name: "This file is not a Keepsake database" })).toBeInTheDocument();
   expect(screen.getByText(/never deleted/)).toBeInTheDocument();
-  await user.click(screen.getByRole("button", { name: "Start over…" }));
+
+  // A double click on "Start over…" must not also confirm: the second step is a dialog.
+  await user.dblClick(screen.getByRole("button", { name: "Start over…" }));
   expect(api.startOver).not.toHaveBeenCalled();
-  await user.click(screen.getByRole("button", { name: "Move it aside and start over" }));
-  expect(api.startOver).toHaveBeenCalled();
-  await waitFor(() => expect(onStartOver).toHaveBeenCalled());
+  const dialog = screen.getByRole("alertdialog", { name: "Move the file aside and start over?" });
+  await user.click(within(dialog).getByRole("button", { name: "Back" }));
+  expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  expect(api.startOver).not.toHaveBeenCalled();
+
+  await user.click(screen.getByRole("button", { name: "Start over…" }));
+  // Enter on the freshly opened dialog goes back, never forward.
+  expect(screen.getByRole("button", { name: "Back" })).toHaveFocus();
+  await user.click(screen.getByRole("button", { name: "Move aside and start over" }));
+  expect(api.startOver).toHaveBeenCalledTimes(1);
+  expect(await screen.findByText("/x/keepsake.db.unreadable-1")).toBeInTheDocument();
+  expect(onStartOver).not.toHaveBeenCalled();
+  await user.click(screen.getByRole("button", { name: "Set up a new vault" }));
+  expect(onStartOver).toHaveBeenCalled();
 });
 
 test("Touch ID unlocks right away when the window is in front", async () => {

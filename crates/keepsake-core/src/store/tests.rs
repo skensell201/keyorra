@@ -957,3 +957,27 @@ fn deleted_vault_does_not_break_unlock() {
     store.unlock(PW).unwrap();
     assert_eq!(store.vaults().unwrap().len(), 1);
 }
+
+#[test]
+fn save_item_refuses_a_deleted_vault() {
+    let (_dir, _path, mut store) = new_store();
+    let keep = store.create_vault("Personal").unwrap();
+    let old = store.create_vault("Old").unwrap();
+    let moved = login(keep.id, "GitHub");
+    store.save_item(&moved).unwrap();
+    store.delete_vault(old.id, 1_000).unwrap();
+
+    // The deleted vault's key stays loaded (for tombstones), but nothing new may land there.
+    assert!(matches!(
+        store.save_item(&login(old.id, "Late")),
+        Err(Error::NotFound(_))
+    ));
+    let mut into_old = moved.clone();
+    into_old.vault_id = old.id;
+    assert!(matches!(
+        store.save_item(&into_old),
+        Err(Error::NotFound(_))
+    ));
+    assert!(store.list_items(Some(old.id)).unwrap().is_empty());
+    assert_eq!(store.get_item(moved.id).unwrap().vault_id, keep.id);
+}

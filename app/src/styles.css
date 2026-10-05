@@ -294,3 +294,5 @@ fieldset.fields .reveal { align-self: flex-start; }
 .quick-search .badge { font-size: 10px; font-weight: 700; color: var(--muted); border: 1px solid var(--line); border-radius: 6px; padding: 1px 5px; }
 .quick-search .error { margin: 0 12px 8px; }
 .quick-search .hints { color: var(--muted); font-size: 11px; padding: 8px 14px; border-top: 1px solid var(--line); }
+
+.auth code.path { display: block; word-break: break-all; font-size: 12px; user-select: text; }

@@ -1,7 +1,7 @@
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
-import { api, watchtowerCount, type ItemSummary, type WatchtowerReport } from "../api";
+import { api, type ItemSummary, type WatchtowerReport } from "../api";
 import { Watchtower } from "./Watchtower";
 
 vi.mock("../api", async (importOriginal) => {
@@ -72,8 +72,4 @@ test("after the check, an empty category says so", () => {
   expect(screen.getByRole("tab", { name: "Compromised (0)" })).toBeInTheDocument();
   expect(screen.getByText("No passwords found in known breaches")).toBeInTheDocument();
   expect(screen.queryByRole("button", { name: "Check for breaches" })).not.toBeInTheDocument();
-});
-
-test("watchtowerCount counts each item once", () => {
-  expect(watchtowerCount(report)).toBe(3);
 });

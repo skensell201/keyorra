@@ -343,6 +343,17 @@ impl Store {
     pub fn save_item(&mut self, item: &Item) -> Result<()> {
         let new_key = self.vault_key(item.vault_id)?;
         let tx = self.conn.unchecked_transaction()?;
+        // A deleted vault's key stays loaded for its tombstones; nothing new may go there.
+        let live_vault = tx
+            .query_row(
+                "SELECT 1 FROM vaults WHERE id = ?1 AND deleted = 0",
+                [item.vault_id.to_string()],
+                |_| Ok(()),
+            )
+            .optional()?;
+        if live_vault.is_none() {
+            return Err(Error::NotFound(format!("vault {}", item.vault_id)));
+        }
         let existing: Option<(String, Vec<u8>, i64)> = tx
             .query_row(
                 "SELECT vault_id, data, schema FROM items WHERE id = ?1",

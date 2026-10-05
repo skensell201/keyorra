@@ -76,8 +76,10 @@ pub struct Session {
     lookups: std::collections::HashMap<String, Vec<u64>>,
     /// Set while serving a bridge call that saved an item.
     items_changed: bool,
-    /// Have I Been Pwned answers by password SHA-1 (upper-case hex); forgotten on lock.
-    breaches: std::collections::HashMap<String, u64>,
+    /// Have I Been Pwned answers by password SHA-1; forgotten on lock.
+    breaches: watchtower::BreachCache,
+    /// The sidebar's Watchtower badge; dropped on every write (`store_mut`) and breach answer.
+    watchtower_count: Option<usize>,
     /// Holds the Touch ID record (the macOS login keychain in the app).
     keyring: Box<dyn Keyring>,
     /// When the master password was last entered (or the Touch ID record says so).
@@ -108,7 +110,8 @@ impl Session {
             guard_path,
             lookups: std::collections::HashMap::new(),
             items_changed: false,
-            breaches: std::collections::HashMap::new(),
+            breaches: watchtower::BreachCache::new(),
+            watchtower_count: None,
             keyring: Box::new(NoKeyring),
             password_verified_at: None,
         }
@@ -306,6 +309,7 @@ impl Session {
     pub fn lock(&mut self) {
         self.store = None;
         self.breaches.clear();
+        self.watchtower_count = None;
         self.pending_import = None;
         self.drop_pending_pairing();
     }
@@ -476,16 +480,11 @@ impl Session {
             }
             Err(e) => return Err(e.into()),
         }
-        self.keyring.delete();
-        let aside = sibling(&self.path, &format!(".unreadable-{now}"));
-        std::fs::rename(&self.path, &aside)
+        let aside = free_aside_path(&self.path, now);
+        move_aside(&self.path, &aside, |from, to| std::fs::rename(from, to))
             .map_err(|e| CmdError::new(ErrorKind::Other, format!("Can't move the file: {e}")))?;
-        for suffix in ["-journal", "-wal", "-shm"] {
-            let extra = sibling(&self.path, suffix);
-            if extra.exists() {
-                let _ = std::fs::rename(&extra, sibling(&aside, suffix));
-            }
-        }
+        // The Touch ID record belonged to the old file; a new vault needs a new one.
+        self.keyring.delete();
         Ok(aside)
     }
 
@@ -496,18 +495,34 @@ impl Session {
         Ok(watchtower::report(&items, &self.breaches))
     }
 
-    /// SHA-1 hashes (upper-case hex) of passwords not checked against HIBP in this session.
-    /// The caller queries HIBP without holding the session, then calls `record_breaches`.
-    pub fn breach_hashes_to_check(&mut self, now: u64) -> CmdResult<Vec<String>> {
+    /// How many items Watchtower flags, for the sidebar. Cached until the next write, so the
+    /// main window can ask on every refresh without re-scoring every password. Not activity.
+    pub fn watchtower_count(&mut self) -> CmdResult<usize> {
+        if let Some(n) = self.watchtower_count.filter(|_| self.store.is_some()) {
+            return Ok(n);
+        }
+        let items = self.live_items()?;
+        let n = watchtower::report(&items, &self.breaches).item_count();
+        self.watchtower_count = Some(n);
+        Ok(n)
+    }
+
+    /// SHA-1 hashes of passwords not checked against HIBP in this session. The caller queries
+    /// HIBP without holding the session, then calls `record_breaches`.
+    pub fn breach_hashes_to_check(&mut self, now: u64) -> CmdResult<Vec<watchtower::PasswordHash>> {
         self.touch(now);
         let items = self.live_items()?;
         Ok(watchtower::unchecked_hashes(&items, &self.breaches))
     }
 
     /// Remembers HIBP answers until the vault locks. Ignored while locked.
-    pub fn record_breaches(&mut self, results: impl IntoIterator<Item = (String, u64)>) {
+    pub fn record_breaches(
+        &mut self,
+        results: impl IntoIterator<Item = (watchtower::PasswordHash, u64)>,
+    ) {
         if self.store.is_some() {
             self.breaches.extend(results);
+            self.watchtower_count = None;
         }
     }
 
@@ -684,7 +699,9 @@ impl Session {
         self.store.as_ref().ok_or_else(locked)
     }
 
+    /// Every write goes through here, so this is where cached views go stale.
     fn store_mut(&mut self) -> CmdResult<&mut Store> {
+        self.watchtower_count = None;
         self.store.as_mut().ok_or_else(locked)
     }
 
@@ -807,6 +824,49 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
     let mut name = path.as_os_str().to_owned();
     name.push(suffix);
     PathBuf::from(name)
+}
+
+/// SQLite's companions of a database file, moved together with it.
+const DB_SIBLINGS: [&str; 3] = ["-journal", "-wal", "-shm"];
+
+/// `<db>.unreadable-<now>`, or with `-2`, `-3`… appended when that name (or one of its
+/// companions) is taken: an earlier aside file is never overwritten.
+fn free_aside_path(path: &Path, now: u64) -> PathBuf {
+    let base = sibling(path, &format!(".unreadable-{now}"));
+    let taken = |p: &Path| p.symlink_metadata().is_ok();
+    (1u32..)
+        .map(|n| match n {
+            1 => base.clone(),
+            n => sibling(&base, &format!("-{n}")),
+        })
+        .find(|c| !taken(c) && !DB_SIBLINGS.iter().any(|s| taken(&sibling(c, s))))
+        .expect("some counter is free")
+}
+
+/// Moves the database and its companions to `aside`. All or nothing: when a companion can't
+/// be moved, what was moved goes back and the error is returned.
+fn move_aside(
+    path: &Path,
+    aside: &Path,
+    rename: impl Fn(&Path, &Path) -> std::io::Result<()>,
+) -> std::io::Result<()> {
+    rename(path, aside)?;
+    let mut moved: Vec<&str> = Vec::new();
+    for suffix in DB_SIBLINGS {
+        let from = sibling(path, suffix);
+        if from.symlink_metadata().is_err() {
+            continue;
+        }
+        if let Err(e) = rename(&from, &sibling(aside, suffix)) {
+            for done in moved {
+                let _ = rename(&sibling(aside, done), &sibling(path, done));
+            }
+            let _ = rename(aside, path);
+            return Err(e);
+        }
+        moved.push(suffix);
+    }
+    Ok(())
 }
 
 fn locked() -> CmdError {

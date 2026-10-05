@@ -68,6 +68,7 @@ pub fn run() {
             commands::rename_vault,
             commands::delete_vault,
             commands::watchtower,
+            commands::watchtower_count,
             commands::check_breaches,
             commands::quick_copy,
             commands::quick_hide,
