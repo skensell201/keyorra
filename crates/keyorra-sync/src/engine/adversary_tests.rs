@@ -924,3 +924,22 @@ fn an_approved_thief_counts_from_its_first_entry() {
     ];
     check(4, &ops);
 }
+
+/// Found at 20000 cases (A1d review run): a device whose pushes went to a partitioned copy
+/// pruned its segments there, so only the main device's snapshot could cover them; every
+/// snapshot after the main device's first was unusable (a `snapshot` entry in its trust log).
+#[test]
+fn regression_a_partitioned_device_is_covered_by_a_later_root_snapshot() {
+    check(
+        0,
+        &[
+            Op::Save { dev: 1, item: 0 },
+            Op::RootSnapshot,
+            Op::PartitionedSync { dev: 1 },
+            Op::PartitionedSync { dev: 0 },
+            Op::RootSnapshot,
+            Op::PartitionedSync { dev: 0 },
+            Op::PartitionedSync { dev: 1 },
+        ],
+    );
+}

@@ -578,3 +578,28 @@ fn a_device_repairs_its_own_rolled_back_stream_by_appending_it_again() {
         "{seen:?}"
     );
 }
+
+/// Found by the adversary property test (A1d review run): the main device's snapshot entries
+/// went into its trust log, so every snapshot after its first carried a `snapshot` entry and
+/// no reader could use it.
+#[test]
+fn every_snapshot_of_the_main_device_stays_usable() {
+    let (mut c, _vault) = shared(2);
+    for _ in 0..3 {
+        c.devices[0]
+            .write_snapshot(&c.store.clone(), c.clocks[0])
+            .unwrap();
+        c.heal();
+    }
+    let names = c.store.snapshots().unwrap();
+    assert_eq!(names.len(), 2, "the newest two are kept");
+    for (name, _) in names {
+        let Ok(Fetched::Ready(bytes)) = c.store.get_snapshot(&name) else {
+            panic!("snapshot {name} missing");
+        };
+        assert!(
+            c.devices[1].check_snapshot(&bytes).is_some(),
+            "snapshot {name} is unusable"
+        );
+    }
+}

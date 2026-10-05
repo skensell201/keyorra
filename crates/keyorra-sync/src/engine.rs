@@ -1292,7 +1292,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             let result = self.trust.apply_root(seq, &entry, |d| {
                 seen.as_ref().and_then(|h| h.get(d)).map_or(0, |h| h.seq)
             });
-            if result.is_ok() {
+            if result.is_ok() && is_trust_entry(&entry) {
                 self.root_log.push((seq, entry.clone()));
             }
             match result {
@@ -1955,7 +1955,8 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                 self.reread_after(device, old);
             }
         }
-        if result.is_ok() && !self.root_log.iter().any(|(s, _)| *s == seq) {
+        if result.is_ok() && is_trust_entry(entry) && !self.root_log.iter().any(|(s, _)| *s == seq)
+        {
             self.root_log.push((seq, entry.clone()));
         }
         match result {
@@ -2487,6 +2488,15 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             }
         }
     }
+}
+
+/// The main device's trust log (what its snapshots carry as entries) holds only trust
+/// entries: a snapshot entry in it made every later snapshot unusable (`check_entries`).
+fn is_trust_entry(entry: &Entry) -> bool {
+    matches!(
+        entry,
+        Entry::Genesis { .. } | Entry::Endorse { .. } | Entry::Revoke { .. }
+    )
 }
 
 #[cfg(test)]

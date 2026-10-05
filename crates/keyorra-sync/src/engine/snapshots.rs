@@ -192,7 +192,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
     /// Opens and checks a snapshot: this account, entries of the right kinds, signed by its
     /// author with the key this device knows for it, the author admitted at its own frontier
     /// position. Returns the body and the author.
-    fn check_snapshot(&self, bytes: &[u8]) -> Option<(SnapshotBody, DeviceId)> {
+    pub(super) fn check_snapshot(&self, bytes: &[u8]) -> Option<(SnapshotBody, DeviceId)> {
         let unverified = decrypt_snapshot(&self.segment_key, bytes).ok()?;
         let body = SnapshotBody::from_value(&unverified.body).ok()?;
         if body.account_id != self.account_id || check_entries(&body).is_err() {
