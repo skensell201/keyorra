@@ -276,3 +276,21 @@ fieldset.fields .reveal { align-self: flex-start; }
 .watchtower .categories .count { font-family: var(--mono); font-size: 20px; font-weight: 700; }
 .watchtower .breach-check { margin: 0 14px 12px; padding: 12px; border-radius: 14px; background: var(--surface); display: flex; flex-direction: column; gap: 10px; font-size: 13px; }
 .watchtower .breach-check p { margin: 0; color: var(--muted); }
+
+/* Quick search window (index.html#quick): a floating card on a transparent window. */
+.quick { height: 100vh; padding: 10px; background: transparent; }
+.quick > * { height: 100%; border-radius: 18px; background: var(--surface); border: 1px solid var(--line); box-shadow: var(--shadow-pop); overflow: hidden; }
+.quick .center { background: var(--surface); }
+.quick .auth { box-shadow: none; border: none; }
+.quick-search { display: flex; flex-direction: column; }
+.quick-search .search { position: relative; display: flex; align-items: center; padding: 12px; border-bottom: 1px solid var(--line); }
+.quick-search .search svg { position: absolute; left: 24px; color: var(--muted); }
+.quick-search .search input { padding-left: 36px; font-size: 16px; border-radius: 12px; }
+.quick-search ul { list-style: none; margin: 0; padding: 6px; overflow-y: auto; flex: 1; }
+.quick-search li { display: flex; align-items: baseline; gap: 10px; padding: 8px 12px; border-radius: 10px; cursor: default; }
+.quick-search li[aria-selected="true"] { background: var(--hover); }
+.quick-search .title { font-weight: 600; }
+.quick-search .subtitle { color: var(--muted); font-size: 12px; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.quick-search .badge { font-size: 10px; font-weight: 700; color: var(--muted); border: 1px solid var(--line); border-radius: 6px; padding: 1px 5px; }
+.quick-search .error { margin: 0 12px 8px; }
+.quick-search .hints { color: var(--muted); font-size: 11px; padding: 8px 14px; border-top: 1px solid var(--line); }

@@ -9,9 +9,13 @@ export function App() {
 
   useEffect(() => {
     api.status().then(setStatus);
-    const unlisten = api.onLocked(() => setStatus("locked"));
+    const subscriptions = [
+      api.onLocked(() => setStatus("locked")),
+      // Unlocked from the quick-search window.
+      api.onUnlocked(() => setStatus((s) => (s === "locked" ? "unlocked" : s))),
+    ];
     return () => {
-      unlisten.then((stop) => stop());
+      subscriptions.forEach((p) => p.then((stop) => stop()));
     };
   }, []);
 

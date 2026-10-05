@@ -1,6 +1,8 @@
 import { invoke } from "@tauri-apps/api/core";
 import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
+export type QuickCopy = "username" | "password" | "totp";
+
 export type Status = "new" | "locked" | "unlocked";
 
 export type ErrorKind =
@@ -196,5 +198,10 @@ export const api = {
   onPairRequest: (callback: (request: PairingRequest) => void): Promise<UnlistenFn> =>
     listen<PairingRequest>("pair-request", (e) => callback(e.payload)),
   onLocked: (callback: () => void): Promise<UnlistenFn> => listen("locked", () => callback()),
+  onUnlocked: (callback: () => void): Promise<UnlistenFn> => listen("unlocked", () => callback()),
+  /** The quick-search window was just shown (⌘⇧Space or the menu bar). */
+  onQuickOpen: (callback: () => void): Promise<UnlistenFn> => listen("quick-open", () => callback()),
+  quickCopy: (id: string, what: QuickCopy) => invoke<void>("quick_copy", { id, what }),
+  quickHide: () => invoke<void>("quick_hide"),
   onItemsChanged: (callback: () => void): Promise<UnlistenFn> => listen("items-changed", () => callback()),
 };
