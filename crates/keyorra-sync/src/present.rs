@@ -541,6 +541,7 @@ mod tests {
             key: Zeroizing::new([0; 32]),
             chunk_size: 1,
             chunks: vec![],
+            chunks_for: ID,
         });
         let s = set(vec![sib(A, 9, &[(A, 1)], att.clone())]);
         assert!(present_attachment(&s).is_some());

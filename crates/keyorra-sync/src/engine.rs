@@ -1150,9 +1150,110 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             key,
             chunk_size: crate::chunk::MAX_CHUNK as u32,
             chunks: Vec::new(),
+            chunks_for: id,
         });
         self.write(RecordKind::Attachment, id, Some(vault_id), doc, wall_ms)?;
         Ok(id)
+    }
+
+    /// An attachment's content as chunks (plan A2): a new random key, the bytes cut into
+    /// `chunk_size` pieces (at most [`crate::chunk::MAX_CHUNK`]), each sealed for this
+    /// attachment id. The caller stores the chunks first, then writes the record with
+    /// [`Engine::write_attachment`] (a reader must never see a record whose chunks are not
+    /// there yet, spec §5.3).
+    pub fn seal_attachment(
+        &mut self,
+        id: Uuid,
+        item_id: Uuid,
+        name: &str,
+        bytes: &[u8],
+        chunk_size: usize,
+    ) -> Result<(AttachmentPayload, Vec<Vec<u8>>)> {
+        let chunk_size = chunk_size.clamp(1, crate::chunk::MAX_CHUNK);
+        let mut key = Zeroizing::new([0u8; 32]);
+        self.rng.fill_bytes(&mut key[..]);
+        let pieces: Vec<&[u8]> = if bytes.is_empty() {
+            vec![&[][..]]
+        } else {
+            bytes.chunks(chunk_size).collect()
+        };
+        let count = u32::try_from(pieces.len())
+            .map_err(|_| crate::error::malformed("attachment too large"))?;
+        let attachment_key = Key::from_bytes(*key);
+        let mut sealed = Vec::with_capacity(pieces.len());
+        let mut names = Vec::with_capacity(pieces.len());
+        for (index, piece) in pieces.into_iter().enumerate() {
+            let place = crate::chunk::ChunkPlace {
+                account_id: self.account_id,
+                attachment_id: id,
+                index: index as u32,
+                count,
+            };
+            let chunk = crate::chunk::seal_chunk(&attachment_key, &place, piece, &mut self.rng)?;
+            let mut name = [0u8; 32];
+            name.copy_from_slice(&<sha2::Sha256 as sha2::Digest>::digest(&chunk));
+            names.push(name);
+            sealed.push(chunk);
+        }
+        let payload = AttachmentPayload {
+            item_id,
+            name: name.to_owned(),
+            size: bytes.len() as u64,
+            key,
+            chunk_size: chunk_size as u32,
+            chunks: names,
+            chunks_for: id,
+        };
+        Ok((payload, sealed))
+    }
+
+    /// Writes an attachment record whose chunks are stored ([`Engine::seal_attachment`]).
+    pub fn write_attachment(
+        &mut self,
+        vault_id: Uuid,
+        id: Uuid,
+        payload: AttachmentPayload,
+        wall_ms: u64,
+    ) -> Result<()> {
+        self.write(
+            RecordKind::Attachment,
+            id,
+            Some(vault_id),
+            Doc::Attachment(payload),
+            wall_ms,
+        )
+    }
+
+    /// The content of an attachment from its chunks, in order (as named by `payload`).
+    /// Each chunk must have its name and open for its place; the total must be the size.
+    pub fn open_attachment(
+        &self,
+        payload: &AttachmentPayload,
+        chunks: &[Vec<u8>],
+    ) -> Result<Zeroizing<Vec<u8>>> {
+        if chunks.len() != payload.chunks.len() {
+            return Err(crate::error::malformed("attachment chunk count"));
+        }
+        let count =
+            u32::try_from(chunks.len()).map_err(|_| crate::error::malformed("chunk count"))?;
+        let key = Key::from_bytes(*payload.key);
+        let mut out = Zeroizing::new(Vec::with_capacity(payload.size.min(1 << 30) as usize));
+        for (index, (chunk, name)) in chunks.iter().zip(&payload.chunks).enumerate() {
+            if <sha2::Sha256 as sha2::Digest>::digest(chunk).as_slice() != name {
+                return Err(crate::error::malformed("chunk does not match its name"));
+            }
+            let place = crate::chunk::ChunkPlace {
+                account_id: self.account_id,
+                attachment_id: payload.chunks_for,
+                index: index as u32,
+                count,
+            };
+            out.extend_from_slice(&crate::chunk::open_chunk(&key, &place, chunk)?);
+        }
+        if out.len() as u64 != payload.size {
+            return Err(crate::error::malformed("attachment size"));
+        }
+        Ok(out)
     }
 
     pub fn remove_attachment(&mut self, id: Uuid, wall_ms: u64) -> Result<()> {
@@ -2502,6 +2603,8 @@ fn is_trust_entry(entry: &Entry) -> bool {
 
 #[cfg(test)]
 mod adversary_tests;
+#[cfg(test)]
+mod attachment_tests;
 #[cfg(test)]
 mod attack_tests;
 #[cfg(test)]

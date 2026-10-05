@@ -734,6 +734,7 @@ mod tests {
                 key: Zeroizing::new([7; 32]),
                 chunk_size: 3,
                 chunks: vec![[8; 32]],
+                chunks_for: Uuid::from_bytes([9; 16]),
             }),
         }
     }

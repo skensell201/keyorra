@@ -5,7 +5,7 @@
 //!                "content_from": { bytes16 → uint } }
 //! vault      = { "name": text, "wrapped_key": bytes, "deleted": bool }
 //! attachment = { "item_id": bytes16, "name": text, "size": uint, "key": bytes32,
-//!                "chunk_size": uint, "chunks": [bytes32, …] }
+//!                "chunk_size": uint, "chunks": [bytes32, …], "chunks_for": bytes16 }
 //! ```
 
 use std::fmt;
@@ -48,6 +48,9 @@ pub struct AttachmentPayload {
     pub key: Zeroizing<[u8; 32]>,
     pub chunk_size: u32,
     pub chunks: Vec<[u8; 32]>,
+    /// The attachment id the chunks are sealed for (bound into each chunk): the record's own
+    /// id, or for a conflict copy's attachment the original's, whose chunks it shares.
+    pub chunks_for: Uuid,
 }
 
 /// The decoded content of one record version.
@@ -129,6 +132,7 @@ impl Doc {
                     "chunks",
                     Value::Array(p.chunks.iter().map(Value::bytes).collect()),
                 ),
+                ("chunks_for", Value::bytes(p.chunks_for.as_bytes())),
             ]),
             Doc::Tombstone => return Zeroizing::new(Vec::new()),
         };
@@ -172,8 +176,15 @@ impl Doc {
                 })
             }
             RecordKind::Attachment => {
-                let f =
-                    value.fields(&["item_id", "name", "size", "key", "chunk_size", "chunks"])?;
+                let f = value.fields(&[
+                    "item_id",
+                    "name",
+                    "size",
+                    "key",
+                    "chunk_size",
+                    "chunks",
+                    "chunks_for",
+                ])?;
                 Doc::Attachment(AttachmentPayload {
                     item_id: Uuid::from_bytes(f.get("item_id")?.as_array_of()?),
                     name: f.get("name")?.as_text()?.to_owned(),
@@ -186,6 +197,7 @@ impl Doc {
                         .iter()
                         .map(|c| c.as_array_of())
                         .collect::<Result<_>>()?,
+                    chunks_for: Uuid::from_bytes(f.get("chunks_for")?.as_array_of()?),
                 })
             }
         })
@@ -328,6 +340,7 @@ mod tests {
             key: Zeroizing::new([2; 32]),
             chunk_size: 4 * 1024 * 1024,
             chunks: vec![[3; 32]],
+            chunks_for: Uuid::from_bytes([4; 16]),
         }
     }
 
