@@ -5,3 +5,5 @@ dist/
 *.db
 app/src-tauri/gen/
 extension/dist/
+safari/build/
+safari/**/xcuserdata/
