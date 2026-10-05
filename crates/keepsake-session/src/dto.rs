@@ -3,7 +3,7 @@
 
 use keepsake_core::generator::{self, PassphraseOptions, PasswordOptions};
 use keepsake_core::import::{ImportPlan, ImportReport};
-use keepsake_core::model::ItemKind;
+use keepsake_core::model::{Item, ItemKind};
 use keepsake_core::store::ItemEntry;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -34,19 +34,23 @@ pub struct ItemSummary {
 }
 
 impl ItemSummary {
+    pub fn of(item: &Item) -> Self {
+        Self {
+            id: item.id,
+            vault_id: item.vault_id,
+            kind: Some(item.kind),
+            title: item.title.clone(),
+            subtitle: item.username().unwrap_or_default().to_owned(),
+            favorite: item.favorite,
+            has_totp: item.totp().is_some(),
+            updated_at: item.updated_at,
+            damaged: false,
+        }
+    }
+
     pub fn from_entry(entry: &ItemEntry) -> Self {
         match entry {
-            ItemEntry::Ok(item) => Self {
-                id: item.id,
-                vault_id: item.vault_id,
-                kind: Some(item.kind),
-                title: item.title.clone(),
-                subtitle: item.username().unwrap_or_default().to_owned(),
-                favorite: item.favorite,
-                has_totp: item.totp().is_some(),
-                updated_at: item.updated_at,
-                damaged: false,
-            },
+            ItemEntry::Ok(item) => Self::of(item),
             ItemEntry::Damaged { id, vault_id } => Self {
                 id: *id,
                 vault_id: *vault_id,

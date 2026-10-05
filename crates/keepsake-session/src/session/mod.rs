@@ -17,6 +17,7 @@ use crate::error::{CmdError, CmdResult, ErrorKind};
 use crate::settings::Settings;
 use crate::sleep::SleepDetector;
 use crate::throttle::UnlockThrottle;
+use crate::watchtower;
 
 mod bridge;
 #[cfg(test)]
@@ -25,6 +26,8 @@ mod bridge_tests;
 mod polish_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod watchtower_tests;
 
 pub use bridge::{BridgeEvent, PairedBrowser, PairingRequest};
 
@@ -61,6 +64,8 @@ pub struct Session {
     lookups: std::collections::HashMap<String, Vec<u64>>,
     /// Set while serving a bridge call that saved an item.
     items_changed: bool,
+    /// Have I Been Pwned answers by password SHA-1 (upper-case hex); forgotten on lock.
+    breaches: std::collections::HashMap<String, u64>,
 }
 
 impl Session {
@@ -87,6 +92,7 @@ impl Session {
             guard_path,
             lookups: std::collections::HashMap::new(),
             items_changed: false,
+            breaches: std::collections::HashMap::new(),
         }
     }
 
@@ -158,6 +164,7 @@ impl Session {
     /// Drops the store; its keys are wiped on drop.
     pub fn lock(&mut self) {
         self.store = None;
+        self.breaches.clear();
         self.pending_import = None;
         self.drop_pending_pairing();
     }
@@ -335,6 +342,40 @@ impl Session {
             }
         }
         Ok(aside)
+    }
+
+    /// Watchtower over live items. Breach results only come from `record_breaches`.
+    pub fn watchtower(&mut self, now: u64) -> CmdResult<watchtower::Report> {
+        self.touch(now);
+        let items = self.live_items()?;
+        Ok(watchtower::report(&items, &self.breaches))
+    }
+
+    /// SHA-1 hashes (upper-case hex) of passwords not checked against HIBP in this session.
+    /// The caller queries HIBP without holding the session, then calls `record_breaches`.
+    pub fn breach_hashes_to_check(&mut self, now: u64) -> CmdResult<Vec<String>> {
+        self.touch(now);
+        let items = self.live_items()?;
+        Ok(watchtower::unchecked_hashes(&items, &self.breaches))
+    }
+
+    /// Remembers HIBP answers until the vault locks. Ignored while locked.
+    pub fn record_breaches(&mut self, results: impl IntoIterator<Item = (String, u64)>) {
+        if self.store.is_some() {
+            self.breaches.extend(results);
+        }
+    }
+
+    fn live_items(&self) -> CmdResult<Vec<Item>> {
+        Ok(self
+            .store()?
+            .list_items(None)?
+            .into_iter()
+            .filter_map(|e| match e {
+                ItemEntry::Ok(item) => Some(item),
+                ItemEntry::Damaged { .. } => None,
+            })
+            .collect())
     }
 
     /// Summaries sorted by title (case-insensitive). Damaged rows show only in unfiltered lists.

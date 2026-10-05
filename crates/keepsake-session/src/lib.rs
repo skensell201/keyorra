@@ -9,6 +9,7 @@ pub mod session;
 pub mod settings;
 pub mod sleep;
 pub mod throttle;
+pub mod watchtower;
 
 pub use error::{CmdError, CmdResult, ErrorKind};
 pub use session::{BridgeEvent, PairedBrowser, PairingRequest, Session, Status};
