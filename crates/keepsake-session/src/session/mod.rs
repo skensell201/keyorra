@@ -17,6 +17,7 @@ use crate::error::{CmdError, CmdResult, ErrorKind};
 use crate::settings::Settings;
 use crate::sleep::SleepDetector;
 use crate::throttle::UnlockThrottle;
+use crate::touchid::{self, Keyring, NoKeyring, TouchIdState, UnlockRequest};
 use crate::watchtower;
 
 mod bridge;
@@ -26,6 +27,8 @@ mod bridge_tests;
 mod polish_tests;
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod touchid_tests;
 #[cfg(test)]
 mod watchtower_tests;
 
@@ -75,6 +78,10 @@ pub struct Session {
     items_changed: bool,
     /// Have I Been Pwned answers by password SHA-1 (upper-case hex); forgotten on lock.
     breaches: std::collections::HashMap<String, u64>,
+    /// Holds the Touch ID record (the macOS login keychain in the app).
+    keyring: Box<dyn Keyring>,
+    /// When the master password was last entered (or the Touch ID record says so).
+    password_verified_at: Option<u64>,
 }
 
 impl Session {
@@ -102,6 +109,8 @@ impl Session {
             lookups: std::collections::HashMap::new(),
             items_changed: false,
             breaches: std::collections::HashMap::new(),
+            keyring: Box::new(NoKeyring),
+            password_verified_at: None,
         }
     }
 
@@ -144,6 +153,9 @@ impl Session {
         }
         self.store = Some(store);
         self.autolock.touch(now);
+        // A Touch ID record left from an earlier vault would only ever fail.
+        self.keyring.delete();
+        self.password_verified_at = Some(now);
         Ok(())
     }
 
@@ -160,6 +172,8 @@ impl Session {
                 // Housekeeping, not part of unlocking: a failure here must not lock the user out.
                 let _ = store.purge_expired(now as i64);
                 self.store = Some(store);
+                self.password_verified_at = Some(now);
+                self.rearm_touch_id(now);
                 Ok(())
             }
             Err(keepsake_core::Error::WrongPassword) => {
@@ -167,6 +181,124 @@ impl Session {
                 Err(keepsake_core::Error::WrongPassword.into())
             }
             Err(e) => Err(e.into()),
+        }
+    }
+
+    /// Lets the app plug in the macOS keychain.
+    pub fn set_keyring(&mut self, keyring: Box<dyn Keyring>) {
+        self.keyring = keyring;
+    }
+
+    fn touch_id_record(&self) -> Option<touchid::Record> {
+        self.keyring
+            .load()
+            .and_then(|bytes| touchid::Record::from_bytes(&bytes))
+    }
+
+    pub fn touch_id_state(&self, available: bool, now: u64) -> TouchIdState {
+        let record = self.touch_id_record();
+        TouchIdState {
+            available,
+            enabled: record.is_some(),
+            password_due: record.is_some_and(|r| r.is_expired(now)),
+        }
+    }
+
+    /// Turns Touch ID on with a fresh enclave key (made by the app, no prompt). Only while
+    /// unlocked; the 14 days run from the last master-password entry.
+    pub fn enable_touch_id(
+        &mut self,
+        enclave_key: Vec<u8>,
+        enclave_public: &[u8],
+        now: u64,
+    ) -> CmdResult<()> {
+        self.touch(now);
+        let verified_at = self.password_verified_at.ok_or_else(|| {
+            CmdError::new(
+                ErrorKind::PasswordRequired,
+                "Unlock with your master password first",
+            )
+        })?;
+        let record = touchid::wrap(
+            self.store()?.account_key()?,
+            enclave_key,
+            enclave_public,
+            verified_at,
+        )?;
+        self.keyring
+            .save(&record.to_bytes())
+            .map_err(|e| CmdError::new(ErrorKind::Other, format!("Keychain: {e}")))
+    }
+
+    pub fn disable_touch_id(&mut self) {
+        self.keyring.delete();
+    }
+
+    /// First half of a Touch ID unlock: what the enclave needs. The app then shows the prompt
+    /// without holding the session and calls `unlock_with_touch_id`.
+    pub fn touch_id_request(&self, now: u64) -> CmdResult<UnlockRequest> {
+        let record = self
+            .touch_id_record()
+            .ok_or_else(|| CmdError::new(ErrorKind::PasswordRequired, "Touch ID is off"))?;
+        if record.is_expired(now) {
+            return Err(password_due());
+        }
+        Ok(UnlockRequest {
+            enclave_key: record.enclave_key,
+            ephemeral_public: record.ephemeral_public,
+        })
+    }
+
+    /// Second half: `shared` is the enclave's ECDH result after Touch ID.
+    pub fn unlock_with_touch_id(&mut self, shared: &[u8; 32], now: u64) -> CmdResult<()> {
+        if self.store.is_some() {
+            return Ok(());
+        }
+        let record = self
+            .touch_id_record()
+            .ok_or_else(|| CmdError::new(ErrorKind::PasswordRequired, "Touch ID is off"))?;
+        if record.is_expired(now) {
+            return Err(password_due());
+        }
+        let forget = |s: &mut Self, e: CmdError| {
+            s.keyring.delete();
+            e
+        };
+        let account = match touchid::unwrap(&record, shared) {
+            Ok(key) => key,
+            Err(e) => return Err(forget(self, e)),
+        };
+        let mut store = Store::open(&self.path)?;
+        match store.unlock_with_key(account) {
+            Ok(()) => {}
+            // The record belongs to another vault (e.g. after "Start over").
+            Err(keepsake_core::Error::WrongPassword) => {
+                let e = CmdError::new(
+                    ErrorKind::PasswordRequired,
+                    "Touch ID needs to be set up again. Unlock with your master password.",
+                );
+                return Err(forget(self, e));
+            }
+            Err(e) => return Err(e.into()),
+        }
+        self.autolock.touch(now);
+        let _ = store.purge_expired(now as i64);
+        self.store = Some(store);
+        self.password_verified_at = Some(record.verified_at);
+        Ok(())
+    }
+
+    /// After a master-password entry: re-wrap the record so the 14 days start again. Reuses
+    /// the enclave key, so no prompt. Failures leave the old record.
+    fn rearm_touch_id(&mut self, now: u64) {
+        let Some(record) = self.touch_id_record() else {
+            return;
+        };
+        let Ok(account) = self.store().and_then(|s| Ok(s.account_key()?.clone())) else {
+            return;
+        };
+        if let Ok(new) = touchid::wrap(&account, record.enclave_key, &record.enclave_public, now) {
+            let _ = self.keyring.save(&new.to_bytes());
         }
     }
 
@@ -231,6 +363,9 @@ impl Session {
         match result {
             Ok(()) => {
                 self.throttle.record_success();
+                self.password_verified_at = Some(now);
+                // Replace the Touch ID record, like 1Password does after a password change.
+                self.rearm_touch_id(now);
                 Ok(())
             }
             Err(keepsake_core::Error::WrongPassword) => {
@@ -341,6 +476,7 @@ impl Session {
             }
             Err(e) => return Err(e.into()),
         }
+        self.keyring.delete();
         let aside = sibling(&self.path, &format!(".unreadable-{now}"));
         std::fs::rename(&self.path, &aside)
             .map_err(|e| CmdError::new(ErrorKind::Other, format!("Can't move the file: {e}")))?;
@@ -675,6 +811,13 @@ fn sibling(path: &Path, suffix: &str) -> PathBuf {
 
 fn locked() -> CmdError {
     keepsake_core::Error::Locked.into()
+}
+
+fn password_due() -> CmdError {
+    CmdError::new(
+        ErrorKind::PasswordRequired,
+        "Enter your master password. Keepsake asks for it every 14 days.",
+    )
 }
 
 fn entry_vault(entry: &ItemEntry) -> Uuid {

@@ -24,6 +24,8 @@ pub enum ErrorKind {
     NotADatabase,
     /// Touch ID can't be used right now (off, expired, fingerprints changed): ask for the password.
     PasswordRequired,
+    /// The user dismissed the Touch ID prompt.
+    Cancelled,
     Other,
 }
 

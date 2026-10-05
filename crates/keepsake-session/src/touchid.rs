@@ -84,6 +84,25 @@ impl Keyring for NoKeyring {
     fn delete(&self) {}
 }
 
+/// Shared in-memory keyring for tests.
+#[cfg(test)]
+#[derive(Clone, Default)]
+pub(crate) struct MemKeyring(pub std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>>>);
+
+#[cfg(test)]
+impl Keyring for MemKeyring {
+    fn load(&self) -> Option<Vec<u8>> {
+        self.0.lock().unwrap().clone()
+    }
+    fn save(&self, data: &[u8]) -> Result<(), String> {
+        *self.0.lock().unwrap() = Some(data.to_vec());
+        Ok(())
+    }
+    fn delete(&self) {
+        *self.0.lock().unwrap() = None;
+    }
+}
+
 /// What the UI needs to show the Touch ID button and the setting.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
