@@ -9,6 +9,7 @@ pub mod session;
 pub mod settings;
 pub mod sleep;
 pub mod throttle;
+pub mod touchid;
 pub mod watchtower;
 
 pub use error::{CmdError, CmdResult, ErrorKind};

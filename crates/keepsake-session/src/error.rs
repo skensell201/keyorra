@@ -22,6 +22,8 @@ pub enum ErrorKind {
     Invalid,
     /// The database file is not a Keepsake database: offer "Start over".
     NotADatabase,
+    /// Touch ID can't be used right now (off, expired, fingerprints changed): ask for the password.
+    PasswordRequired,
     Other,
 }
 
