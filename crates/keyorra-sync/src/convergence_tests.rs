@@ -7,9 +7,10 @@ use std::collections::BTreeSet;
 use proptest::prelude::*;
 use uuid::Uuid;
 
+use crate::engine::Engine;
 use crate::envelope::RecordKind;
 use crate::faults::Faults;
-use crate::fold::{Admission, Fold, View};
+use crate::fold::{Accepted, Admission, Fold, View};
 use crate::payload::{attachment_refs, Doc};
 use crate::present::{present_item, ItemState};
 use crate::testkit::{Cluster, START_MS};
@@ -49,11 +50,11 @@ fn op(devices: usize) -> impl Strategy<Value = Op> {
     ]
 }
 
-fn item_id(i: usize) -> Uuid {
+pub(crate) fn item_id(i: usize) -> Uuid {
     Uuid::from_bytes([0x70 + i as u8; 16])
 }
 
-fn title_of(view: &View, id: Uuid) -> Option<String> {
+pub(crate) fn title_of(view: &View, id: Uuid) -> Option<String> {
     let p = view.items.get(&id)?.payload.as_ref()?;
     let v: serde_json::Value = serde_json::from_slice(&p.item_json).ok()?;
     Some(v["title"].as_str()?.to_owned())
@@ -159,7 +160,7 @@ fn run_skewed(
 }
 
 /// Every non-stale sibling of every item is accounted for: shown, or present as a copy.
-fn assert_nothing_unaccounted(fold: &Fold, view: &View) {
+pub(crate) fn assert_nothing_unaccounted(fold: &Fold, view: &View) {
     if view.owes_copies() {
         return; // only when no device may write any more (all were removed)
     }
@@ -197,7 +198,7 @@ proptest! {
         c.assert_converged();
         for d in &c.devices {
             assert_nothing_unaccounted(d.fold(), &d.view());
-            assert_no_lost_edit(d.fold(), &d.view(), d.trust());
+            assert_no_lost_edit(d.fold(), &d.view(), d.trust(), &written(&c.devices.iter().collect::<Vec<_>>()));
             assert_cut_versions_hidden(d.fold(), d.trust());
         }
     }
@@ -210,7 +211,7 @@ proptest! {
         skew in offsets(),
     ) {
         let (c, _) = run_skewed(3, seed, Faults::NONE, &ops, &skew);
-        assert_no_lost_edit(c.devices[0].fold(), &c.devices[0].view(), c.devices[0].trust());
+        assert_no_lost_edit(c.devices[0].fold(), &c.devices[0].view(), c.devices[0].trust(), &written(&c.devices.iter().collect::<Vec<_>>()));
         let reference = c.devices[0].view();
         // Replay every accepted version, interleaving the streams pseudo-randomly while keeping
         // each stream's own order.
@@ -225,6 +226,9 @@ proptest! {
             s.sort_by_key(|a| a.seq);
         }
         let mut fold = Fold::default();
+        for id in c.devices[0].fold().skipped_items() {
+            fold.note_skipped(RecordKind::Item, id);
+        }
         let mut state = shuffle;
         while streams.iter().any(|s| !s.is_empty()) {
             state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
@@ -232,7 +236,7 @@ proptest! {
             let ready: Vec<usize> = (0..streams.len())
                 .filter(|i| {
                     streams[*i].first().is_some_and(|a| {
-                        fold.missing_dependency(std::slice::from_ref(a)) == Ok(None)
+                        fold.missing_dependency(std::slice::from_ref(a), c.devices[0].trust()) == Ok(None)
                     })
                 })
                 .collect();
@@ -324,8 +328,21 @@ fn tombstones_and_vaults_survive_the_replay_too() {
 /// visible somewhere (as the item or as a conflict copy, live or in Recently Deleted).
 /// Refinement: an edit that a purge has seen (a tombstone dominates it) was deleted on purpose,
 /// even when a concurrent edit keeps the record itself alive.
+/// Every version any device of `c` holds.
+pub(crate) fn written(devices: &[&Engine<rand::rngs::StdRng>]) -> Vec<Accepted> {
+    let mut all: Vec<Accepted> = Vec::new();
+    for d in devices {
+        for a in d.fold().retained() {
+            if !all.iter().any(|b| b.hash() == a.hash()) {
+                all.push(a.clone());
+            }
+        }
+    }
+    all
+}
+
 /// Versions after a revocation's cut never reach a sibling set.
-fn assert_cut_versions_hidden(fold: &Fold, admission: &dyn Admission) {
+pub(crate) fn assert_cut_versions_hidden(fold: &Fold, admission: &dyn Admission) {
     for a in fold.retained() {
         if admission.admits(&a.stream, a.seq) {
             continue;
@@ -342,7 +359,14 @@ fn assert_cut_versions_hidden(fold: &Fold, admission: &dyn Admission) {
 }
 
 /// Skipped while copies are still owed: when every device was removed, nobody can write them.
-fn assert_no_lost_edit(fold: &Fold, view: &View, admission: &dyn Admission) {
+/// `written`: every version any device received (a device does not read records past a cut,
+/// so its own fold may lack the edit that superseded another).
+pub(crate) fn assert_no_lost_edit(
+    fold: &Fold,
+    view: &View,
+    admission: &dyn Admission,
+    written: &[Accepted],
+) {
     if view.owes_copies() {
         return;
     }
@@ -393,10 +417,29 @@ fn assert_no_lost_edit(fold: &Fold, view: &View, admission: &dyn Admission) {
             if purged {
                 continue;
             }
-            let dominated = edits.iter().any(|(b, _)| {
-                crate::vv::compare(&a.version.vector, &b.version.vector)
-                    == crate::vv::Causality::Before
-            });
+            // Superseded by a later edit: one received, or one whose content an admitted
+            // version carries (its own version may be past a cut, and not read).
+            let carried = fold
+                .retained()
+                .filter(|b| b.kind == RecordKind::Item && b.record_id == record)
+                .filter(|b| admission.admits(&b.stream, b.seq))
+                .filter_map(|b| match &b.doc {
+                    Doc::Item(p) => Some(&p.content_from),
+                    _ => None,
+                });
+            let superseding = written
+                .iter()
+                .filter(|b| b.kind == RecordKind::Item && b.record_id == record)
+                .filter_map(|b| match &b.doc {
+                    Doc::Item(p) if p.content_from == b.version.vector => Some(&b.version.vector),
+                    _ => None,
+                });
+            let dominated = edits
+                .iter()
+                .map(|(b, _)| &b.version.vector)
+                .chain(superseding)
+                .chain(carried)
+                .any(|v| crate::vv::compare(&a.version.vector, v) == crate::vv::Causality::Before);
             if dominated {
                 continue;
             }
@@ -426,7 +469,12 @@ fn review_counterexample_stale_rule_loses_an_edit() {
         let (c, _) = run(3, 16642519616933440452, faults, &ops);
         c.assert_converged();
         let view = c.devices[0].view();
-        assert_no_lost_edit(c.devices[0].fold(), &view, c.devices[0].trust());
+        assert_no_lost_edit(
+            c.devices[0].fold(),
+            &view,
+            c.devices[0].trust(),
+            &written(&c.devices.iter().collect::<Vec<_>>()),
+        );
     }
 }
 
@@ -446,7 +494,12 @@ fn a_copy_written_by_a_device_removed_later_is_written_again() {
     let (c, _) = run(3, 0, Faults::NONE, &ops);
     c.assert_converged();
     let view = c.devices[0].view();
-    assert_no_lost_edit(c.devices[0].fold(), &view, c.devices[0].trust());
+    assert_no_lost_edit(
+        c.devices[0].fold(),
+        &view,
+        c.devices[0].trust(),
+        &written(&c.devices.iter().collect::<Vec<_>>()),
+    );
     let titles: BTreeSet<String> = view
         .items
         .keys()

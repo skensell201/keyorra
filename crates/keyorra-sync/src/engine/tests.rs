@@ -663,13 +663,14 @@ fn clone_of(e: &Engine<rand::rngs::StdRng>) -> Engine<rand::rngs::OsRng> {
         rand::rngs::OsRng,
     );
     twin.sent = e.sent;
-    twin.own_ends = e.own_ends.clone();
+    twin.own_hashes = e.own_hashes.clone();
     twin.next_seq = e.next_seq;
-    twin.vault_keys = e.vault_keys.clone();
+    twin.unwrapped = e.unwrapped.clone();
     twin.fold = e.fold.clone();
     twin.trust = e.trust.clone();
     twin.heads = e.heads.clone();
-    twin.ends = e.ends.clone();
+    twin.hashes = e.hashes.clone();
+    twin.checkpoint_bounds = e.checkpoint_bounds.clone();
     twin.last_checkpoint = e.last_checkpoint.clone();
     twin
 }
@@ -774,7 +775,7 @@ fn info_seq(c: &Cluster, i: usize) -> u64 {
 }
 
 #[test]
-fn a_self_join_works_and_alarms_every_other_device() {
+fn a_self_join_pauses_every_other_device_until_the_user_decides() {
     let mut c = Cluster::unapproved(3, 6, Faults::NONE);
     let key1 = c.devices[1].verifying_key();
     c.devices[0]
@@ -783,19 +784,25 @@ fn a_self_join_works_and_alarms_every_other_device() {
     c.heal();
     c.devices[2].self_join(c.clocks[2]).unwrap();
     assert!(c.devices[2].can_write());
-    c.heal();
+    assert!(!c.devices[2].has_powers());
+    c.sync(2).unwrap();
+    let alarm = Alarm::SelfJoined {
+        device: device_id(2),
+        name: device_name(2),
+    };
     for i in [0, 1] {
-        let events = c.devices[i].take_events();
-        let alarms: Vec<_> = events
-            .iter()
-            .filter(|e| matches!(e, Event::SelfJoined { device, .. } if *device == device_id(2)))
-            .collect();
-        assert_eq!(alarms.len(), 1, "device {i}");
+        assert!(c.sync(i).is_err(), "device {i} pauses");
+        assert_eq!(c.devices[i].alarms(), std::slice::from_ref(&alarm));
     }
-    assert!(!c.devices[2]
-        .take_events()
-        .iter()
-        .any(|e| matches!(e, Event::SelfJoined { .. })));
+    // Device 1 accepts it as is; device 0 approves it, which resolves it everywhere.
+    assert!(c.devices[1].accept_alarm(&alarm));
+    let key2 = c.devices[2].verifying_key();
+    c.devices[0]
+        .endorse(device_id(2), &key2, &device_name(2), c.clocks[0])
+        .unwrap();
+    assert!(c.devices[0].alarms().is_empty(), "approving resolves it");
+    c.heal();
+    assert!(c.devices[2].has_powers());
     // A self-join must be a stream's first entry.
     assert!(matches!(
         c.devices[2].self_join(c.clocks[2]),
@@ -853,16 +860,14 @@ fn a_rolled_back_stream_pauses_syncing() {
         .sync(&restored_backup, c.clocks[0])
         .unwrap_err();
     assert!(matches!(err, Error::Refused(_)));
-    assert!(matches!(
-        c.devices[0].alarm(),
-        Some(Alarm::Rollback { stream, .. }) if *stream == device_id(1)
-    ));
+    let alarm = c.devices[0].alarms()[0].clone();
+    assert!(matches!(alarm, Alarm::Rollback { stream, .. } if stream == device_id(1)));
     // Paused until the user decides.
     assert!(matches!(
         c.devices[0].sync(&c.store, c.clocks[0]),
         Err(Error::Refused(_))
     ));
-    c.devices[0].clear_alarm();
+    assert!(c.devices[0].accept_alarm(&alarm));
     c.devices[0].sync(&c.store, c.clocks[0]).unwrap();
 }
 
@@ -885,7 +890,7 @@ fn a_rollback_of_the_own_stream_is_noticed_before_writing() {
         .unwrap();
     let _ = c.devices[0].sync(&restored_backup, c.clocks[0]);
     assert!(matches!(
-        c.devices[0].alarm(),
+        c.devices[0].alarms().first(),
         Some(Alarm::Rollback { stream, .. }) if *stream == device_id(0)
     ));
 }
@@ -921,7 +926,7 @@ fn a_fork_is_detected_through_another_devices_checkpoint() {
     };
     c.devices[0].sync(&partitioned, c.clocks[0]).unwrap();
     assert!(
-        c.devices[0].alarm().is_none(),
+        c.devices[0].alarms().is_empty(),
         "one history alone looks fine"
     );
     // Device 2 sees the real history and says so in its next checkpoint.
@@ -938,7 +943,7 @@ fn a_fork_is_detected_through_another_devices_checkpoint() {
     c.sync(2).unwrap();
     let _ = c.devices[0].sync(&partitioned, c.clocks[0]);
     assert!(matches!(
-        c.devices[0].alarm(),
+        c.devices[0].alarms().first(),
         Some(Alarm::Fork { stream, .. }) if *stream == device_id(1)
     ));
 }
@@ -972,7 +977,10 @@ fn a_segment_that_does_not_continue_the_chain_is_a_fork() {
         c.sync(1).unwrap();
     }
     let _ = c.devices[0].sync(&c.store, c.clocks[0]);
-    assert!(matches!(c.devices[0].alarm(), Some(Alarm::Fork { .. })));
+    assert!(matches!(
+        c.devices[0].alarms().first(),
+        Some(Alarm::Fork { .. })
+    ));
 }
 
 #[test]

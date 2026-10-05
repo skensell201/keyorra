@@ -6,7 +6,8 @@
 //!       | { "genesis": { "account_id", "key", "name" } }     the root device, first entry of its stream
 //!       | { "self_join": { "key", "name", "sig" } }          a device that joined with the Emergency Kit
 //!       | { "endorse": { "device", "key", "name", "sig" } }  a live device vouches for another one
-//!       | { "revoke": { "device", "last_valid_seq" } }       entries of `device` after the cut stop counting
+//!       | { "revoke": { "device", "last_valid_seq", "last_valid_hash" } }
+//!                                                          entries of `device` after the cut stop counting
 //! sig   = Ed25519(signer, "keyorra/sync/v1/endorse\0" ‖ account_id ‖ device ‖ key)
 //! ```
 //!
@@ -56,6 +57,9 @@ pub enum Entry {
     Revoke {
         device: DeviceId,
         last_valid_seq: u64,
+        /// The chain hash of `device`'s entry at `last_valid_seq`: names the history the cut
+        /// refers to (zeros for a cut at 0).
+        last_valid_hash: [u8; 32],
     },
 }
 
@@ -145,11 +149,13 @@ impl Entry {
             Entry::Revoke {
                 device,
                 last_valid_seq,
+                last_valid_hash,
             } => (
                 "revoke",
                 Value::map(vec![
                     ("device", Value::bytes(device)),
                     ("last_valid_seq", Value::Uint(*last_valid_seq)),
+                    ("last_valid_hash", Value::bytes(last_valid_hash)),
                 ]),
             ),
         };
@@ -207,10 +213,11 @@ impl Entry {
                 }
             }
             "revoke" => {
-                let f = body.fields(&["device", "last_valid_seq"])?;
+                let f = body.fields(&["device", "last_valid_seq", "last_valid_hash"])?;
                 Entry::Revoke {
                     device: f.get("device")?.as_array_of()?,
                     last_valid_seq: f.get("last_valid_seq")?.as_uint()?,
+                    last_valid_hash: f.get("last_valid_hash")?.as_array_of()?,
                 }
             }
             other => return Err(Error::Unsupported(format!("entry type {other}"))),
@@ -282,6 +289,7 @@ mod tests {
             Entry::Revoke {
                 device: [3; 16],
                 last_valid_seq: 12,
+                last_valid_hash: [6; 32],
             },
         ]
     }
