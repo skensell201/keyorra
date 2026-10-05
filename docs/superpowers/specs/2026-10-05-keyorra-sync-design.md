@@ -888,23 +888,29 @@ account owner in the app ("Device revoked by the server admin on …").
 ### 7.1 Store migration v2
 
 ```
-sync_config   one row: account_id, transport, location, state, root_device
-sync_versions every accepted version: kind, id, vector, hlc, author, stream position,
-              ciphertext (dominated ones kept 90 days, §3.4)
-sync_heads    per stream: seq, hash, last_seen_hlc, claimed heads from checkpoints
-sync_devices  device_id, name, pk, introduced_by, live/revoked, cut
-sync_outbox   record kind, id, queued_at
-sync_log      at, level, text (last 1000 events; local and encrypted like everything else)
+sync_changes   kind, id: records changed locally, not yet written as versions
+sync_segments  first_seq, data: this device's own confirmed segments (already encrypted)
+sealed meta    sync:config  account id, device id and name, main device id and key,
+                            Secret Key and its id
+               sync:outbox  the engine's outbox (sealed segment, queued entries, sent head)
+               sync:memo    accepted alarms, acknowledged rollbacks, blocked streams,
+                            remembered heads, the main device's advertised head and time
 ```
+
+Nothing else of sync is stored locally. After a restart the engine reads every stream
+again from the transport (its own up to the confirmed position, verified with its own
+key), then compares the heads with the remembered ones: a stream that now holds
+something else is a fork. Snapshots (§4.8) bound this reading. This trades start-up
+work for a much smaller local schema and one source of truth.
 
 **Single change path.** Every mutating `Store` method (`save_item`, `delete_item`,
 `restore_item`, `purge_expired`, attachment add/remove, vault create/rename/delete,
-`apply_import`) calls one private function, `record_change(tx, RecordRef)`, inside its
-transaction; it enqueues into `sync_outbox` when sync is on. A test asserts that each
-public mutating method produces an outbox row.
+`apply_import`) calls one private function, `record_change(tx, kind, id)`, inside its
+transaction; it records into `sync_changes` when sync is on. A test asserts that each
+public mutating method records its records. What sync shows is written with
+`apply_remote_*` methods that record nothing.
 
-The Ed25519 device key is in the Keychain (§4.2). The Secret Key is sealed under AK in
-`sealed_meta("sync-secret-key")`.
+The Ed25519 device key is in the Keychain (§4.2). The Secret Key is sealed under AK in `sync:config`.
 
 ### 7.2 Enabling sync (first device)
 
@@ -914,8 +920,7 @@ The Ed25519 device key is in the Keychain (§4.2). The Secret Key is sealed unde
 3. Generate `account_id`, Secret Key, Secret Key id, device id and key.
 4. Emergency Kit (§7.6). The user confirms by typing the last 4 characters of the Secret
    Key.
-5. Write `Genesis`, header epoch 1, every vault, item and attachment as versions
-   `{this_device: 1}`, then a snapshot. Progress bar; the vault stays usable.
+5. Write `Genesis`, header epoch 1, every vault (with its existing id and key: `adopt_vault`; its id does not commit to its key, §4.4, so the earliest admitted version whose key unwraps decides) and every item as versions. Attachment contents travel with the folder transport (A2). A snapshot follows when due (§4.8).
 
 ### 7.3 Joining (another Mac)
 
@@ -1156,7 +1161,8 @@ Each line becomes one implementation plan in `docs/superpowers/plans/`.
 | **A1b** Fold | Versions/HLC, validation, payloads, sibling sets, presentation, conflict copies and materialisation, the fold with an admission hook, a first engine (`Put` entries only, fixed device directory), `MemoryTransport`, fault-injecting transport, property tests | Suites 2, 4 (trust stubbed), 5 (transient faults), 6 green |
 | **A1c-1** Streams and trust | Entry types, root `Genesis`, endorsement, SelfJoin alarm, revocation cut and re-fold, per-record causal delivery, checkpoints, rollback/fork/withholding detection and alarms, rollback and fork fault transports | Suites 3 (without headers, snapshots, clones), 5, 6 green |
 | **A1c-2** Recovery and bootstrap | Headers (root-published, root key bound), root head file, join from headers, snapshots (root bootstrap, author-scoped anchoring, restore), retire (pending re-approval; the main device asks to start over), outbox hook. | Suite 3 complete |
-| **A1d** Store integration | Store migration v2, single change path, `Item.extra` and the `conflict` field, the engine reading from and writing to the local store | Suite 11 green; a vault survives enable → edit → sync → restart |
+| **A1d-1** Store integration | Engine resume and memo, migration v2, single change path, remote applies, `Item.extra` and `conflict`, the session-side bridge (`enable`, `join`, `resume`, rounds) over `MemoryTransport` | Two stores converge; restart resumes; enable keeps existing data |
+| **A1d-2** Sync in the session | Session wiring (sync only while unlocked), setup code, device keys sealed to the Secure Enclave, turning sync off, rejoining (merge by record id), carrying another account's vault over, starting a new account | Two sessions converge through enable/join/approve/lock/unlock/disable/rejoin |
 | **A2** Folder transport | `keyorra-sync-fs`: layout, temp-outside-tree writes, strict reading, iCloud/File Provider download state, `NSFileCoordinator`, FSEvents + poll, deadlines, `keyorra-inspect` | Suite 7 green; two processes on one folder converge |
 | **A3** UI | Enable/join/leave, Emergency Kit, setup code, folder-based approval, Sync screen, conflicts in list/detail/Watchtower, alarms | Suite 10 (folder) green; manual two-Mac iCloud test |
 | **B1** Server | Schema, API, auth, approval exchange, SSE, limits, quotas, TLS modes, logs, admin CLI, backup/restore/check | Suite 8 green |
