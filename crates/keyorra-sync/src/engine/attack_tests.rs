@@ -1357,3 +1357,30 @@ fn review_g1_a_provisional_cut_that_rises_rereads_the_skipped_records() {
     );
     assert_eq!(title(&c.devices[1].view(), first), "counts");
 }
+
+/// Review A1d C3: the view's wrapped key is the top sibling's; the app must use the key
+/// the engine chose (the one the vault id commits to).
+#[test]
+fn review_a1d_c3_the_engine_names_the_vault_key_the_view_may_not_show() {
+    let mut c = Cluster::new(3, 1, Faults::NONE);
+    let vault = c.devices[0].create_vault("Personal", START_MS).unwrap();
+    c.heal();
+    let honest = c.devices[0].view().vaults[&vault].wrapped_key.clone();
+    let other = crypto::wrap_vault_key(
+        &Key::from_bytes(ACCOUNT_KEY),
+        vault,
+        &Key::from_bytes([5; 32]),
+    );
+    forge(
+        &mut c,
+        1,
+        vec![forged_vault_put(1, vault, other.clone(), u64::MAX / 2)],
+    );
+    c.heal();
+    for i in [0, 2] {
+        let view = c.devices[i].view();
+        assert_eq!(view.vaults[&vault].wrapped_key, other, "the top sibling");
+        assert!(view.vaults[&vault].key_mismatch);
+        assert_eq!(c.devices[i].vault_key(vault), Some(honest.clone()));
+    }
+}

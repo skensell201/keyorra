@@ -270,6 +270,12 @@ impl<R: RngCore + CryptoRng> Engine<R> {
     /// The memo to persist (after every sync round).
     pub fn memo(&self) -> EngineMemo {
         let mut heads = self.heads.clone();
+        // What was received before a restart and not read again yet is still remembered.
+        for (stream, h) in &self.remembered_heads {
+            if heads.get(stream).is_none_or(|x| x.seq < h.seq) {
+                heads.insert(*stream, *h);
+            }
+        }
         heads.remove(&self.device);
         EngineMemo {
             accepted_alarms: self.accepted_alarms.iter().cloned().collect(),
@@ -302,9 +308,22 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         }
         self.finish_rebuild_now();
         self.apply_pending(wall_ms);
-        // A history that differs from what was received before the restart is a fork.
+    }
+
+    /// After every pull: each stream read again up to what was received before the restart
+    /// is compared once; a history that differs is a fork (review A1d I2). Until then the
+    /// remembered head also counts for the rollback check.
+    pub(super) fn check_remembered(&mut self) {
         let remembered = std::mem::take(&mut self.remembered_heads);
         for (stream, h) in remembered {
+            if self.trust.is_removed(&stream) {
+                continue;
+            }
+            let read = self.heads.get(&stream).map_or(0, |x| x.seq);
+            if read < h.seq {
+                self.remembered_heads.insert(stream, h);
+                continue;
+            }
             let known = self.hashes.get(&stream).and_then(|x| x.get(&h.seq));
             if known.is_some_and(|k| *k != h.hash) {
                 self.raise(Alarm::Fork { stream, seq: h.seq });

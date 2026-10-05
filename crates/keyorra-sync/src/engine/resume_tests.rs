@@ -228,3 +228,46 @@ fn an_existing_vault_is_adopted_with_its_id_and_key() {
     let unwrapped = crypto::unwrap_vault_key(&Key::from_bytes(ACCOUNT_KEY), id, wrapped).unwrap();
     assert_eq!(unwrapped.as_bytes(), key.as_bytes());
 }
+
+/// Review A1d I2: the store rolled a stream back while the app was closed.
+#[test]
+fn a_rollback_while_the_app_was_closed_is_noticed_after_restart() {
+    for restarted_wrote in [false, true] {
+        let (mut c, vault) = shared(3);
+        for n in 0..3u8 {
+            let json = Cluster::item_json(Uuid::from_bytes([0x70 + n; 16]), "by 1", &[]);
+            c.devices[1]
+                .save_item(vault, Uuid::from_bytes([0x70 + n; 16]), &json, c.clocks[1])
+                .unwrap();
+            c.sync(1).unwrap();
+        }
+        if restarted_wrote {
+            let json = Cluster::item_json(ITEM, "by 2", &[]);
+            c.devices[2]
+                .save_item(vault, ITEM, &json, c.clocks[2])
+                .unwrap();
+        }
+        c.heal();
+        restart(&mut c, 2);
+        // Persisted again before any round: what was received is not forgotten.
+        assert!(c.devices[2].memo().heads.contains_key(&device_id(1)));
+        let last = c
+            .store
+            .dump()
+            .into_iter()
+            .filter(|(d, _, _)| *d == device_id(1))
+            .map(|(_, seq, _)| seq)
+            .max()
+            .unwrap();
+        c.store.remove_segment(&device_id(1), last);
+        let _ = c.sync(2);
+        assert!(
+            c.devices[2]
+                .alarms()
+                .iter()
+                .any(|a| matches!(a, Alarm::Rollback { stream, .. } if *stream == device_id(1))),
+            "restarted_wrote={restarted_wrote}: {:?}",
+            c.devices[2].alarms()
+        );
+    }
+}

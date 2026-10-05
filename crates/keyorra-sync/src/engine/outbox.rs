@@ -106,14 +106,17 @@ impl OutboxState {
     }
 }
 
-/// Where A1d keeps [`OutboxState`] (in the same transaction as the local change).
+/// Where the app keeps [`OutboxState`]: saved after every queued entry, before every
+/// append (with the sealed segment) and after every confirmation. It is not in the same
+/// transaction as the local change: the app keeps the change recorded until a save succeeds
+/// ([`Engine::outbox_unsaved`]), so a crash in between writes it again (review A1d I3).
 pub trait OutboxStore: Send {
     /// Persists `state`. On an error the engine appends nothing until a save succeeds, so it
-    /// never sends what a restart would not know about (review minor).
+    /// never sends what a restart would not know about.
     fn save(&mut self, state: &OutboxState) -> Result<()>;
 }
 
-/// Nothing is persisted (tests, and until A1d).
+/// Nothing is persisted (tests).
 pub struct NoOutboxStore;
 
 impl OutboxStore for NoOutboxStore {

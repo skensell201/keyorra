@@ -955,6 +955,18 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         keys
     }
 
+    /// The wrapped key of `vault` as the engine uses it ([`Self::vault_wrapped_key`]): what
+    /// the local store must keep, not the view's top sibling (review A1d C3).
+    pub fn vault_key(&self, vault: Uuid) -> Option<Vec<u8>> {
+        self.vault_wrapped_key(vault)
+    }
+
+    /// The last outbox save failed: changes written since are not safe from a crash yet
+    /// (review A1d I3); the app keeps them recorded until a save succeeds.
+    pub fn outbox_unsaved(&self) -> bool {
+        self.outbox_unsaved
+    }
+
     /// The key to write into `vault` with: the one of its visible version.
     fn writer_vault_key(&mut self, vault: Uuid) -> Option<Key> {
         let wrapped = self.vault_wrapped_key(vault)?;
@@ -1425,12 +1437,18 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         if self.rebuilding {
             self.finish_rebuild(wall_ms);
         }
+        self.check_remembered();
         Ok(())
     }
 
     /// Rollback: the store's head of a stream is behind what this device received.
     fn check_stored_head(&mut self, transport: &impl Transport, stream: &DeviceId) {
-        let received = self.heads.get(stream).map_or(0, |h| h.seq);
+        // After a restart, what was received before counts until the stream is read again.
+        let received = self
+            .heads
+            .get(stream)
+            .map_or(0, |h| h.seq)
+            .max(self.remembered_heads.get(stream).map_or(0, |h| h.seq));
         if received == 0 {
             return;
         }
