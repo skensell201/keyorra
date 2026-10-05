@@ -1,0 +1,195 @@
+//! Snapshots: self-contained, signed packs of a device's whole fold (contents defined in plan
+//! A1c; here the body is any CBOR value).
+//!
+//! ```text
+//! snapshot = "KYP1" ‖ collection:u8 ‖ author:16 ‖ nonce:24
+//!            ‖ XChaCha20-Poly1305(K_seg, nonce, pad(canonical(payload)), aad = header ‖ nonce)
+//! payload  = { "body": …, "sig": Ed25519(author key, "keyorra/sync/v1/snapshot\0" ‖ header ‖ canonical(body)) }
+//! name     = lowercase hex SHA-256 of the whole snapshot
+//! ```
+
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
+use keyorra_core::crypto::{self, Key, NONCE_LEN};
+use sha2::{Digest, Sha256};
+use zeroize::Zeroizing;
+
+use crate::cbor::{self, Value};
+use crate::error::{malformed, Error, Result};
+use crate::labels::{self, tagged};
+use crate::pad::{pad, unpad};
+use crate::segment::ACCOUNT_COLLECTION;
+use crate::DeviceId;
+
+pub const MAGIC: &[u8; 4] = b"KYP1";
+pub const HEADER_LEN: usize = 4 + 1 + 16;
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SnapshotHeader {
+    pub collection: u8,
+    pub author: DeviceId,
+}
+
+impl SnapshotHeader {
+    pub fn to_bytes(&self) -> [u8; HEADER_LEN] {
+        let mut out = [0u8; HEADER_LEN];
+        out[..4].copy_from_slice(MAGIC);
+        out[4] = self.collection;
+        out[5..].copy_from_slice(&self.author);
+        out
+    }
+
+    pub fn parse(snapshot: &[u8]) -> Result<SnapshotHeader> {
+        if snapshot.len() < HEADER_LEN || &snapshot[..4] != MAGIC {
+            return Err(malformed("snapshot header"));
+        }
+        if snapshot[4] != ACCOUNT_COLLECTION {
+            return Err(Error::Unsupported(format!("collection {}", snapshot[4])));
+        }
+        Ok(SnapshotHeader {
+            collection: snapshot[4],
+            author: snapshot[5..HEADER_LEN].try_into().unwrap(),
+        })
+    }
+}
+
+fn signed_message(header: &[u8; HEADER_LEN], body: &Value) -> Vec<u8> {
+    tagged(labels::SNAPSHOT, &[header, &cbor::encode(body)])
+}
+
+fn aad(header: &[u8; HEADER_LEN], nonce: &[u8; NONCE_LEN]) -> Vec<u8> {
+    let mut aad = header.to_vec();
+    aad.extend_from_slice(nonce);
+    aad
+}
+
+pub fn seal_snapshot(
+    segment_key: &Key,
+    signer: &SigningKey,
+    author: DeviceId,
+    body: Value,
+    nonce: &[u8; NONCE_LEN],
+) -> Vec<u8> {
+    let header = SnapshotHeader {
+        collection: ACCOUNT_COLLECTION,
+        author,
+    }
+    .to_bytes();
+    let sig = signer.sign(&signed_message(&header, &body)).to_bytes();
+    let payload = Zeroizing::new(pad(&cbor::encode(&Value::map(vec![
+        ("body", body),
+        ("sig", Value::bytes(sig)),
+    ]))));
+    let mut out = header.to_vec();
+    out.extend_from_slice(&crypto::seal_with_nonce(
+        segment_key,
+        nonce,
+        &payload,
+        &aad(&header, nonce),
+    ));
+    out
+}
+
+pub fn open_snapshot(
+    segment_key: &Key,
+    author: &VerifyingKey,
+    snapshot: &[u8],
+) -> Result<(SnapshotHeader, Value)> {
+    let header = SnapshotHeader::parse(snapshot)?;
+    let header_bytes = header.to_bytes();
+    let sealed = &snapshot[HEADER_LEN..];
+    let nonce: &[u8; NONCE_LEN] = sealed
+        .get(..NONCE_LEN)
+        .and_then(|n| n.try_into().ok())
+        .ok_or_else(|| malformed("snapshot nonce"))?;
+    let padded = crypto::open(segment_key, sealed, &aad(&header_bytes, nonce))
+        .map_err(|_| Error::Decrypt)?;
+    let payload = cbor::decode(unpad(&padded)?)?;
+    let f = payload.fields(&["body", "sig"])?;
+    let body = f.get("body")?;
+    let sig: [u8; 64] = f.get("sig")?.as_array_of()?;
+    author
+        .verify_strict(
+            &signed_message(&header_bytes, body),
+            &Signature::from_bytes(&sig),
+        )
+        .map_err(|_| Error::BadSignature)?;
+    Ok((header, body.clone()))
+}
+
+/// The file/blob name: lowercase hex SHA-256 of the snapshot bytes.
+pub fn snapshot_name(snapshot: &[u8]) -> String {
+    data_encoding::HEXLOWER.encode(&Sha256::digest(snapshot))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const AUTHOR: DeviceId = [0x40; 16];
+
+    fn k_seg() -> Key {
+        Key::from_bytes([0x90; 32])
+    }
+
+    fn signer() -> SigningKey {
+        SigningKey::from_bytes(&[0x41; 32])
+    }
+
+    fn body() -> Value {
+        Value::map(vec![("records", Value::Array(vec![Value::Uint(1)]))])
+    }
+
+    fn sealed() -> Vec<u8> {
+        seal_snapshot(&k_seg(), &signer(), AUTHOR, body(), &[0x55; NONCE_LEN])
+    }
+
+    #[test]
+    fn round_trip() {
+        let (header, value) =
+            open_snapshot(&k_seg(), &signer().verifying_key(), &sealed()).unwrap();
+        assert_eq!(header.author, AUTHOR);
+        assert_eq!(value, body());
+        assert_eq!(SnapshotHeader::parse(&sealed()).unwrap(), header);
+        assert_eq!(sealed().len(), HEADER_LEN + NONCE_LEN + 1024 + 16);
+    }
+
+    #[test]
+    fn author_bytes_wrong_key_and_wrong_signer_fail() {
+        let pk = signer().verifying_key();
+        let mut moved = sealed();
+        moved[5] ^= 1;
+        assert!(matches!(
+            open_snapshot(&k_seg(), &pk, &moved),
+            Err(Error::Decrypt)
+        ));
+        assert!(matches!(
+            open_snapshot(&Key::from_bytes([0x91; 32]), &pk, &sealed()),
+            Err(Error::Decrypt)
+        ));
+        let other = SigningKey::from_bytes(&[0x42; 32]).verifying_key();
+        assert!(matches!(
+            open_snapshot(&k_seg(), &other, &sealed()),
+            Err(Error::BadSignature)
+        ));
+    }
+
+    #[test]
+    fn segment_and_snapshot_signatures_are_domain_separated() {
+        // The same key signs both kinds; a snapshot signature must never verify as a segment one.
+        let header = SnapshotHeader {
+            collection: 0,
+            author: AUTHOR,
+        }
+        .to_bytes();
+        assert_ne!(
+            signed_message(&header, &body()),
+            tagged(labels::SEGMENT, &[&header, &cbor::encode(&body())])
+        );
+    }
+
+    #[test]
+    fn name_is_stable() {
+        assert_eq!(snapshot_name(&sealed()), snapshot_name(&sealed()));
+        assert_eq!(snapshot_name(&sealed()).len(), 64);
+    }
+}

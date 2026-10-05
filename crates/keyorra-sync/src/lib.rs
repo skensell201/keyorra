@@ -12,6 +12,7 @@ pub mod labels;
 pub mod pad;
 pub mod secret_key;
 pub mod segment;
+pub mod snapshot;
 
 pub use error::{Error, Result};
 
