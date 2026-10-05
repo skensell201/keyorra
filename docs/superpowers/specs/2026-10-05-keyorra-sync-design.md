@@ -160,7 +160,7 @@ a prefix, so no label is a prefix of another.
 | `M` | HKDF-Extract(salt = SK, ikm = U) | |
 | `KEK_sync` | HKDF-Expand(M, `keyorra/sync/v1/kek\0 ‖ account_id`, 32) | unwraps AK from the synced header |
 | `AUTH` | HKDF-Expand(M, `keyorra/sync/v1/server-auth\0 ‖ account_id`, 32) | server login (§6.3) |
-| `K_seg` | HKDF-SHA256(ikm = AK, salt = account_id, info = `keyorra/sync/v1/segment-key`) | segments and snapshots |
+| `K_seg` | HKDF-SHA256(ikm = AK, salt = account_id, info = `keyorra/sync/v1/segment-key\0`) | segments and snapshots |
 | vault key | existing, per vault | inner layer of item and attachment records |
 | attachment key | 32 random bytes per attachment | chunk blobs (§3.6) |
 | device key | Ed25519, per device, in the Keychain (§4.2) | signs segments, snapshots, headers, endorsements |
@@ -180,7 +180,7 @@ struct Version {
     hlc: u64,                        // hybrid logical clock: 48-bit unix ms | 16-bit counter
     author: DeviceId,                // device that wrote this version; equals the stream's device
 }
-version_hash(v) = SHA-256("keyorra/sync/v1/version\0" ‖ record_kind ‖ record_id ‖ canonical(v))
+version_hash(v) = SHA-256("keyorra/sync/v1/version\0" ‖ canonical([kind, record_id, v]))
 ```
 
 - **Write** on device D to a record with sibling set S (§3.4):
@@ -278,8 +278,13 @@ device purges on its own schedule; concurrent purges are content-equal.
 ### 3.6 Formats
 
 **Canonical encoding.** Deterministic CBOR (RFC 8949 §4.2.1: definite lengths, shortest
-integers, map keys sorted). Everything that is hashed, signed or authenticated is
-canonical CBOR. The `Item` JSON is carried as a CBOR byte string, so item serialisation
+integers, map keys sorted by their encoded bytes), restricted to unsigned integers, byte and
+text strings, arrays, maps, booleans and null. Decoding is strict: anything non-canonical
+(longer heads, unsorted or duplicate keys, indefinite lengths, floats, tags, negative
+integers) is rejected, so every value has exactly one encoding. Implemented as a small
+codec in `keyorra-sync` rather than a crate (none is in the lockfile, and the common ones
+neither guarantee canonical output nor reject non-canonical input). Everything that is
+hashed, signed or authenticated is canonical CBOR. The `Item` JSON is carried as a CBOR byte string, so item serialisation
 does not change.
 
 **Record version (inline in a Put entry).**
@@ -340,7 +345,7 @@ chain_n = SHA-256("keyorra/sync/v1/chain\0" ‖ chain_{n-1} ‖ canonical(entry_
 ```
 segment = "KYS1" ‖ collection:u8 ‖ device_id:16 ‖ first_seq:u64 ‖ last_seq:u64
           ‖ prev_hash:32 ‖ last_hash:32 ‖ nonce:24
-          ‖ XChaCha20-Poly1305(K_seg, nonce, pad(canonical({entries, sig})), aad = all preceding bytes)
+          ‖ XChaCha20-Poly1305(K_seg, nonce, pad(canonical({entries, sig})), aad = header ‖ nonce)
 sig     = Ed25519(device_sk, "keyorra/sync/v1/segment\0" ‖ all plaintext header bytes ‖ canonical(entries))
 ```
 
@@ -488,6 +493,10 @@ floor: {D -> seq}, devices (introductions, endorsements, revocations with their 
 signatures), current header, every sibling set (envelopes inline)}`, signed by the author
 (`keyorra/sync/v1/snapshot`), sealed with `K_seg`, padded, and referenced by a `Snapshot`
 entry in the author's stream so snapshots are themselves chained.
+Framing: `"KYP1" ‖ collection:u8 ‖ author:16 ‖ nonce:24 ‖ XChaCha20-Poly1305(K_seg, nonce,
+pad(canonical({body, sig})), aad = header ‖ nonce)`, `sig = Ed25519(author_sk,
+"keyorra/sync/v1/snapshot\0" ‖ header ‖ canonical(body))`; the name is the SHA-256 of the
+bytes.
 
 - Written after ~500 new entries or 7 days, after a restore, and after accepting a Revoke.
 - **Bootstrap**: a joining device takes the newest snapshot that verifies against a live
@@ -789,7 +798,9 @@ confirmation (server: login + approval). Not in phase A.
 ### 7.6 Secret Key and Emergency Kit
 
 **Decided: required for sync.** 128 random bits, shown as `<id>-XXXXX-XXXXX-XXXXX-XXXXX-
-XXXXX-X` (Crockford base32: 26 characters carry the 128 bits, plus one check character).
+XXXXX-XC`: 26 Crockford base32 digits carry the 128 bits (big-endian; the first digit is
+at most 7) and one Crockford check character (the key as an integer mod 37) follows;
+parsing ignores case and hyphens and reads I/L as 1 and O as 0.
 The 4-character `id` is separate random data, not derived from the key, so publishing it
 in the header reveals nothing.
 
