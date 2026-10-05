@@ -93,7 +93,7 @@ whenever keys are derived; the floor when a header read from storage is unlocked
 
 ```
 Header = { "keyorra_sync": 1, "account_id": bytes16, "epoch": uint32, "generation": uint32,
-           "root_device": bytes16, "kdf": { "m_kib", "t", "p" }, "salt": bytes16,
+           "root_device": bytes16, "root_key": bytes32, "kdf": { "m_kib", "t", "p" }, "salt": bytes16,
            "secret_key_id": text(4), "wrapped_account_key": bytes }
 wrapped_account_key = XChaCha20-Poly1305(KEK_sync, nonce, AK,
                         aad = "keyorra/sync/v1/account-key\0" ‖ binding)       exactly 72 bytes
@@ -103,7 +103,7 @@ sig        = Ed25519(author key, "keyorra/sync/v1/header\0" ‖ author:16 ‖ ca
 file name  = hex8(epoch) ‖ "-" ‖ hex(author) ‖ ".hdr"
 ```
 
-`binding` ties the wrapped key to account, epoch, generation, root device, KDF parameters, salt
+`binding` ties the wrapped key to account, epoch, generation, root device and key, KDF parameters, salt
 and Secret Key id, so a header cannot be recombined from parts. `secret_key_id` is 4 characters
 of the Secret Key alphabet. A header read from storage is untrusted until its signature has been
 verified with a key the trust rules (section 10) accept; unlocking it first is allowed but its
@@ -280,6 +280,9 @@ entry = { "put": Envelope }
       | { "self_join": { "key": bytes32, "name": text, "sig": bytes64 } }
       | { "endorse": { "device": bytes16, "key": bytes32, "name": text, "sig": bytes64 } }
       | { "revoke": { "device": bytes16, "last_valid_seq": uint, "last_valid_hash": bytes32 } }
+      | { "header": Header }                       an account header
+      | { "header_seen": epoch }                   the writer adopted this header epoch
+      | { "snapshot": { "name": bytes32, "frontier": { bytes16 → [seq, hash] } } }
 statement = "keyorra/sync/v1/endorse\0" ‖ account_id ‖ device ‖ key
 ```
 
@@ -309,7 +312,8 @@ trust is the root's stream applied in order.
    reader's chain (else 0); `revoke` of an id never approved means nothing of that id ever
    counts; `revoke` of the root itself is ignored. A `self_join` in the root's stream is
    ignored.
-2. In any other stream, `endorse`, `revoke` and `genesis` are ignored (reported).
+2. A `header` entry counts only in the root's stream; elsewhere it is ignored.
+   In any other stream, `endorse`, `revoke` and `genesis` are ignored (reported).
    `self_join` as entry 1 of a stream marks its device as **awaiting approval** if its
    signature and the segment verify with the key it carries; that key is used for nothing
    else. The root approves it only after the user confirmed the key's code
@@ -324,8 +328,8 @@ A device that is not approved can read but does not write (after `self_join`: wr
 pending). A device whose cut is set or that was removed does not write any more, nor does a
 device approved with a key that is not its own (an alarm).
 
-**Advertised root head.** The account header and the setup code carry the root's head
-`(seq, hash)` (bound in plan A1c-2). A device compares it with the root's stream as
+**Advertised root head.** A small file signed by the root (`root.head`, rewritten after every
+confirmed append) and the setup code carry the root's head `(seq, hash)`. A device compares it with the root's stream as
 received: if behind, other devices' records are **unconfirmed** and an alarm says so
 (pausing nothing) until the stream catches up; a different hash at that position is a fork
 of the root. The advertised head only moves forward.
@@ -402,7 +406,8 @@ removed device wrote is taken but the id.
 
 ## 11. Folder transport
 
-To be defined by plan A2.
+To be defined by plan A2. The store lists, next to the header and snapshot files, the root's
+head file `root.head` (section 10.2).
 
 ## 12. Server API
 

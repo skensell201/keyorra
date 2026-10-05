@@ -413,11 +413,7 @@ remote head:
 | remote ahead, or same seq with another hash | another copy of this device (clone, restored backup) wrote to the stream | **retire**: never write with this id again |
 | device key missing from the Keychain | database restored or copied to another Mac | **retire** |
 
-Retiring: local unsynced edits are kept in the outbox; the device generates a new id and
-key and rejoins (§7.3: approval by the main device, or self-join pending its approval); its
-first entries are the queued edits as new versions. Only the main device removes the old id
-(the app asks it to); until then the old id simply stays silent. (A retiring main device:
-plan A1c-2.)
+Retiring: local unsynced edits are kept; the device generates a new id and key and joins with `SelfJoin`, pending until the main device approves it (comparing the key code); its first entries are the queued edits as new versions. Only the main device removes the old id (A3 suggests it). **The main device never retires**: its id and key anchor the account. If another copy of it wrote, or its key is gone, it stops writing and the user is asked to start a new account from a device and carry the data over (A1d/A3 flow, §4.3).
 
 ### 4.3 Approval: the main device decides (root-only authority)
 
@@ -459,8 +455,8 @@ other device's approvals or removals count; there is nothing to resolve between 
   in the root's own latest checkpoint before the `Revoke`, counted only where that position
   matches the reader's chain. Removing a device that was never approved means none of its
   entries count. A cut is set once and never moves.
-- **The root's head is advertised** (review W1): the account header (A1c-2) and the setup
-  code carry the root's current head `(seq, hash)`. Every device compares it with the root's
+- **The root's head is advertised** (review W1): a small file signed by the main device (`root.head`, rewritten after every confirmed append) and the setup
+  code carry the root's current head `(seq, hash)`; a reader only moves it forward. (The header itself cannot carry the head: it is bound into the wrapped account key and changes only with the password.) Every device compares it with the root's
   stream as received: behind is an alarm ("the main device's changes are not all here")
   that pauses nothing but marks other devices' records as **unconfirmed** until the root's
   stream catches up (a removal could be withheld); another hash at that position is a fork
@@ -590,25 +586,27 @@ A joining device needs the wrapped AK before it has any key, so headers are also
 as standalone files, but they count only as signed log entries:
 
 ```
-Header       = { keyorra_sync: 1, account_id, epoch: u32, generation: u32, root_device,
+Header       = { keyorra_sync: 1, account_id, epoch: u32, generation: u32, root_device, root_key,
                  kdf, salt, secret_key_id, wrapped_account_key }
 wrapped_account_key = seal(KEK_sync, AK, "keyorra/sync/v1/account-key\0" ‖ SHA-256(canonical(header with empty wrapped_account_key)))
-                      // binds account_id, epoch, generation, root_device, kdf, salt and secret_key_id
+                      // binds account_id, epoch, generation, root_device, root_key, kdf, salt and secret_key_id
 header file  = canonical({ header, author: DeviceId, sig })     // named <epoch:08x>-<author hex>.hdr
 sig          = Ed25519(author_sk, "keyorra/sync/v1/header\0" ‖ author ‖ canonical(header))
 ```
 
 - The same `Header` must appear as an accepted `Header` entry in the author's stream; a
   header file without that is ignored after unlock and reported.
+- `root_key` is the main device's public key, bound like every other field. Only the main
+  device publishes headers (a master password change happens there); a `Header` entry in
+  another stream is ignored. A joining device takes the main device's id and key from the
+  header it unlocked, never from the streams. Old header files are deleted once every
+  approved device has adopted the new epoch (`HeaderSeen`).
 - **Joining** uses only the highest epoch present. If several files share it, they are
   tried in ascending author order. There is no fallback to lower epochs, even if the
   password fails: an old password must not open the account. (Consequence: someone with
   write access to the folder can block joining by planting a bogus high epoch; they can
   block sync anyway by deleting files. The error says "wrong password, or the account
   header was tampered with".)
-- **Concurrent changes** of the same epoch on two devices: the accepted entry with the
-  higher `(hlc, author)` wins; the other device is told its password change lost and the
-  password set on the other Mac is now the current one for new devices.
 - **KDF bounds** for remote headers, checked before running Argon2: m ≤ 1 GiB, t ≤ 10,
   p ≤ 4 (stricter than the local 4 GiB bound).
 - **Cleanup**: once the checkpoints of every live device report `header_epoch ≥ n`, any
@@ -628,6 +626,7 @@ pad(canonical({body, sig})), aad = header ‖ nonce)`, `sig = Ed25519(author_sk,
 bytes.
 
 - Written after ~500 new entries or 7 days, after a restore, and after accepting a Revoke.
+- What a snapshot vouches for depends on its author. A device with nothing yet bootstraps only from a snapshot of the main device (verified with the key from the header). A snapshot of the main device anchors any stream; a snapshot of another approved device anchors only its own stream. Restoring another device's rolled-back stream is done on the main device.
 - **Bootstrap**: a joining device takes the newest snapshot that verifies against a live
   device and whose frontier respects every revocation cut it later learns of (otherwise it
   falls back to an older snapshot or one written after the revocation), then reads all
@@ -1121,7 +1120,7 @@ Each line becomes one implementation plan in `docs/superpowers/plans/`.
 | **A1a** Keys and formats | HKDF derivations, labels, canonical CBOR, Padmé, envelopes, chunks, segment/snapshot/header framing, test vectors, `docs/sync-protocol.md` draft | Suite 1 green; protocol draft reviewed |
 | **A1b** Fold | Versions/HLC, validation, payloads, sibling sets, presentation, conflict copies and materialisation, the fold with an admission hook, a first engine (`Put` entries only, fixed device directory), `MemoryTransport`, fault-injecting transport, property tests | Suites 2, 4 (trust stubbed), 5 (transient faults), 6 green |
 | **A1c-1** Streams and trust | Entry types, root `Genesis`, endorsement, SelfJoin alarm, revocation cut and re-fold, per-record causal delivery, checkpoints, rollback/fork/withholding detection and alarms, rollback and fork fault transports | Suites 3 (without headers, snapshots, clones), 5, 6 green |
-| **A1c-2** Recovery and bootstrap | Clone/restore detection (own-stream head, device-key store hook) and retiring the id, headers as signed entries (highest-epoch join, concurrent epochs, old-epoch deletion), snapshots (bootstrap with per-stream floors, restore after rollback), outbox persistence hooks for A1d | Suite 3 complete |
+| **A1c-2** Recovery and bootstrap | Headers (root-published, root key bound), root head file, join from headers, snapshots (root bootstrap, author-scoped anchoring, restore), retire (pending re-approval; the main device asks to start over), outbox hook. | Suite 3 complete |
 | **A1d** Store integration | Store migration v2, single change path, `Item.extra` and the `conflict` field, the engine reading from and writing to the local store | Suite 11 green; a vault survives enable → edit → sync → restart |
 | **A2** Folder transport | `keyorra-sync-fs`: layout, temp-outside-tree writes, strict reading, iCloud/File Provider download state, `NSFileCoordinator`, FSEvents + poll, deadlines, `keyorra-inspect` | Suite 7 green; two processes on one folder converge |
 | **A3** UI | Enable/join/leave, Emergency Kit, setup code, folder-based approval, Sync screen, conflicts in list/detail/Watchtower, alarms | Suite 10 (folder) green; manual two-Mac iCloud test |
