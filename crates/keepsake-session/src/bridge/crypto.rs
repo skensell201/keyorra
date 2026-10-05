@@ -8,6 +8,7 @@ use sha2::{Digest, Sha256};
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
+// Format label from the Lockbox days; kept so existing vaults and pairings stay readable.
 pub const PROTOCOL: &str = "lockbox-bridge-v1";
 const NONCE_LEN: usize = 24;
 const TAG_LEN: usize = 16;

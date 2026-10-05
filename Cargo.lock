@@ -2129,6 +2129,68 @@ dependencies = [
 ]
 
 [[package]]
+name = "keepsake-app"
+version = "0.1.0"
+dependencies = [
+ "core-foundation",
+ "keepsake-core",
+ "keepsake-session",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-clipboard-manager",
+ "tauri-plugin-dialog",
+ "uuid",
+]
+
+[[package]]
+name = "keepsake-core"
+version = "0.1.0"
+dependencies = [
+ "argon2",
+ "chacha20poly1305",
+ "csv",
+ "data-encoding",
+ "hmac",
+ "mockito",
+ "percent-encoding",
+ "rand 0.8.8",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "sha1",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.21",
+ "ureq",
+ "url",
+ "uuid",
+ "zeroize",
+ "zip",
+ "zxcvbn",
+]
+
+[[package]]
+name = "keepsake-session"
+version = "0.1.0"
+dependencies = [
+ "chacha20poly1305",
+ "data-encoding",
+ "keepsake-core",
+ "psl",
+ "rand 0.8.8",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "url",
+ "uuid",
+ "x25519-dalek",
+ "zeroize",
+]
+
+[[package]]
 name = "keyboard-types"
 version = "0.8.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2232,68 +2294,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "224399e74b87b5f3557511d98dff8b14089b3dadafcab6bb93eab67d3aace965"
 dependencies = [
  "scopeguard",
-]
-
-[[package]]
-name = "lockbox-app"
-version = "0.1.0"
-dependencies = [
- "core-foundation",
- "lockbox-core",
- "lockbox-session",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-clipboard-manager",
- "tauri-plugin-dialog",
- "uuid",
-]
-
-[[package]]
-name = "lockbox-core"
-version = "0.1.0"
-dependencies = [
- "argon2",
- "chacha20poly1305",
- "csv",
- "data-encoding",
- "hmac",
- "mockito",
- "percent-encoding",
- "rand 0.8.8",
- "rusqlite",
- "serde",
- "serde_json",
- "sha1",
- "sha2",
- "tempfile",
- "thiserror 2.0.21",
- "ureq",
- "url",
- "uuid",
- "zeroize",
- "zip",
- "zxcvbn",
-]
-
-[[package]]
-name = "lockbox-session"
-version = "0.1.0"
-dependencies = [
- "chacha20poly1305",
- "data-encoding",
- "lockbox-core",
- "psl",
- "rand 0.8.8",
- "serde",
- "serde_json",
- "sha2",
- "tempfile",
- "url",
- "uuid",
- "x25519-dalek",
- "zeroize",
 ]
 
 [[package]]

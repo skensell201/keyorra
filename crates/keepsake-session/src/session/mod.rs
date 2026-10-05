@@ -1,11 +1,11 @@
 use std::path::{Path, PathBuf};
 
-use lockbox_core::crypto::KdfParams;
-use lockbox_core::import::{self, onepux, ImportPlan};
-use lockbox_core::model::{Field, FieldValue, HistoryEntry, Item, ItemKind, Purpose};
-use lockbox_core::store::ItemEntry;
-use lockbox_core::store::Store;
-use lockbox_core::totp::Totp;
+use keepsake_core::crypto::KdfParams;
+use keepsake_core::import::{self, onepux, ImportPlan};
+use keepsake_core::model::{Field, FieldValue, HistoryEntry, Item, ItemKind, Purpose};
+use keepsake_core::store::ItemEntry;
+use keepsake_core::store::Store;
+use keepsake_core::totp::Totp;
 use serde::Serialize;
 use uuid::Uuid;
 
@@ -145,9 +145,9 @@ impl Session {
                 self.store = Some(store);
                 Ok(())
             }
-            Err(lockbox_core::Error::WrongPassword) => {
+            Err(keepsake_core::Error::WrongPassword) => {
                 self.throttle.record_failure(now);
-                Err(lockbox_core::Error::WrongPassword.into())
+                Err(keepsake_core::Error::WrongPassword.into())
             }
             Err(e) => Err(e.into()),
         }
@@ -215,9 +215,9 @@ impl Session {
                 self.throttle.record_success();
                 Ok(())
             }
-            Err(lockbox_core::Error::WrongPassword) => {
+            Err(keepsake_core::Error::WrongPassword) => {
                 self.throttle.record_failure(now);
-                Err(lockbox_core::Error::WrongPassword.into())
+                Err(keepsake_core::Error::WrongPassword.into())
             }
             Err(e) => Err(e.into()),
         }
@@ -383,7 +383,7 @@ impl Session {
                     }
                 }
             }
-            Err(lockbox_core::Error::NotFound(_)) => {
+            Err(keepsake_core::Error::NotFound(_)) => {
                 let is_deleted = store.deleted_items()?.iter().any(|e| match e {
                     ItemEntry::Ok(i) => i.id == item.id,
                     ItemEntry::Damaged { id, .. } => *id == item.id,
@@ -532,7 +532,7 @@ impl Session {
 }
 
 fn locked() -> CmdError {
-    lockbox_core::Error::Locked.into()
+    keepsake_core::Error::Locked.into()
 }
 
 fn entry_vault(entry: &ItemEntry) -> Uuid {

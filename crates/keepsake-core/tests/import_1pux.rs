@@ -1,8 +1,8 @@
 use std::io::{Cursor, Write};
 
-use lockbox_core::import::{onepux, ImportPlan};
-use lockbox_core::model::{FieldValue, Item, ItemKind};
-use lockbox_core::Error;
+use keepsake_core::import::{onepux, ImportPlan};
+use keepsake_core::model::{FieldValue, Item, ItemKind};
+use keepsake_core::Error;
 use zip::write::SimpleFileOptions;
 
 const EXPORT_DATA: &str = include_str!("fixtures/export.data.json");

@@ -19,7 +19,7 @@ function el<K extends keyof HTMLElementTagNameMap>(tag: K, props: Partial<HTMLEl
 function shell(root: HTMLElement, ...content: Node[]): void {
   const header = el("header");
   header.innerHTML = MARK;
-  header.append("Lockbox");
+  header.append("Keepsake");
   root.replaceChildren(header, ...content);
 }
 
@@ -27,9 +27,9 @@ export async function renderPopup(root: HTMLElement, deps: PopupDeps): Promise<v
   const state = await deps.ask<State>({ type: "state" });
   const value: State = state.ok ? state.value : state.error === "other" ? "noApp" : state.error;
   if (value === "noApp") {
-    shell(root, el("p", { textContent: "Lockbox isn't running." }), el("button", { className: "primary", textContent: "Open Lockbox", onclick: () => deps.ask({ type: "show" }) }));
+    shell(root, el("p", { textContent: "Keepsake isn't running." }), el("button", { className: "primary", textContent: "Open Keepsake", onclick: () => deps.ask({ type: "show" }) }));
   } else if (value === "locked") {
-    shell(root, el("p", { textContent: "Lockbox is locked." }), el("button", { className: "primary", textContent: "Unlock", onclick: () => deps.ask({ type: "show" }) }));
+    shell(root, el("p", { textContent: "Keepsake is locked." }), el("button", { className: "primary", textContent: "Unlock", onclick: () => deps.ask({ type: "show" }) }));
   } else if (value === "pairing") {
     // The popup was closed while the user was approving in the app: show the code again and keep waiting.
     const c = await deps.ask<string | null>({ type: "pairingCode" });
@@ -40,7 +40,7 @@ export async function renderPopup(root: HTMLElement, deps: PopupDeps): Promise<v
       connect.disabled = true;
       void pair(root, deps);
     };
-    shell(root, el("p", { textContent: "Connect this browser to Lockbox. You'll confirm a code in the app." }), connect);
+    shell(root, el("p", { textContent: "Connect this browser to Keepsake. You'll confirm a code in the app." }), connect);
   } else {
     await showLogins(root, deps);
   }
@@ -49,7 +49,7 @@ export async function renderPopup(root: HTMLElement, deps: PopupDeps): Promise<v
 async function pair(root: HTMLElement, deps: PopupDeps): Promise<void> {
   const r = await deps.ask<{ code: string }>({ type: "pair" });
   if (!r.ok) {
-    shell(root, el("p", { textContent: r.error === "locked" ? "Unlock Lockbox first, then try again." : r.message }));
+    shell(root, el("p", { textContent: r.error === "locked" ? "Unlock Keepsake first, then try again." : r.message }));
     return;
   }
   await waitForApproval(root, deps, r.value.code);
@@ -57,16 +57,16 @@ async function pair(root: HTMLElement, deps: PopupDeps): Promise<void> {
 
 async function waitForApproval(root: HTMLElement, deps: PopupDeps, rawCode: string | null): Promise<void> {
   if (!rawCode) {
-    shell(root, el("p", { textContent: "Waiting for approval in the Lockbox app…" }));
+    shell(root, el("p", { textContent: "Waiting for approval in the Keepsake app…" }));
   } else {
     const code = `${rawCode.slice(0, 3)} ${rawCode.slice(3)}`;
-    shell(root, el("p", { textContent: "Confirm this code in the Lockbox app:" }), el("div", { className: "code", textContent: code }));
+    shell(root, el("p", { textContent: "Confirm this code in the Keepsake app:" }), el("div", { className: "code", textContent: code }));
   }
   for (let i = 0; i < 120; i++) {
     const s = await deps.ask<"none" | "waiting" | "paired" | "denied">({ type: "pairStatus" });
     if (s.ok && s.value === "paired") return showLogins(root, deps);
     if (!s.ok) {
-      shell(root, el("p", { textContent: "Lockbox isn't running." }));
+      shell(root, el("p", { textContent: "Keepsake isn't running." }));
       return;
     }
     if (s.value === "none") return renderPopup(root, deps);

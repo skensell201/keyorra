@@ -6,8 +6,8 @@ mod screen;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use lockbox_core::crypto::KdfParams;
-use lockbox_session::Session;
+use keepsake_core::crypto::KdfParams;
+use keepsake_session::Session;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
@@ -32,7 +32,7 @@ pub fn run() {
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
-            let path = app.path().app_data_dir()?.join("lockbox.db");
+            let path = app.path().app_data_dir()?.join("keepsake.db");
             app.manage(AppState(Mutex::new(Session::new(
                 path,
                 KdfParams::DEFAULT,
@@ -41,7 +41,7 @@ pub fn run() {
             let handle = app.handle().clone();
             std::thread::spawn(move || housekeeping(handle));
             if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
-                let socket = lockbox_session::bridge::wire::socket_path(&home);
+                let socket = keepsake_session::bridge::wire::socket_path(&home);
                 let bridge_app = app.handle().clone();
                 std::thread::spawn(move || bridge::serve(bridge_app, socket));
             }
@@ -76,7 +76,7 @@ pub fn run() {
             commands::remove_paired_browser,
         ])
         .run(tauri::generate_context!())
-        .expect("error while running Lockbox");
+        .expect("error while running Keepsake");
 }
 
 /// Every two seconds: lock when idle (and tell the window), clear the clipboard once our copy

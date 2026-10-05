@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 
 use serde_json::json;
 
-pub const HOST_NAME: &str = "app.lockbox.bridge";
+pub const HOST_NAME: &str = "app.keepsake.bridge";
 pub const CHROMIUM_EXTENSION_ID: &str = "kaaofpbpmnghapcafbbhjflonijdijbj";
-pub const FIREFOX_EXTENSION_ID: &str = "lockbox@lockbox.app";
+pub const FIREFOX_EXTENSION_ID: &str = "keepsake@keepsake.app";
 
 /// Chromium passes the caller's origin; Firefox passes the manifest path and the extension id.
 pub fn is_host_launch(args: &[String]) -> bool {
@@ -106,7 +106,7 @@ pub fn manifests(app_support: &Path, exe: &Path) -> Vec<Manifest> {
 fn manifest_json(family: Family, exe: &Path) -> String {
     let mut m = json!({
         "name": HOST_NAME,
-        "description": "Lockbox password manager",
+        "description": "Keepsake password manager",
         "path": exe.to_string_lossy(),
         "type": "stdio",
     });
@@ -130,16 +130,16 @@ mod tests {
     #[test]
     fn recognises_browser_launches() {
         assert!(is_host_launch(&args(&[
-            "lockbox-app",
+            "keepsake-app",
             "chrome-extension://kaaofpbpmnghapcafbbhjflonijdijbj/"
         ])));
         assert!(is_host_launch(&args(&[
-            "lockbox-app",
-            "/x/app.lockbox.bridge.json",
-            "lockbox@lockbox.app"
+            "keepsake-app",
+            "/x/app.keepsake.bridge.json",
+            "keepsake@keepsake.app"
         ])));
-        assert!(!is_host_launch(&args(&["lockbox-app"])));
-        assert!(!is_host_launch(&args(&["lockbox-app", "--hidden"])));
+        assert!(!is_host_launch(&args(&["keepsake-app"])));
+        assert!(!is_host_launch(&args(&["keepsake-app", "--hidden"])));
     }
 
     #[test]
@@ -147,18 +147,18 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("Google/Chrome")).unwrap();
         std::fs::create_dir_all(dir.path().join("Mozilla")).unwrap();
-        let exe = std::path::Path::new("/Applications/Lockbox.app/Contents/MacOS/lockbox-app");
+        let exe = std::path::Path::new("/Applications/Keepsake.app/Contents/MacOS/keepsake-app");
         let found = manifests(dir.path(), exe);
         let names: Vec<_> = found.iter().map(|m| m.browser).collect();
         assert_eq!(names, ["Chrome", "Firefox"]);
         assert_eq!(
             found[0].path,
             dir.path()
-                .join("Google/Chrome/NativeMessagingHosts/app.lockbox.bridge.json")
+                .join("Google/Chrome/NativeMessagingHosts/app.keepsake.bridge.json")
         );
 
         let chrome: serde_json::Value = serde_json::from_str(&found[0].contents).unwrap();
-        assert_eq!(chrome["name"], "app.lockbox.bridge");
+        assert_eq!(chrome["name"], "app.keepsake.bridge");
         assert_eq!(chrome["type"], "stdio");
         assert_eq!(chrome["path"], exe.to_str().unwrap());
         assert_eq!(
@@ -168,7 +168,7 @@ mod tests {
         assert!(chrome.get("allowed_extensions").is_none());
 
         let firefox: serde_json::Value = serde_json::from_str(&found[1].contents).unwrap();
-        assert_eq!(firefox["allowed_extensions"][0], "lockbox@lockbox.app");
+        assert_eq!(firefox["allowed_extensions"][0], "keepsake@keepsake.app");
         assert!(firefox.get("allowed_origins").is_none());
     }
 }

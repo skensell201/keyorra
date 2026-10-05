@@ -1,6 +1,6 @@
 [workspace]
-members = ["crates/lockbox-core", "crates/lockbox-session", "app/src-tauri"]
-default-members = ["crates/lockbox-core", "crates/lockbox-session"]
+members = ["crates/keepsake-core", "crates/keepsake-session", "app/src-tauri"]
+default-members = ["crates/keepsake-core", "crates/keepsake-session"]
 resolver = "2"
 
 # Argon2 with 64 MiB is painfully slow unoptimized; keep debug builds usable.

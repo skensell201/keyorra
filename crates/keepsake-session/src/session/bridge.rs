@@ -2,9 +2,9 @@
 
 use std::path::Path;
 
-use lockbox_core::model::{FieldValue, Item, ItemKind, Purpose};
-use lockbox_core::store::ItemEntry;
-use lockbox_core::totp::Totp;
+use keepsake_core::model::{FieldValue, Item, ItemKind, Purpose};
+use keepsake_core::store::ItemEntry;
+use keepsake_core::totp::Totp;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -257,7 +257,7 @@ impl Session {
             if now < self.pair_blocked_until {
                 return (
                     error(
-                        "Too many pairing attempts. Open Lockbox and try again in a few minutes.",
+                        "Too many pairing attempts. Open Keepsake and try again in a few minutes.",
                     ),
                     Some(BridgeEvent::Show),
                 );
@@ -417,7 +417,7 @@ impl Session {
                 item_id,
                 draft,
             } => self.save_login(&url, &username, &password, item_id, draft, now),
-            Request::Generate => match lockbox_core::generator::password(&Default::default()) {
+            Request::Generate => match keepsake_core::generator::password(&Default::default()) {
                 Ok(generated) => Reply::Generated { generated },
                 Err(e) => Reply::Error {
                     error: e.to_string(),
@@ -933,7 +933,7 @@ fn set_password_field(item: &mut Item, password: &str) {
         .find(|f| f.purpose == Some(Purpose::Password))
     {
         Some(f) => f.value = FieldValue::Concealed(password.to_owned()),
-        None => item.fields.push(lockbox_core::model::Field {
+        None => item.fields.push(keepsake_core::model::Field {
             id: "password".into(),
             label: "password".into(),
             value: FieldValue::Concealed(password.to_owned()),

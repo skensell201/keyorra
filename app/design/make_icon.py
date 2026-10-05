@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Draws the 1024x1024 Lockbox icon (a keyhole on a blue rounded square) as a PNG. No dependencies."""
+"""Draws the 1024x1024 Keepsake icon (a keyhole on a blue rounded square) as a PNG. No dependencies."""
 import struct
 import zlib
 from pathlib import Path

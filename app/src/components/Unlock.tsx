@@ -48,7 +48,7 @@ export function Unlock({ onUnlocked }: { onUnlocked: () => void }) {
         <div className="logo">
           <Keyhole width={24} height={24} />
         </div>
-        <h1>Lockbox is locked</h1>
+        <h1>Keepsake is locked</h1>
         <label>
           Master password
           <input type="password" autoFocus value={password} onChange={(e) => setPassword(e.target.value)} />

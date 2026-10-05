@@ -6,6 +6,7 @@ use super::{derive_kek, open, seal, KdfParams, Key};
 use crate::{Error, Result};
 
 pub const FORMAT_VERSION: u32 = 1;
+// Format label from the Lockbox days; kept so existing vaults and pairings stay readable.
 const VAULT_KEY_LABEL: &[u8] = b"lockbox/vault-key/v1";
 const ITEM_LABEL: &[u8] = b"lockbox/item/v1";
 const ATTACHMENT_LABEL: &[u8] = b"lockbox/attachment/v1";

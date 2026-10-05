@@ -42,7 +42,7 @@ impl Hibp {
             .agent
             .get(&format!("{}/range/{prefix}", self.base_url))
             .set("Add-Padding", "true")
-            .set("User-Agent", "Lockbox")
+            .set("User-Agent", "Keepsake")
             .call()
             .map_err(|e| network(&e))?
             .into_string()

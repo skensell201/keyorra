@@ -4,7 +4,7 @@ import { Client, LockedError, NoAppError, UnpairedError, type Pairing } from "./
 import { PendingSaves, offerFor } from "./pending";
 import type { ErrorKind, Result, ToBackground, ToContent } from "./messages";
 
-const HOST = "app.lockbox.bridge";
+const HOST = "app.keepsake.bridge";
 
 // The pairing key is kept in IndexedDB, which only this worker opens; chrome.storage is readable by content scripts.
 const client = new Client((msg) => chrome.runtime.sendNativeMessage(HOST, msg), {

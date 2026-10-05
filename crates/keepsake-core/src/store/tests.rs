@@ -5,7 +5,7 @@ pub(super) const PW: &str = "correct horse";
 
 pub(super) fn new_store() -> (tempfile::TempDir, PathBuf, Store) {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("lockbox.db");
+    let path = dir.path().join("keepsake.db");
     let store = Store::create(&path, PW, KdfParams::INSECURE_FAST).unwrap();
     (dir, path, store)
 }
@@ -117,7 +117,7 @@ fn backup_copies_the_file_next_to_itself() {
     let (_dir, path, store) = new_store();
     drop(store);
     let copy = backup(&path, 1).unwrap();
-    assert_eq!(copy, dir_path_join(&path, "lockbox.db.bak-v1"));
+    assert_eq!(copy, dir_path_join(&path, "keepsake.db.bak-v1"));
     assert_eq!(std::fs::read(&copy).unwrap(), std::fs::read(&path).unwrap());
 }
 
@@ -147,7 +147,7 @@ fn open_rejects_foreign_sqlite_database_without_writing() {
 #[test]
 fn create_with_invalid_kdf_params_leaves_no_file() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("lockbox.db");
+    let path = dir.path().join("keepsake.db");
     let bad = KdfParams {
         m_kib: 8,
         t: 0,

@@ -7,7 +7,7 @@ pub(super) const PW: &str = "correct horse battery";
 pub(super) fn new_session() -> (TempDir, Session) {
     let dir = tempfile::tempdir().unwrap();
     // A missing parent directory must be created on first run.
-    let path = dir.path().join("Application Support").join("lockbox.db");
+    let path = dir.path().join("Application Support").join("keepsake.db");
     (dir, Session::new(path, KdfParams::INSECURE_FAST, 1_000))
 }
 
@@ -98,7 +98,7 @@ fn clipboard_guard_is_exposed() {
     assert!(s.clipboard_should_clear(1_090, Some("x")));
 }
 
-use lockbox_core::model::{FieldValue, Item, ItemKind};
+use keepsake_core::model::{FieldValue, Item, ItemKind};
 use uuid::Uuid;
 
 use crate::dto::ItemFilter;
@@ -283,7 +283,7 @@ fn a_locked_session_refuses_vault_access() {
     );
 }
 
-use lockbox_core::model::{Field, Section};
+use keepsake_core::model::{Field, Section};
 
 /// base32 of "12345678901234567890" (RFC 6238 SHA-1 secret).
 const RFC_SECRET: &str = "GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ";
@@ -463,7 +463,7 @@ fn saving_a_deleted_item_is_refused_and_does_not_undelete_it() {
     assert!(titles(&mut s, ItemFilter::default()).is_empty());
     let deleted = s.store.as_ref().unwrap().deleted_items().unwrap();
     assert_eq!(deleted.len(), 1);
-    assert!(matches!(&deleted[0], lockbox_core::store::ItemEntry::Ok(i) if i.id == item.id));
+    assert!(matches!(&deleted[0], keepsake_core::store::ItemEntry::Ok(i) if i.id == item.id));
 }
 
 #[test]
@@ -571,7 +571,7 @@ fn empty_totp_fields_are_dropped_on_save() {
     assert_eq!(saved.fields.len(), 2);
 }
 
-use lockbox_core::store::DELETED_RETENTION_SECS;
+use keepsake_core::store::DELETED_RETENTION_SECS;
 
 #[test]
 fn deleted_items_can_be_listed_and_restored() {
@@ -637,7 +637,7 @@ fn settings_persist_and_apply() {
     assert!(!s.tick(1_059));
     assert!(s.tick(1_060), "1-minute auto-lock applies immediately");
 
-    let path = dir.path().join("Application Support").join("lockbox.db");
+    let path = dir.path().join("Application Support").join("keepsake.db");
     let reopened = Session::new(path, KdfParams::INSECURE_FAST, 5_000);
     assert_eq!(reopened.settings(), new);
 }

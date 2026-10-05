@@ -35,7 +35,7 @@ export function Sidebar({ vaults, selection, onSelect, onNewVault, onImport, onL
     <nav className="sidebar" aria-label="Vaults">
       <div className="brand">
         <Keyhole />
-        Lockbox
+        Keepsake
       </div>
       <button className="nav" aria-current={isCurrent({ kind: "all" })} onClick={() => onSelect({ kind: "all" })}>
         <IconGrid />

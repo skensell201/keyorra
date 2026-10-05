@@ -36,7 +36,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
       const found = await api.connectBrowsers();
       setBrowsersNote(
         found.length
-          ? `Ready in ${found.join(", ")}. Load the Lockbox extension there and click Connect.`
+          ? `Ready in ${found.join(", ")}. Load the Keepsake extension there and click Connect.`
           : "No supported browsers found.",
       );
     } catch (e) {

@@ -27,7 +27,7 @@ beforeEach(() => {
 test("first run shows setup", async () => {
   vi.mocked(api.status).mockResolvedValue("new");
   render(<App />);
-  expect(await screen.findByRole("heading", { name: "Create your Lockbox" })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "Create your Keepsake" })).toBeInTheDocument();
 });
 
 test("a locked vault shows the unlock screen", async () => {

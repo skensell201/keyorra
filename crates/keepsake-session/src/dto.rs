@@ -1,10 +1,10 @@
 //! Data shapes the UI sends and receives (camelCase JSON). Items themselves travel as
-//! `lockbox_core::model::Item` (snake_case, as stored).
+//! `keepsake_core::model::Item` (snake_case, as stored).
 
-use lockbox_core::generator::{self, PassphraseOptions, PasswordOptions};
-use lockbox_core::import::{ImportPlan, ImportReport};
-use lockbox_core::model::ItemKind;
-use lockbox_core::store::ItemEntry;
+use keepsake_core::generator::{self, PassphraseOptions, PasswordOptions};
+use keepsake_core::import::{ImportPlan, ImportReport};
+use keepsake_core::model::ItemKind;
+use keepsake_core::store::ItemEntry;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 

@@ -45,7 +45,7 @@ pub fn write_frame(w: &mut impl Write, data: &[u8]) -> io::Result<()> {
 
 /// The app's socket; the native host finds it from `$HOME` alone.
 pub fn socket_path(home: &Path) -> PathBuf {
-    home.join("Library/Application Support/app.lockbox.mac/bridge.sock")
+    home.join("Library/Application Support/app.keepsake.mac/bridge.sock")
 }
 
 #[cfg(test)]
@@ -88,7 +88,7 @@ mod tests {
         assert_eq!(
             socket_path(std::path::Path::new("/Users/ivan")),
             std::path::PathBuf::from(
-                "/Users/ivan/Library/Application Support/app.lockbox.mac/bridge.sock"
+                "/Users/ivan/Library/Application Support/app.keepsake.mac/bridge.sock"
             )
         );
     }

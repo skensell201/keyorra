@@ -1,4 +1,4 @@
-// A generated password the user chose on this page and that Lockbox already saved as a draft login.
+// A generated password the user chose on this page and that Keepsake already saved as a draft login.
 // Kept in the content script's memory only, per page.
 
 export interface Draft {

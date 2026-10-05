@@ -2,11 +2,11 @@
 
 use std::path::PathBuf;
 
-use lockbox_core::model::{Item, ItemKind};
-use lockbox_session::dto::{
+use keepsake_core::model::{Item, ItemKind};
+use keepsake_session::dto::{
     GeneratorRequest, ImportPreview, ImportResult, ItemFilter, ItemSummary, TotpCode, VaultDto,
 };
-use lockbox_session::{CmdError, CmdResult, ErrorKind, PairedBrowser, Settings, Status};
+use keepsake_session::{CmdError, CmdResult, ErrorKind, PairedBrowser, Settings, Status};
 use tauri::{AppHandle, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use uuid::Uuid;
@@ -143,13 +143,13 @@ pub fn connect_browsers() -> CmdResult<Vec<String>> {
     if exe.to_string_lossy().contains("/AppTranslocation/") {
         return Err(CmdError::new(
             ErrorKind::Invalid,
-            "Move Lockbox to Applications, then try again",
+            "Move Keepsake to Applications, then try again",
         ));
     }
     let app_support = home.join("Library/Application Support");
     let mut done = Vec::new();
     let mut failure = None;
-    for m in lockbox_session::bridge::host::manifests(&app_support, &exe) {
+    for m in keepsake_session::bridge::host::manifests(&app_support, &exe) {
         let written = match m.path.parent() {
             Some(dir) => std::fs::create_dir_all(dir),
             None => Ok(()),

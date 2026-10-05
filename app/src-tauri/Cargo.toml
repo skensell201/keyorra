@@ -1,12 +1,12 @@
 [package]
-name = "lockbox-app"
+name = "keepsake-app"
 version = "0.1.0"
-description = "Lockbox password manager for macOS"
+description = "Keepsake password manager for macOS"
 edition = "2021"
 publish = false
 
 [lib]
-name = "lockbox_app_lib"
+name = "keepsake_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -16,8 +16,8 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["macos-private-api"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-clipboard-manager = "2"
-lockbox-core = { path = "../../crates/lockbox-core" }
-lockbox-session = { path = "../../crates/lockbox-session" }
+keepsake-core = { path = "../../crates/keepsake-core" }
+keepsake-session = { path = "../../crates/keepsake-session" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["serde"] }

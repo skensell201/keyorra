@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Lockbox",
+  "productName": "Keepsake",
   "version": "0.1.0",
-  "identifier": "app.lockbox.mac",
+  "identifier": "app.keepsake.mac",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://localhost:1440",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Lockbox",
+        "title": "Keepsake",
         "width": 1180,
         "height": 760,
         "minWidth": 900,

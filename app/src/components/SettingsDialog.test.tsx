@@ -134,7 +134,7 @@ test("connects browsers and removes a paired one", async () => {
   expect(await screen.findByText("Chrome")).toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "Connect browsers" }));
   expect(
-    await screen.findByText("Ready in Chrome, Opera. Load the Lockbox extension there and click Connect."),
+    await screen.findByText("Ready in Chrome, Opera. Load the Keepsake extension there and click Connect."),
   ).toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "Disconnect Chrome" }));
   expect(api.removePairedBrowser).toHaveBeenCalledWith("c1");

@@ -9,12 +9,12 @@ const icons = { 16: "icons/16.png", 32: "icons/32.png", 48: "icons/48.png", 128:
 
 const base = {
   manifest_version: 3,
-  name: "Lockbox",
+  name: "Keepsake",
   version: "0.1.0",
-  description: "Fill passwords and one-time codes from the Lockbox app on your Mac.",
+  description: "Fill passwords and one-time codes from the Keepsake app on your Mac.",
   icons,
   permissions: ["nativeMessaging", "storage", "activeTab"],
-  action: { default_popup: "popup.html", default_title: "Lockbox", default_icon: icons },
+  action: { default_popup: "popup.html", default_title: "Keepsake", default_icon: icons },
   content_scripts: [
     { matches: ["http://*/*", "https://*/*"], js: ["content.js"], all_frames: true, run_at: "document_idle" },
   ],
@@ -31,7 +31,7 @@ const targets = {
   firefox: {
     ...base,
     background: { scripts: ["background.js"] },
-    browser_specific_settings: { gecko: { id: "lockbox@lockbox.app", strict_min_version: "128.0" } },
+    browser_specific_settings: { gecko: { id: "keepsake@keepsake.app", strict_min_version: "128.0" } },
   },
 };
 

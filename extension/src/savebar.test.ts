@@ -11,7 +11,7 @@ beforeEach(() => {
   vi.useFakeTimers();
   trusted = true;
   visible = true;
-  document.querySelectorAll("lockbox-savebar").forEach((n) => n.remove());
+  document.querySelectorAll("keepsake-savebar").forEach((n) => n.remove());
   actions = { save: vi.fn().mockResolvedValue(undefined), dismiss: vi.fn() };
   bar = new SaveBar(actions, { onRoot: (r) => (root = r), trusted: () => trusted, visible: () => visible, settleMs: 0 });
 });
@@ -97,18 +97,18 @@ test("page-controlled text is never parsed as HTML; the root is closed", () => {
   bar.show({ username: `<img src=x onerror=alert(1)>`, status: "new" });
   expect(root.querySelector("img")).toBeNull();
   expect(root.textContent).toContain("<img");
-  expect(document.querySelector("lockbox-savebar")!.shadowRoot).toBeNull();
+  expect(document.querySelector("keepsake-savebar")!.shadowRoot).toBeNull();
 });
 
 test("the host is in the page only while the bar is shown", () => {
-  expect(document.querySelector("lockbox-savebar")).toBeNull();
+  expect(document.querySelector("keepsake-savebar")).toBeNull();
   bar.show({ username: "ivan", status: "new" });
-  expect(document.querySelector("lockbox-savebar")).not.toBeNull();
+  expect(document.querySelector("keepsake-savebar")).not.toBeNull();
   bar.hide();
-  expect(document.querySelector("lockbox-savebar")).toBeNull();
+  expect(document.querySelector("keepsake-savebar")).toBeNull();
   bar.show({ username: "ivan", status: "new" });
   btn("Not now").click();
-  expect(document.querySelector("lockbox-savebar")).toBeNull();
+  expect(document.querySelector("keepsake-savebar")).toBeNull();
 });
 
 test("the bar is an alert dialog labelled by its message", () => {
@@ -161,7 +161,7 @@ test("hovering or focusing the bar pauses the auto-hide", () => {
 test("a host moved away from <html> is refused by the default visibility check", () => {
   const real = new SaveBar(actions, { onRoot: (r) => (root = r), trusted: () => true, settleMs: 0 });
   real.show({ username: "ivan", status: "new" });
-  const host = document.querySelector("lockbox-savebar")!;
+  const host = document.querySelector("keepsake-savebar")!;
   document.body.append(host);
   btn("Save").click();
   expect(actions.save).not.toHaveBeenCalled();

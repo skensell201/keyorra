@@ -28,7 +28,7 @@ test("unpaired: connect shows the code and waits for approval", async () => {
     return { ok: true, value: undefined };
   });
   await renderPopup(app(), deps);
-  expect(app().textContent).toContain("Connect this browser to Lockbox");
+  expect(app().textContent).toContain("Connect this browser to Keepsake");
   (app().querySelector("button.primary") as HTMLButtonElement).click();
   await vi.waitFor(() => expect(app().textContent).toContain("381 262"));
   await vi.waitFor(() => expect(app().textContent).toContain("No logins for github.com"));
@@ -50,10 +50,10 @@ test("ready: lists logins and fills in the tab", async () => {
 test("locked and no app", async () => {
   vi.mocked(deps.ask).mockResolvedValue({ ok: true, value: "locked" });
   await renderPopup(app(), deps);
-  expect(app().textContent).toContain("Lockbox is locked");
+  expect(app().textContent).toContain("Keepsake is locked");
   vi.mocked(deps.ask).mockResolvedValue({ ok: true, value: "noApp" });
   await renderPopup(app(), deps);
-  expect(app().textContent).toContain("Lockbox isn't running");
+  expect(app().textContent).toContain("Keepsake isn't running");
 });
 
 test("a pairing in progress shows its code again and resumes polling", async () => {
@@ -121,6 +121,6 @@ test("pairing without a stored code says it is waiting; a vanished pairing retur
     return { ok: true, value: [] };
   });
   const done = renderPopup(app(), deps);
-  await vi.waitFor(() => expect(app().textContent).toContain("Connect this browser to Lockbox"));
+  await vi.waitFor(() => expect(app().textContent).toContain("Connect this browser to Keepsake"));
   await done;
 });

@@ -1,3 +1,5 @@
+> Renamed to Keepsake on 2026-10-05; identifiers below that say lockbox now say keepsake, except the encryption format labels.
+
 # Lockbox MVP — Design
 
 Date: 2026-10-02

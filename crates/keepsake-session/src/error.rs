@@ -1,4 +1,4 @@
-use lockbox_core::Error as CoreError;
+use keepsake_core::Error as CoreError;
 use serde::Serialize;
 
 /// What the UI receives for a failed command: a stable `kind` to branch on, a message to show.
@@ -59,7 +59,7 @@ impl From<CoreError> for CmdError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use lockbox_core::Error as CoreError;
+    use keepsake_core::Error as CoreError;
 
     #[test]
     fn core_errors_map_to_kinds() {

@@ -5,7 +5,7 @@ use crate::bridge::crypto::{
     self, b64, commitment, derive, nonce_of, public_from_b64, Direction, KeyPair,
 };
 use crate::bridge::protocol::{Inbound, Outbound};
-use lockbox_core::model::{Field, FieldValue, Item, ItemKind, Section};
+use keepsake_core::model::{Field, FieldValue, Item, ItemKind, Section};
 use serde_json::{json, Value};
 
 /// Plays the extension's side.
@@ -286,7 +286,7 @@ fn fill_includes_the_current_one_time_code() {
     let p = personal(&mut s);
     let mut item = save_login(&mut s, p, "GitHub", "ivan", "pw");
     item.urls = vec!["https://github.com".into()];
-    item.fields.push(lockbox_core::model::Field {
+    item.fields.push(keepsake_core::model::Field {
         id: "otp".into(),
         label: "one-time password".into(),
         value: FieldValue::Totp("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ".into()),
@@ -467,7 +467,7 @@ fn a_pending_pairing_before_the_reveal_reports_pending() {
 
 fn too_many() -> Outbound {
     Outbound::Error {
-        message: "Too many pairing attempts. Open Lockbox and try again in a few minutes.".into(),
+        message: "Too many pairing attempts. Open Keepsake and try again in a few minutes.".into(),
     }
 }
 
@@ -734,7 +734,7 @@ fn has_totp_needs_a_secret_that_parses() {
     let p = personal(&mut s);
     let mut item = save_login(&mut s, p, "GitHub", "ivan", "pw");
     item.urls = vec!["https://github.com".into()];
-    item.fields.push(lockbox_core::model::Field {
+    item.fields.push(keepsake_core::model::Field {
         id: "otp".into(),
         label: "one-time password".into(),
         value: FieldValue::Totp("not a secret!!".into()),

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use lockbox_session::bridge::wire::socket_path;
+use keepsake_session::bridge::wire::socket_path;
 
 pub fn run() -> i32 {
     let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
@@ -50,7 +50,7 @@ fn connect(socket: &Path) -> io::Result<UnixStream> {
         return Ok(s);
     }
     let _ = Command::new("open")
-        .args(["-g", "-b", "app.lockbox.mac"])
+        .args(["-g", "-b", "app.keepsake.mac"])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

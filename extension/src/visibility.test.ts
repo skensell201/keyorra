@@ -7,8 +7,8 @@ let target: HTMLElement;
 beforeEach(() => {
   document.documentElement.removeAttribute("style");
   document.body.removeAttribute("style");
-  document.body.innerHTML = `<div id="wrap"><lockbox-test><button>x</button></lockbox-test></div>`;
-  host = document.querySelector("lockbox-test") as HTMLElement;
+  document.body.innerHTML = `<div id="wrap"><keepsake-test><button>x</button></keepsake-test></div>`;
+  host = document.querySelector("keepsake-test") as HTMLElement;
   target = host.querySelector("button") as HTMLElement;
 });
 

@@ -4,8 +4,8 @@
 fn main() {
     // Started by a browser for the extension: act as the native-messaging pipe, not the app.
     let args: Vec<String> = std::env::args().collect();
-    if lockbox_session::bridge::host::is_host_launch(&args) {
-        std::process::exit(lockbox_app_lib::native_host::run());
+    if keepsake_session::bridge::host::is_host_launch(&args) {
+        std::process::exit(keepsake_app_lib::native_host::run());
     }
-    lockbox_app_lib::run()
+    keepsake_app_lib::run()
 }

@@ -17,6 +17,7 @@ use crate::{Error, Result};
 mod tests;
 
 const DB_VERSION: i64 = MIGRATIONS.len() as i64;
+// Format label from the Lockbox days; kept so existing vaults and pairings stay readable.
 const CHECK_AAD: &[u8] = b"lockbox/check/v1";
 const VAULT_META_AAD: &[u8] = b"lockbox/vault-meta/v1";
 const SEALED_META_AAD: &[u8] = b"lockbox/meta/v1\0";
@@ -659,11 +660,11 @@ fn apply_migrations(tx: &Connection, from: i64) -> Result<()> {
     Ok(())
 }
 
-/// Brings an existing Lockbox database up to `DB_VERSION`; never initialises one.
+/// Brings an existing Keepsake database up to `DB_VERSION`; never initialises one.
 fn upgrade(conn: &Connection, path: &Path) -> Result<()> {
     let version: i64 = conn.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if version <= 0 {
-        return Err(Error::Invalid("not a lockbox database".into()));
+        return Err(Error::Invalid("not a keepsake database".into()));
     }
     if version > DB_VERSION {
         return Err(Error::Invalid(format!(

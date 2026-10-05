@@ -23,7 +23,7 @@ export function PairingDialog({ request, onDone }: { request: PairingRequest; on
     <div className="modal-backdrop">
       <div className="card modal pairing" role="dialog" aria-modal="true" aria-labelledby="pair-title">
         <h2 id="pair-title">Connect {request.name}?</h2>
-        <p className="muted">Check that the Lockbox extension in {request.name} shows the same code.</p>
+        <p className="muted">Check that the Keepsake extension in {request.name} shows the same code.</p>
         <p className="pair-code mono">{`${request.code.slice(0, 3)} ${request.code.slice(3)}`}</p>
         {error && (
           <p className="error" role="alert">
