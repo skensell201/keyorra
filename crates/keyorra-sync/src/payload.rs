@@ -31,7 +31,7 @@ pub struct ItemPayload {
     pub content_from: Vector,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct VaultPayload {
     pub name: String,
     /// The vault key wrapped by the account key (`keyorra-core` `wrap_vault_key`).
@@ -67,6 +67,15 @@ impl fmt::Debug for ItemPayload {
             .field("deleted_at", &self.deleted_at)
             .field("content_from", &self.content_from)
             .finish()
+    }
+}
+
+impl fmt::Debug for VaultPayload {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("VaultPayload")
+            .field("name", &format_args!("{} chars", self.name.chars().count()))
+            .field("deleted", &self.deleted)
+            .finish_non_exhaustive()
     }
 }
 
@@ -422,6 +431,13 @@ mod tests {
 
     #[test]
     fn debug_hides_secrets() {
+        let vault = VaultPayload {
+            name: "Bank".into(),
+            wrapped_key: vec![0xab; 8],
+            deleted: false,
+        };
+        let shown_vault = format!("{vault:?}");
+        assert!(!shown_vault.contains("Bank") && !shown_vault.contains("171"));
         let shown = format!(
             "{:?} {:?}",
             item(r#"{"password":"hunter2"}"#, None),

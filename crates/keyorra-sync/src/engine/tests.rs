@@ -565,3 +565,135 @@ fn a_failed_listing_is_an_event_and_other_streams_are_still_read() {
         .iter()
         .any(|e| matches!(e, Event::Pulled { from, .. } if *from == device_id(2))));
 }
+
+#[test]
+fn a_vault_with_live_items_cannot_be_deleted_and_trashed_ones_are_purged_with_it() {
+    let (mut c, vault) = shared(1);
+    assert!(matches!(
+        c.devices[0].delete_vault(vault, c.clocks[0]),
+        Err(Error::Refused(_))
+    ));
+    c.devices[0].trash_item(ITEM, 1, c.clocks[0]).unwrap();
+    c.devices[0].delete_vault(vault, c.clocks[0]).unwrap();
+    let view = c.devices[0].view();
+    assert!(view.vaults[&vault].deleted);
+    assert_eq!(view.items[&ITEM].state, ItemState::Purged);
+}
+
+#[test]
+fn stalls_and_clock_warnings_are_reported_once() {
+    let (mut c, vault) = shared(2);
+    c.clocks[1] += 60 * 60 * 1000;
+    for n in 0..3 {
+        let json = Cluster::item_json(ITEM, &format!("future {n}"), &[]);
+        c.devices[1]
+            .save_item(vault, ITEM, &json, c.clocks[1])
+            .unwrap();
+        c.sync(1).unwrap();
+    }
+    c.sync(0).unwrap();
+    c.sync(0).unwrap();
+    let events = c.devices[0].take_events();
+    let ahead = events
+        .iter()
+        .filter(|e| matches!(e, Event::ClockAhead { .. }))
+        .count();
+    assert_eq!(ahead, 1);
+    // A segment that keeps waiting is reported once, not on every round.
+    let mut d = Cluster::new(3, 3, Faults::NONE);
+    let shared_vault = d.devices[1].create_vault("Shared", START_MS).unwrap();
+    d.sync(1).unwrap();
+    d.sync(0).unwrap();
+    d.devices[0]
+        .save_item(
+            shared_vault,
+            ITEM,
+            &Cluster::item_json(ITEM, "x", &[]),
+            d.clocks[0],
+        )
+        .unwrap();
+    d.sync(0).unwrap();
+    let only_a = Upto {
+        inner: &d.store,
+        stream: device_id(1),
+        last_seq: 0,
+    };
+    for _ in 0..3 {
+        d.devices[2]
+            .sync(&only_a, &d.directory, d.clocks[2])
+            .unwrap();
+    }
+    let waiting = d.devices[2]
+        .take_events()
+        .into_iter()
+        .filter(|e| matches!(e, Event::Waiting { .. }))
+        .count();
+    assert_eq!(waiting, 1);
+}
+
+#[test]
+fn after_an_own_stream_conflict_the_device_stops_pushing() {
+    let (mut c, vault) = shared(1);
+    // Another copy of this device already wrote at its next position.
+    let mut twin = Engine::new(
+        device_id(0),
+        SigningKey::from_bytes(&[0x40; 32]),
+        crate::testkit::ACCOUNT_ID,
+        Key::from_bytes([0x30; 32]),
+        rand::rngs::OsRng,
+    );
+    twin.sent = c.devices[0].sent;
+    twin.next_seq = c.devices[0].next_seq;
+    twin.vault_keys = c.devices[0].vault_keys.clone();
+    twin.fold = c.devices[0].fold.clone();
+    twin.save_item(
+        vault,
+        ITEM,
+        &Cluster::item_json(ITEM, "twin", &[]),
+        c.clocks[0],
+    )
+    .unwrap();
+    twin.push(&c.store);
+    c.devices[0]
+        .save_item(
+            vault,
+            ITEM,
+            &Cluster::item_json(ITEM, "me", &[]),
+            c.clocks[0],
+        )
+        .unwrap();
+    c.sync(0).unwrap();
+    c.sync(0).unwrap();
+    let events = c.devices[0].take_events();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| **e == Event::OwnStreamConflict)
+            .count(),
+        1
+    );
+    assert!(!c.devices[0].is_idle());
+}
+
+#[test]
+fn an_injected_admission_policy_hides_cut_versions() {
+    let (mut c, vault) = shared(2);
+    c.devices[1]
+        .save_item(
+            vault,
+            ITEM,
+            &Cluster::item_json(ITEM, "from B", &[]),
+            c.clocks[1],
+        )
+        .unwrap();
+    c.heal();
+    assert_eq!(title(&c.devices[0].view(), ITEM), "from B");
+    struct Cut(DeviceId);
+    impl crate::fold::Admission for Cut {
+        fn admits(&self, stream: &DeviceId, _: u64) -> bool {
+            *stream != self.0
+        }
+    }
+    c.devices[0].set_admission(Box::new(Cut(device_id(1))));
+    assert_eq!(title(&c.devices[0].view(), ITEM), "base");
+}

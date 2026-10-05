@@ -17,7 +17,7 @@ use crate::cbor::Value;
 use crate::clock::{Hlc, Observed};
 use crate::envelope::{Envelope, RecordKind};
 use crate::error::{Error, Result};
-use crate::fold::{Accepted, AdmitAll, Fold, View};
+use crate::fold::{Accepted, Admission, AdmitAll, Fold, View};
 use crate::keys::segment_key;
 use crate::payload::{AttachmentPayload, Doc, ItemPayload, VaultPayload};
 use crate::present::{present_item, present_vault, ItemState};
@@ -123,6 +123,14 @@ pub struct Engine<R> {
     outbox: Vec<Value>,
     next_seq: u64,
     events: Vec<Event>,
+    /// Which stream positions count (plan A1c: endorsement and revocation cuts).
+    admission: Box<dyn Admission + Send>,
+    /// Set after `OwnStreamConflict`: this device stops pushing (plan A1c retires it).
+    halted: bool,
+    /// Devices already reported as `ClockAhead`.
+    clock_reported: BTreeSet<DeviceId>,
+    /// The last stall reported per stream (`Waiting`/`Unreadable`), to report changes only.
+    stalls: BTreeMap<DeviceId, Event>,
 }
 
 impl<R: RngCore + CryptoRng> Engine<R> {
@@ -148,6 +156,10 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             sent: (0, chain_genesis(&account_id, &device)),
             unsent: None,
             outbox: Vec::new(),
+            admission: Box::new(AdmitAll),
+            halted: false,
+            clock_reported: BTreeSet::new(),
+            stalls: BTreeMap::new(),
             next_seq: 1,
             events: Vec::new(),
         }
@@ -172,6 +184,21 @@ impl<R: RngCore + CryptoRng> Engine<R> {
 
     pub fn take_events(&mut self) -> Vec<Event> {
         std::mem::take(&mut self.events)
+    }
+
+    /// Replaces the admission policy and rebuilds the fold under it (plan A1c calls this when
+    /// endorsements or revocations change).
+    pub fn set_admission(&mut self, admission: Box<dyn Admission + Send>) {
+        self.admission = admission;
+        self.fold.refold(&*self.admission);
+    }
+
+    /// Reports a stall of `from`'s stream unless the same one was reported last.
+    fn stall(&mut self, from: DeviceId, event: Event) {
+        if self.stalls.get(&from) != Some(&event) {
+            self.stalls.insert(from, event.clone());
+            self.events.push(event);
+        }
     }
 
     // ---- local writes ----
@@ -200,8 +227,26 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         self.write(RecordKind::Vault, id, None, Doc::Vault(p), wall_ms)
     }
 
+    /// Deletes an empty vault (as the local store does): refused while it has live items;
+    /// items of it in Recently Deleted are purged first.
     pub fn delete_vault(&mut self, id: Uuid, wall_ms: u64) -> Result<()> {
+        self.settle_before_edit(wall_ms)?;
         let mut p = self.vault_payload(id)?;
+        let view = self.fold.view();
+        let in_vault = |state: ItemState| {
+            view.items
+                .iter()
+                .filter(move |(_, v)| v.state == state && v.vault_id == Some(id))
+                .map(|(item, _)| *item)
+                .collect::<Vec<_>>()
+        };
+        let live = in_vault(ItemState::Live);
+        if !live.is_empty() {
+            return Err(Error::Refused(format!("vault has {} items", live.len())));
+        }
+        for item in in_vault(ItemState::Trashed) {
+            self.write(RecordKind::Item, item, Some(id), Doc::Tombstone, wall_ms)?;
+        }
         p.deleted = true;
         self.write(RecordKind::Vault, id, None, Doc::Vault(p), wall_ms)
     }
@@ -380,11 +425,16 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             doc,
         };
         self.fold
-            .accept(accepted, &AdmitAll)
+            .accept(accepted, &*self.admission)
             .expect("a local write always follows the rules");
         self.outbox
             .push(Value::map(vec![("put", envelope.to_value())]));
         self.next_seq += 1;
+        debug_assert_eq!(
+            self.next_seq,
+            self.unsent.as_ref().map_or(self.sent.0, |u| u.last_seq) + self.outbox.len() as u64 + 1,
+            "own sequence numbers out of step"
+        );
         Ok(())
     }
 
@@ -480,19 +530,25 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             }
             let Some(segment) = opened else {
                 if tried {
-                    self.events.push(Event::Unreadable {
-                        from: *stream,
-                        first_seq: want,
-                    });
+                    self.stall(
+                        *stream,
+                        Event::Unreadable {
+                            from: *stream,
+                            first_seq: want,
+                        },
+                    );
                 }
                 return Ok(applied);
             };
             if segment.header.prev_hash != head_hash {
-                self.events.push(Event::Waiting {
-                    from: *stream,
-                    first_seq: want,
-                    reason: "chain does not continue from the known head".into(),
-                });
+                self.stall(
+                    *stream,
+                    Event::Waiting {
+                        from: *stream,
+                        first_seq: want,
+                        reason: "chain does not continue from the known head".into(),
+                    },
+                );
                 return Ok(applied);
             }
             match self.decode_segment(stream, &segment.header, &segment.entries) {
@@ -505,28 +561,33 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                         }
                     };
                     if let Some(device) = ready {
-                        self.events.push(Event::Waiting {
-                            from: *stream,
-                            first_seq: want,
-                            reason: format!(
-                                "needs earlier changes from {}",
-                                data_encoding::HEXLOWER.encode(&device[..4])
-                            ),
-                        });
+                        self.stall(
+                            *stream,
+                            Event::Waiting {
+                                from: *stream,
+                                first_seq: want,
+                                reason: format!(
+                                    "needs earlier changes from {}",
+                                    data_encoding::HEXLOWER.encode(&device[..4])
+                                ),
+                            },
+                        );
                         return Ok(applied);
                     }
                     let observed: Vec<u64> = batch.iter().map(|a| a.version.hlc).collect();
-                    match self.fold.accept_batch(batch, &AdmitAll) {
+                    match self.fold.accept_batch(batch, &*self.admission) {
                         Ok(n) => {
                             self.vault_keys.extend(keys);
                             for hlc in observed {
                                 if let Observed::TooFarAhead { ahead_ms } =
                                     self.hlc.observe(hlc, wall_ms)
                                 {
-                                    self.events.push(Event::ClockAhead {
-                                        from: *stream,
-                                        ahead_ms,
-                                    });
+                                    if self.clock_reported.insert(*stream) {
+                                        self.events.push(Event::ClockAhead {
+                                            from: *stream,
+                                            ahead_ms,
+                                        });
+                                    }
                                 }
                             }
                             self.events.push(Event::Pulled {
@@ -541,11 +602,14 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                     }
                 }
                 Err(Stop::Wait(reason)) => {
-                    self.events.push(Event::Waiting {
-                        from: *stream,
-                        first_seq: want,
-                        reason,
-                    });
+                    self.stall(
+                        *stream,
+                        Event::Waiting {
+                            from: *stream,
+                            first_seq: want,
+                            reason,
+                        },
+                    );
                     return Ok(applied);
                 }
                 Err(Stop::Reject(reason)) => {
@@ -556,6 +620,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             head_seq = segment.header.last_seq;
             head_hash = segment.header.last_hash;
             self.heads.insert(*stream, (head_seq, head_hash));
+            self.stalls.remove(stream);
             applied = true;
         }
     }
@@ -697,6 +762,9 @@ impl<R: RngCore + CryptoRng> Engine<R> {
     }
 
     fn push(&mut self, transport: &impl Transport) {
+        if self.halted {
+            return;
+        }
         loop {
             if self.unsent.is_none() {
                 if self.outbox.is_empty() {
@@ -731,6 +799,9 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                     self.unsent = None;
                 }
                 Ok(AppendOutcome::Conflict) => {
+                    // Someone else wrote at this device's next position: a clone or a
+                    // restored copy of this device. Stop writing; plan A1c retires the id.
+                    self.halted = true;
                     self.events.push(Event::OwnStreamConflict);
                     return;
                 }

@@ -268,6 +268,8 @@ fn tombstones_and_vaults_survive_the_replay_too() {
         Op::Sync { dev: 1 },
         Op::Trash { dev: 1, item: 0 },
         Op::Purge { dev: 1, item: 0 },
+        Op::Sync { dev: 1 },
+        Op::Sync { dev: 0 },
         Op::DeleteVault { dev: 0 },
         Op::Save { dev: 1, item: 1 },
     ];
