@@ -724,14 +724,26 @@ torn files (treated as `Pending`, reported if still broken after 24 h), reorderi
    `st_dev`). If the folder is on another volume (external disk, network share), use
    `<folder>/.keyorra-tmp.nosync/` instead (`.nosync` is skipped by iCloud; other clients
    may upload it, and readers ignore it).
-2. `fsync`, then `rename` into the final name (atomic), `fsync` the directory.
+2. `fsync`, then rename into the final name, `fsync` the directory. Write-once names
+   (segments, snapshots, chunks) use a rename that fails if the name exists
+   (`renamex_np(RENAME_EXCL)` on macOS): a name is never replaced, and a taken name is
+   compared byte for byte (same: already there; different: conflict). Header files and
+   `root.head` are replaced by a plain rename.
 3. Chunks first, then the segment; a snapshot before the segment that references it.
+4. An empty file is a write still in progress: `Pending`. `README-KEYORRA.txt` is written
+   when the folder is created.
 
 ### 5.4 Noticing changes
 
 FSEvents (`notify`) on the folder, debounced 2 s; plus a poll every 60 s while unlocked,
 and on unlock, wake and "Sync now". Streams are read from the known head; chunks are
 fetched by name; no directory is listed in full on every round.
+
+Every sync round has a time budget (30 s by default; the app uses 10 s): once it is spent,
+the remaining file operations fail as transport errors and the round goes on next time. A
+device learns a stream's head from the header of its newest segment file only; if that file
+is not on this Mac, the rollback check of that stream waits for a later round
+(`HeadUnknown`).
 
 ### 5.5 What someone with folder access learns
 
@@ -1189,7 +1201,8 @@ Each line becomes one implementation plan in `docs/superpowers/plans/`.
 | **A1c-2** Recovery and bootstrap | Headers (root-published, root key bound), root head file, join from headers, snapshots (root bootstrap, author-scoped anchoring, restore), retire (pending re-approval; the main device asks to start over), outbox hook. | Suite 3 complete |
 | **A1d-1** Store integration | Engine resume and memo, migration v2, single change path, remote applies, `Item.extra` and `conflict`, the session-side bridge (`enable`, `join`, `resume`, rounds) over `MemoryTransport` | Two stores converge; restart resumes; enable keeps existing data |
 | **A1d-2** Sync in the session | Session wiring (sync only while unlocked), setup code, device keys sealed to the Secure Enclave, turning sync off, rejoining (merge by record id), carrying another account's vault over, starting a new account | Two sessions converge through enable/join/approve/lock/unlock/disable/rejoin |
-| **A2** Folder transport | `keyorra-sync-fs`: layout, temp-outside-tree writes, strict reading, iCloud/File Provider download state, `NSFileCoordinator`, FSEvents + poll, deadlines, `keyorra-inspect` | Suite 7 green; two processes on one folder converge |
+| **A2-1** Folder transport | `keyorra-sync-fs` (layout, strict names, temp outside the synced tree, exclusive renames, download state, round budget), chunks in the transport trait | two engines converge through a temp folder with conflict copies and late files |
+| **A2-2** Attachments and macOS | attachment contents as chunks, file coordination, per-account folders in the session, iCloud Drive link, FSEvents and polling | two vault stores sync an item with an attachment through a folder |
 | **A3** UI | Enable/join/leave, Emergency Kit, setup code, folder-based approval, Sync screen, conflicts in list/detail/Watchtower, alarms | Suite 10 (folder) green; manual two-Mac iCloud test |
 | **B1** Server | Schema, API, auth, approval exchange, SSE, limits, quotas, TLS modes, logs, admin CLI, backup/restore/check | Suite 8 green |
 | **B2** Server transport | HTTP transport, login/approval UI, pinning, transport switch with `Moved` | Suite 9 + E2E against server green |

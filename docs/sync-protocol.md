@@ -440,6 +440,9 @@ removed device wrote is taken but the id.
 To be defined by plan A2. The store lists, next to the header and snapshot files, the root's
 head file `root.head` (section 10.2).
 
+The files of the folder have the exact names of the layout in the design spec section 5.1;
+anything else is ignored. Chunks are stored under `chunks/<first 2 hex>/<64 hex>`.
+
 ## 12. Server API
 
 To be defined by plans B1 and B2.
