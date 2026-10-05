@@ -792,3 +792,89 @@ fn review_w3_approval_checks_the_key_shown_on_the_joining_device() {
     );
     assert!(joiner.device() != device_id(5) || !joiner.can_write());
 }
+
+/// What a keyless folder attacker can write: a well-formed plaintext segment header for
+/// `device` at `seq`, followed by junk.
+fn junk_segment(device: DeviceId, seq: u64) -> Vec<u8> {
+    let header = crate::segment::SegmentHeader {
+        collection: crate::segment::ACCOUNT_COLLECTION,
+        device_id: device,
+        first_seq: seq,
+        last_seq: seq,
+        prev_hash: [0; 32],
+        last_hash: [0; 32],
+    };
+    let mut bytes = header.to_bytes().to_vec();
+    bytes.extend_from_slice(&[0; 64]);
+    bytes
+}
+
+#[test]
+fn review_k1_a_keyless_junk_file_at_the_next_position_retires_nobody() {
+    let (mut c, vault) = {
+        let mut c = Cluster::new(2, 1, Faults::NONE);
+        let vault = c.devices[0].create_vault("Personal", START_MS).unwrap();
+        c.heal();
+        (c, vault)
+    };
+    for i in 0..2 {
+        let next = c.devices[i].sent.seq + 1;
+        c.store.append(&junk_segment(device_id(i), next)).unwrap();
+        let json = Cluster::item_json(ITEM, &format!("by {i}"), &[]);
+        c.devices[i]
+            .save_item(vault, ITEM, &json, c.clocks[i])
+            .unwrap();
+        c.sync(i).unwrap();
+        let events = c.devices[i].take_events();
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e, Event::Retired { .. } | Event::RootMustStartOver { .. })),
+            "device {i}: {events:?}"
+        );
+        assert_eq!(c.devices[i].device(), device_id(i), "keeps its id");
+        assert!(c.devices[i]
+            .alarms()
+            .iter()
+            .any(|a| matches!(a, Alarm::OwnStreamTampered { .. })));
+    }
+    assert!(
+        !c.devices[0].halted,
+        "the main device never halts on unverified evidence"
+    ); // The user removes the junk and accepts: the devices go on under their ids.
+    for i in 0..2 {
+        let alarm = c.devices[i]
+            .alarms()
+            .into_iter()
+            .find(|a| matches!(a, Alarm::OwnStreamTampered { .. }))
+            .unwrap();
+        let Alarm::OwnStreamTampered { seq } = alarm else {
+            unreachable!()
+        };
+        c.store.remove_segment(&device_id(i), seq);
+        assert!(c.devices[i].accept_alarm(&alarm));
+    }
+    c.heal();
+    c.assert_converged();
+    assert_eq!(c.devices[1].device(), device_id(1));
+}
+
+#[test]
+fn review_k1_a_raised_stored_head_alone_retires_nobody() {
+    let mut c = Cluster::new(2, 1, Faults::NONE);
+    let vault = c.devices[0].create_vault("Personal", START_MS).unwrap();
+    c.heal();
+    // Junk two positions ahead: the stored head is beyond what device 1 wrote.
+    let next = c.devices[1].sent.seq + 2;
+    c.store.append(&junk_segment(device_id(1), next)).unwrap();
+    let json = Cluster::item_json(ITEM, "mine", &[]);
+    c.devices[1]
+        .save_item(vault, ITEM, &json, c.clocks[1])
+        .unwrap();
+    c.sync(1).unwrap();
+    assert_eq!(c.devices[1].device(), device_id(1));
+    assert!(!c.devices[1]
+        .take_events()
+        .iter()
+        .any(|e| matches!(e, Event::Retired { .. })));
+}

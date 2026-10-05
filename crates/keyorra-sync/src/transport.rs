@@ -75,6 +75,13 @@ impl MemoryTransport {
         Self::default()
     }
 
+    /// Removes one segment file (tests: the user deleting what a tamperer put there).
+    pub fn remove_segment(&self, device: &DeviceId, first_seq: u64) {
+        if let Some(stream) = self.streams.lock().unwrap().get_mut(device) {
+            stream.remove(&first_seq);
+        }
+    }
+
     /// An independent copy of everything stored now (tests: one side of a fork).
     pub fn deep_copy(&self) -> MemoryTransport {
         MemoryTransport {

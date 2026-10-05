@@ -89,6 +89,11 @@ pub enum Alarm {
     /// Two different histories of `stream` at `seq`: seen directly, or claimed by the main
     /// device's checkpoint or removal.
     Fork { stream: DeviceId, seq: u64 },
+    /// Something that is not a segment of this device (unsigned, unreadable) occupies its
+    /// own stream at `seq` (review K1): a store or someone with folder access tampered with
+    /// it. This device keeps its id and pushes nothing until the user looks into it: remove
+    /// the file and accept (retry), or leave the id ([`Engine::leave_id`]).
+    OwnStreamTampered { seq: u64 },
     /// Another (non-main) device's checkpoint claims a different history of `stream` at
     /// `seq`: either `stream` forked or `by` lies. Pauses nothing.
     Disputed {
@@ -114,6 +119,7 @@ impl Alarm {
     pub fn stream(&self) -> Option<DeviceId> {
         match self {
             Alarm::Rollback { stream, .. } | Alarm::Fork { stream, .. } => Some(*stream),
+            Alarm::OwnStreamTampered { .. } => None,
             Alarm::Unapproved { .. }
             | Alarm::Disputed { .. }
             | Alarm::ApprovedWithAnotherKey
@@ -134,6 +140,10 @@ impl fmt::Display for Alarm {
                 f,
                 "changes of {} were rolled back: received up to {received}, stored up to {stored}",
                 short(stream)
+            ),
+            Alarm::OwnStreamTampered { seq } => write!(
+                f,
+                "this device's changes cannot be stored: something else occupies position {seq}"
             ),
             Alarm::Fork { stream, seq } => {
                 write!(f, "two different histories of {} at {seq}", short(stream))
@@ -575,6 +585,9 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             Alarm::Fork { stream, .. } if *stream != self.device => {
                 self.blocked.insert(*stream);
             }
+            // Accepting retries (the user removed what occupied the position); if it is
+            // still there, the alarm comes back. Leaving the id is `leave_id`.
+            Alarm::OwnStreamTampered { .. } => return true,
             Alarm::Rollback { stream, stored, .. } => {
                 self.acknowledged_rollbacks.insert((*stream, *stored));
             }
@@ -2001,8 +2014,67 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         }
     }
 
+    /// Something occupies this device's next position. Only a segment that verifies with this
+    /// device's own key proves another copy of it (a clone, a restored backup): then it
+    /// retires. Anything else (a keyless writer's junk) is an alarm and the id is kept.
+    fn own_stream_occupied(&mut self, transport: &impl Transport) {
+        let own_key = self.signer.verifying_key();
+        let unsent = self.unsent.as_ref().map(|u| u.bytes.clone());
+        let mut tampered_at = None;
+        let mut copy = false;
+        if let Ok(found) = transport.segments(&self.device, self.sent.seq) {
+            for f in found {
+                let Fetched::Ready(bytes) = f else { continue };
+                if Some(&bytes) == unsent.as_ref() {
+                    continue;
+                }
+                let verified = decrypt_segment(&self.segment_key, &bytes)
+                    .ok()
+                    .and_then(|u| u.verify(&own_key).ok())
+                    .is_some_and(|seg| seg.header.device_id == self.device);
+                if verified {
+                    copy = true;
+                } else if let Ok(h) = SegmentHeader::parse(&bytes) {
+                    let at = tampered_at.get_or_insert(h.first_seq);
+                    *at = (*at).min(h.first_seq);
+                }
+            }
+        }
+        if copy {
+            self.events.push(Event::OwnStreamConflict);
+            self.retire_due = Some(RetireReason::OtherCopyWrote);
+        } else {
+            let seq = tampered_at.unwrap_or(self.sent.seq + 1);
+            self.raise_own_tampered(seq);
+        }
+    }
+
+    /// The user chose to leave this device's id behind (its stream is occupied for good):
+    /// it continues under a new id, pending approval. The main device cannot; it asks to start
+    /// over instead.
+    pub fn leave_id(&mut self, wall_ms: u64) -> Result<()> {
+        self.alarms
+            .retain(|a| !matches!(a, Alarm::OwnStreamTampered { .. }));
+        self.retire(RetireReason::OtherCopyWrote, wall_ms)
+    }
+
+    fn raise_own_tampered(&mut self, seq: u64) {
+        let alarm = Alarm::OwnStreamTampered { seq };
+        if !self.alarms.contains(&alarm) {
+            self.events.push(Event::Alarm(alarm.clone()));
+            self.alarms.push(alarm);
+        }
+    }
+
     fn push(&mut self, transport: &impl Transport) {
         if self.halted || self.retire_due.is_some() {
+            return;
+        }
+        if self
+            .alarms
+            .iter()
+            .any(|a| matches!(a, Alarm::OwnStreamTampered { .. }))
+        {
             return;
         }
         self.upload_header_files(transport);
@@ -2022,8 +2094,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                     return;
                 }
                 if stored > self.sent.seq && self.unsent.is_none() {
-                    self.events.push(Event::OwnStreamConflict);
-                    self.retire_due = Some(RetireReason::OtherCopyWrote);
+                    self.own_stream_occupied(transport);
                     return;
                 }
             }
@@ -2075,10 +2146,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                     self.upload_header_files(transport);
                 }
                 Ok(AppendOutcome::Conflict) => {
-                    // Someone else wrote at this device's next position: another copy of this
-                    // device (a clone, a restored backup). This device continues under a new id.
-                    self.events.push(Event::OwnStreamConflict);
-                    self.retire_due = Some(RetireReason::OtherCopyWrote);
+                    self.own_stream_occupied(transport);
                     return;
                 }
                 Err(e) => {
