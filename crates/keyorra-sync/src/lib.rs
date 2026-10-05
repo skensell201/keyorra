@@ -13,6 +13,7 @@ pub mod labels;
 mod nonce;
 pub mod pad;
 pub mod payload;
+pub mod present;
 pub mod secret_key;
 pub mod segment;
 pub mod siblings;
