@@ -1271,14 +1271,8 @@ fn review_w1_a_withheld_root_tail_is_noticed_against_the_advertised_head() {
         stream: device_id(0),
         last_seq: before,
     };
-    c.devices[1].sync(&hiding, c.clocks[1]).unwrap();
-    assert!(
-        c.devices[1].root_confirmed(),
-        "nothing advertised yet: nothing to compare"
-    );
-    // The account header / setup code carries the root's current head.
+    // The root's head file (plan A1c-2) advertises its current head.
     let advertised = c.devices[0].root_head();
-    c.devices[1].set_root_head(advertised);
     c.devices[1].sync(&hiding, c.clocks[1]).unwrap();
     assert!(!c.devices[1].root_confirmed());
     assert_eq!(
