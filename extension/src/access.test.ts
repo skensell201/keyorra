@@ -97,3 +97,10 @@ test("taking and clearing a pending save is top-frame only and uses the browser'
 test("the content script can no longer park arbitrary pending saves", () => {
   expect(run({ type: "pendingSave", username: "u", password: "p", itemId: null, status: "new" }, top).ok).toBe(false);
 });
+
+test("a sender without a frame id counts as the top frame only when its URL is the tab's", () => {
+  const msg = { type: "takePendingSave" };
+  expect(run(msg, { ...page, tab: { id: 1, url: PAGE_URL } }).ok).toBe(true);
+  expect(run(msg, { ...page, tab: { id: 1, url: "https://other.example/" } }).ok).toBe(false);
+  expect(run(msg, { ...page, frameId: 2, tab: { id: 1, url: PAGE_URL } }).ok).toBe(false);
+});

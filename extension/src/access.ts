@@ -6,6 +6,13 @@ export interface Sender {
   id?: string;
   url?: string;
   frameId?: number;
+  tab?: { id?: number; url?: string };
+}
+
+/** Safari may leave out frameId; then only a sender whose URL is the tab's counts as the top frame. */
+export function isTopFrame(sender: Sender): boolean {
+  if (sender.frameId !== undefined) return sender.frameId === 0;
+  return !!sender.url && sender.url === sender.tab?.url;
 }
 
 export type Decision = { ok: true; url: string } | { ok: false; message: string };
@@ -44,7 +51,7 @@ export function authorize(msg: ToBackground, sender: Sender, extensionId: string
       return page && validSubmission(msg) ? { ok: true, url: sender.url! } : refuse();
     case "takePendingSave":
     case "clearPendingSave":
-      return page && sender.frameId === 0 ? { ok: true, url: sender.url! } : refuse();
+      return page && isTopFrame(sender) ? { ok: true, url: sender.url! } : refuse();
     default:
       return { ok: false, message: "Unknown request" };
   }

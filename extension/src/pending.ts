@@ -23,18 +23,55 @@ function hostOf(url: string): string | null {
   }
 }
 
+/** Somewhere that outlives the background page (storage.session: memory only, extension-only). */
+export interface PendingStore {
+  load(): Promise<unknown>;
+  save(value: unknown): Promise<void>;
+}
+
 export class PendingSaves {
   private entries = new Map<number, Entry>();
+  private restored: Promise<void> | null = null;
+  private writing: Promise<void> = Promise.resolve();
 
   constructor(
     private now: () => number = Date.now,
     private ttlMs = 60_000,
+    private store?: PendingStore,
   ) {}
 
   set(tabId: number, data: PendingSave, url: string): void {
     const host = hostOf(url);
     if (!host) return;
     this.entries.set(tabId, { data, host, expires: this.now() + this.ttlMs });
+    this.persist();
+  }
+
+  /** Resolves once every change so far is written to the store. */
+  flushed(): Promise<void> {
+    return this.writing;
+  }
+
+  private persist(): void {
+    if (!this.store) return;
+    const snapshot = Object.fromEntries(this.entries);
+    this.writing = this.writing.then(() => this.store!.save(snapshot)).catch(() => {});
+  }
+
+  /** Safari unloads a non-persistent background page between pages: reload what it parked. */
+  private restore(): Promise<void> {
+    if (!this.store) return Promise.resolve();
+    this.restored ??= this.store
+      .load()
+      .then((v) => {
+        if (!v || typeof v !== "object") return;
+        for (const [k, e] of Object.entries(v as Record<string, Entry>)) {
+          const id = Number(k);
+          if (!this.entries.has(id)) this.entries.set(id, e);
+        }
+      })
+      .catch(() => {});
+    return this.restored;
   }
 
   /** Returns and forgets the save if it is fresh and `url` has the same host; otherwise null (and keeps it). */
@@ -47,11 +84,33 @@ export class PendingSaves {
     }
     if (hostOf(url) !== e.host) return null;
     this.entries.delete(tabId);
+    this.persist();
     return e.data;
   }
 
   clear(tabId: number): void {
     this.entries.delete(tabId);
+    this.inFlight.delete(tabId);
+    this.persist();
+  }
+
+  private inFlight = new Map<number, Promise<unknown>>();
+
+  /** A sign-in from this tab is still being checked with the app. */
+  track(tabId: number, work: Promise<unknown>): void {
+    const done = work.catch(() => {}).finally(() => {
+      if (this.inFlight.get(tabId) === done) this.inFlight.delete(tabId);
+    });
+    this.inFlight.set(tabId, done);
+  }
+
+  /** Like take, but first waits (up to timeoutMs) for a check still in flight: the next page can
+   * load before the app has answered, especially in Safari. */
+  async waitAndTake(tabId: number, url: string, timeoutMs = 5000): Promise<PendingSave | null> {
+    const work = this.inFlight.get(tabId);
+    if (work) await Promise.race([work, new Promise((r) => setTimeout(r, timeoutMs))]);
+    await this.restore();
+    return this.take(tabId, url);
   }
 }
 

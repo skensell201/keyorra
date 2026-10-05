@@ -52,3 +52,30 @@ test("an offer comes from the app's lookup, or updates the page's own draft with
   expect(await offerFor({ username: "me", password: "x", draftId: null }, lookup)).toEqual({ username: "me", password: "x", itemId: null, status: "new" });
   expect(await offerFor({ username: "me", password: "same", draftId: "d1" }, lookup)).toEqual({ username: "me", password: "same", itemId: "d1", status: "changed" });
 });
+
+test("take waits for a sign-in the background is still checking with the app", async () => {
+  let finish!: () => void;
+  const checking = new Promise<void>((r) => (finish = r));
+  p.track(1, checking.then(() => p.set(1, data, "https://github.com/session")));
+  const taken = p.waitAndTake(1, "https://github.com/", 3000);
+  finish();
+  expect(await taken).toEqual(data);
+});
+
+test("waiting gives up after the timeout", async () => {
+  p.track(1, new Promise(() => {}));
+  expect(await p.waitAndTake(1, "https://github.com/", 10)).toBeNull();
+});
+
+test("a save survives the background being unloaded between pages (Safari)", async () => {
+  let saved: unknown = undefined;
+  const store = { load: async () => saved, save: async (v: unknown) => void (saved = v) };
+  const first = new PendingSaves(() => now, 60_000, store);
+  first.set(1, data, "https://github.com/session");
+  await first.flushed();
+  const second = new PendingSaves(() => now, 60_000, store);
+  expect(await second.waitAndTake(1, "https://github.com/", 10)).toEqual(data);
+  await second.flushed();
+  const third = new PendingSaves(() => now, 60_000, store);
+  expect(await third.waitAndTake(1, "https://github.com/", 10)).toBeNull();
+});

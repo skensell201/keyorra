@@ -62,6 +62,8 @@ KEEPSAKE_TEAM=ABCDE12345 safari/build.sh  # same, signed with another Apple Deve
 2. Open "Keepsake for Safari" → **Open Safari Extensions Settings** → turn on Keepsake and allow
    it on websites.
 3. Pair as above: Keepsake toolbar icon → **Connect**; the app shows the request as "Safari".
+   Reinstalling "Keepsake for Safari" (e.g. after `safari/build.sh`) gives the extension new
+   storage, so pair again; restarting Safari keeps the pairing.
 
 The app extension is sandboxed. Its one exception (`safari/Keepsake for Safari Extension/Extension.entitlements`)
 allows connecting to the app's socket and nothing else; `safari/check/sandbox-check.sh` checks

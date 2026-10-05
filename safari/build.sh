@@ -14,7 +14,8 @@ set -- "$@" -allowProvisioningUpdates
 if [ -n "${KEEPSAKE_TEAM:-}" ]; then
   set -- "$@" DEVELOPMENT_TEAM="$KEEPSAKE_TEAM"
 fi
-xcodebuild "$@" build
+# Clean every time: the copied extension files change without Xcode noticing, which breaks the signature.
+xcodebuild "$@" clean build
 
 built="$here/build/Build/Products/Release/$app"
 codesign --verify --deep --strict "$built"

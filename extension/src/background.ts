@@ -1,4 +1,4 @@
-import { authorize } from "./access";
+import { authorize, isTopFrame } from "./access";
 import { idbDelete, idbGet, idbPut } from "./idb";
 import { Client, LockedError, NoAppError, UnpairedError, type Pairing } from "./client";
 import { PendingSaves, offerFor } from "./pending";
@@ -18,7 +18,11 @@ const client = new Client(nativeSender(nativeRuntime(), HOST), {
 });
 
 // Logins awaiting a save across a page navigation: memory only, never page storage.
-const pending = new PendingSaves();
+// storage.session lives in memory and is closed to content scripts by default.
+const pending = new PendingSaves(Date.now, 60_000, {
+  load: () => chrome.storage.session.get("pending").then((r) => r.pending),
+  save: (value) => chrome.storage.session.set({ pending: value }),
+});
 chrome.tabs.onRemoved.addListener((tabId) => pending.clear(tabId));
 
 function kind(e: unknown): ErrorKind {
@@ -62,12 +66,16 @@ async function handle(msg: ToBackground, sender: chrome.runtime.MessageSender): 
       return client.fillIdentity(decision.url, msg.itemId);
     case "submitted": {
       // Decided here, not in the page: the page often navigates before the app answers.
-      const offer = await offerFor(msg, (u, p) => client.lookup(decision.url, u, p));
-      if (offer && sender.frameId === 0 && sender.tab?.id !== undefined) pending.set(sender.tab.id, offer, decision.url);
-      return offer;
+      const tabId = isTopFrame(sender) ? sender.tab?.id : undefined;
+      const work = offerFor(msg, (u, p) => client.lookup(decision.url, u, p)).then((offer) => {
+        if (offer && tabId !== undefined) pending.set(tabId, offer, decision.url);
+        return offer;
+      });
+      if (tabId !== undefined) pending.track(tabId, work);
+      return work;
     }
     case "takePendingSave":
-      return sender.tab?.id === undefined ? null : pending.take(sender.tab.id, decision.url);
+      return sender.tab?.id === undefined ? null : pending.waitAndTake(sender.tab.id, decision.url);
     case "clearPendingSave":
       if (sender.tab?.id !== undefined) pending.clear(sender.tab.id);
       return null;
