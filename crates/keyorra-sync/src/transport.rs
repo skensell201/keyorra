@@ -48,6 +48,9 @@ pub trait Transport {
     /// Stores a snapshot under its name, which it returns.
     fn put_snapshot(&self, bytes: &[u8]) -> Result<String>;
     fn delete_snapshot(&self, name: &str) -> Result<()>;
+    /// Deletes the segment file of `stream` starting at `first_seq` (a device removing
+    /// something that occupies its own stream but is not its segment).
+    fn delete_segment(&self, stream: &DeviceId, first_seq: u64) -> Result<()>;
     /// The main device's advertised head file ([`crate::root_head`]).
     fn root_head_file(&self) -> Result<Fetched<Vec<u8>>>;
     fn put_root_head_file(&self, bytes: &[u8]) -> Result<()>;
@@ -175,6 +178,11 @@ impl Transport for MemoryTransport {
 
     fn delete_snapshot(&self, name: &str) -> Result<()> {
         self.files.lock().unwrap().snapshots.remove(name);
+        Ok(())
+    }
+
+    fn delete_segment(&self, stream: &DeviceId, first_seq: u64) -> Result<()> {
+        self.remove_segment(stream, first_seq);
         Ok(())
     }
 

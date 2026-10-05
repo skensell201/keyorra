@@ -209,6 +209,9 @@ impl Transport for Upto<'_> {
     fn delete_snapshot(&self, name: &str) -> Result<()> {
         self.inner.delete_snapshot(name)
     }
+    fn delete_segment(&self, stream: &DeviceId, first_seq: u64) -> Result<()> {
+        self.inner.delete_segment(stream, first_seq)
+    }
     fn root_head_file(&self) -> Result<Fetched<Vec<u8>>> {
         self.inner.root_head_file()
     }
@@ -510,6 +513,9 @@ impl Transport for BrokenStream<'_> {
     }
     fn delete_snapshot(&self, name: &str) -> Result<()> {
         self.inner.delete_snapshot(name)
+    }
+    fn delete_segment(&self, stream: &DeviceId, first_seq: u64) -> Result<()> {
+        self.inner.delete_segment(stream, first_seq)
     }
     fn root_head_file(&self) -> Result<Fetched<Vec<u8>>> {
         self.inner.root_head_file()

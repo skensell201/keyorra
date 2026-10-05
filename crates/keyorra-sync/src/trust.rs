@@ -115,6 +115,9 @@ pub struct Trust {
     /// Streams that broke the protocol: nothing from this position on counts (local, not a
     /// trust decision; every reader finds the same first violation).
     invalid_from: BTreeMap<DeviceId, u64>,
+    /// Cuts taken from the main device's head file before its stream delivered the
+    /// `Revoke`; the stream's entry settles them.
+    provisional: BTreeSet<DeviceId>,
 }
 
 impl Trust {
@@ -137,6 +140,7 @@ impl Trust {
             unapproved: BTreeMap::new(),
             pending_self: None,
             invalid_from: BTreeMap::new(),
+            provisional: BTreeSet::new(),
         }
     }
 
@@ -170,6 +174,20 @@ impl Trust {
     /// Removed before it was approved: nothing of it ever counts.
     pub fn is_removed(&self, device: &DeviceId) -> bool {
         self.removed.contains(device)
+    }
+
+    /// A removal the main device announced in its signed head file before its stream
+    /// delivered it (review F1): an approved device is cut at once at `last_valid_seq`. Its
+    /// `Revoke` in the stream settles the cut later. Returns whether anything changed.
+    pub fn provisional_revoke(&mut self, device: DeviceId, last_valid_seq: u64) -> bool {
+        match self.devices.get_mut(&device) {
+            Some(d) if d.cut.is_none() && device != self.root => {
+                d.cut = Some(last_valid_seq);
+                self.provisional.insert(device);
+                true
+            }
+            _ => false,
+        }
     }
 
     /// `device`'s entry at `seq` broke the protocol: from there on nothing of it counts.
@@ -279,6 +297,16 @@ impl Trust {
                 }
                 if self.removed.contains(device) {
                     return Err(TrustError::AlreadyDecided);
+                }
+                if self.provisional.remove(device) {
+                    let d = self
+                        .devices
+                        .get_mut(device)
+                        .expect("provisional cuts are of devices");
+                    let cut = (*last_valid_seq).max(seen(device));
+                    let changed = d.cut != Some(cut);
+                    d.cut = Some(cut);
+                    return Ok(changed);
                 }
                 match self.devices.get_mut(device) {
                     Some(d) if d.cut.is_some() => Err(TrustError::AlreadyDecided),

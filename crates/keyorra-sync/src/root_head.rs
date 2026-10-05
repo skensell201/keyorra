@@ -4,26 +4,24 @@
 //!
 //! ```text
 //! file = canonical({ "account_id": bytes16, "seq": uint, "hash": bytes32, "at_ms": uint,
-//!                    "sig": bytes64 })
-//! sig  = Ed25519(root_sk, "keyorra/sync/v1/root-head\0" ‖ account_id ‖ seq:u64be ‖ hash
-//!                ‖ at_ms:u64be)
+//!                    "pending": [[seq, entry], …], "sig": bytes64 })
+//! sig  = Ed25519(root_sk, "keyorra/sync/v1/root-head\0" ‖ canonical(file without "sig"))
 //! ```
 //!
 //! `at_ms` is the main device's wall time when it wrote the file. It rewrites the file at
 //! least daily while online (a heartbeat), so a store that freezes or replays an old file is
-//! noticed: its time stops advancing while other devices' streams move on (review I1).
-//!
-//! ```text
-//! ```
+//! noticed (review I1). `pending` lists the main device's removals (`revoke` entries) that
+//! are written but not yet confirmed in its stream, with their positions: a squatter who
+//! keeps the main device's next position occupied cannot hold a removal back (review F1).
+//! Readers apply them at once and reconcile when the stream delivers them.
 //!
 //! A reader only moves its advertised head forward, so an old file served later changes
-//! nothing; a store that serves no file or an old one is no worse than before, and the setup
-//! code (which carries the root's head when a device joins) and checkpoints cover the rest.
+//! nothing.
 
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 
 use crate::cbor::{self, Value};
-use crate::entry::Head;
+use crate::entry::{Entry, Head};
 use crate::error::{Error, Result};
 use crate::labels::{self, tagged};
 use crate::AccountId;
@@ -32,58 +30,85 @@ use crate::AccountId;
 pub const ROOT_HEAD_FILE: &str = "root.head";
 const MAX_LEN: usize = 512;
 
-fn message(account_id: &AccountId, head: &Head, at_ms: u64) -> Vec<u8> {
-    tagged(
-        labels::ROOT_HEAD,
-        &[
-            account_id,
-            &head.seq.to_be_bytes(),
-            &head.hash,
-            &at_ms.to_be_bytes(),
-        ],
-    )
+/// What a root head file says.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RootHead {
+    pub head: Head,
+    pub at_ms: u64,
+    pub pending: Vec<(u64, Entry)>,
 }
 
-pub fn seal_root_head(
-    account_id: &AccountId,
-    head: &Head,
-    at_ms: u64,
-    root: &SigningKey,
-) -> Vec<u8> {
-    let sig = root.sign(&message(account_id, head, at_ms)).to_bytes();
-    cbor::encode(&Value::map(vec![
+fn body(account_id: &AccountId, r: &RootHead) -> Value {
+    Value::map(vec![
         ("account_id", Value::bytes(account_id)),
-        ("seq", Value::Uint(head.seq)),
-        ("hash", Value::bytes(head.hash)),
-        ("at_ms", Value::Uint(at_ms)),
-        ("sig", Value::bytes(sig)),
-    ]))
+        ("seq", Value::Uint(r.head.seq)),
+        ("hash", Value::bytes(r.head.hash)),
+        ("at_ms", Value::Uint(r.at_ms)),
+        (
+            "pending",
+            Value::Array(
+                r.pending
+                    .iter()
+                    .map(|(seq, e)| Value::Array(vec![Value::Uint(*seq), e.to_value()]))
+                    .collect(),
+            ),
+        ),
+    ])
 }
 
-/// The head and the main device's wall time when it wrote the file.
+fn message(body: &Value) -> Vec<u8> {
+    tagged(labels::ROOT_HEAD, &[&cbor::encode(body)])
+}
+
+pub fn seal_root_head(account_id: &AccountId, r: &RootHead, root: &SigningKey) -> Vec<u8> {
+    let b = body(account_id, r);
+    let sig = root.sign(&message(&b)).to_bytes();
+    let Value::Map(mut fields) = b else {
+        unreachable!("a map")
+    };
+    fields.push((Value::text("sig"), Value::bytes(sig)));
+    cbor::encode(&Value::Map(fields))
+}
+
+/// Opens a root head file: this account, signed by the main device; only `revoke` entries
+/// may be pending.
 pub fn open_root_head(
     account_id: &AccountId,
     root: &VerifyingKey,
     bytes: &[u8],
-) -> Result<(Head, u64)> {
+) -> Result<RootHead> {
     let value = cbor::decode_limited(bytes, MAX_LEN)?;
-    let f = value.fields(&["account_id", "seq", "hash", "at_ms", "sig"])?;
+    let f = value.fields(&["account_id", "seq", "hash", "at_ms", "pending", "sig"])?;
     let file_account: AccountId = f.get("account_id")?.as_array_of()?;
     if file_account != *account_id {
         return Err(Error::Refused("root head of another account".into()));
     }
-    let head = Head {
-        seq: f.get("seq")?.as_uint()?,
-        hash: f.get("hash")?.as_array_of()?,
+    let mut pending = Vec::new();
+    for item in f.get("pending")?.as_list()? {
+        let [seq, entry] = item.as_list()? else {
+            return Err(Error::Malformed("pending entry".into()));
+        };
+        let entry = Entry::from_value(entry)?;
+        if !matches!(entry, Entry::Revoke { .. }) {
+            return Err(Error::Malformed("only removals are pending".into()));
+        }
+        pending.push((seq.as_uint()?, entry));
+    }
+    let r = RootHead {
+        head: Head {
+            seq: f.get("seq")?.as_uint()?,
+            hash: f.get("hash")?.as_array_of()?,
+        },
+        at_ms: f.get("at_ms")?.as_uint()?,
+        pending,
     };
-    let at_ms = f.get("at_ms")?.as_uint()?;
     let sig: [u8; 64] = f.get("sig")?.as_array_of()?;
     root.verify_strict(
-        &message(account_id, &head, at_ms),
+        &message(&body(account_id, &r)),
         &Signature::from_bytes(&sig),
     )
     .map_err(|_| Error::BadSignature)?;
-    Ok((head, at_ms))
+    Ok(r)
 }
 
 #[cfg(test)]
@@ -93,14 +118,25 @@ mod tests {
     #[test]
     fn a_root_head_file_opens_only_with_the_root_key_and_account() {
         let root = SigningKey::from_bytes(&[1; 32]);
-        let head = Head {
-            seq: 42,
-            hash: [7; 32],
+        let r = RootHead {
+            head: Head {
+                seq: 42,
+                hash: [7; 32],
+            },
+            at_ms: 77,
+            pending: vec![(
+                43,
+                Entry::Revoke {
+                    device: [5; 16],
+                    last_valid_seq: 9,
+                    last_valid_hash: [3; 32],
+                },
+            )],
         };
-        let bytes = seal_root_head(&[9; 16], &head, 77, &root);
+        let bytes = seal_root_head(&[9; 16], &r, &root);
         assert_eq!(
             open_root_head(&[9; 16], &root.verifying_key(), &bytes).unwrap(),
-            (head, 77)
+            r
         );
         let other = SigningKey::from_bytes(&[2; 32]).verifying_key();
         assert!(open_root_head(&[9; 16], &other, &bytes).is_err());

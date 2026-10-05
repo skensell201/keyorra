@@ -246,6 +246,9 @@ impl Transport for NoHeads {
     fn delete_snapshot(&self, name: &str) -> Result<()> {
         self.0.delete_snapshot(name)
     }
+    fn delete_segment(&self, stream: &DeviceId, first_seq: u64) -> Result<()> {
+        self.0.delete_segment(stream, first_seq)
+    }
     fn root_head_file(&self) -> Result<Fetched<Vec<u8>>> {
         self.0.root_head_file()
     }
@@ -760,6 +763,8 @@ fn review_w3_approval_checks_the_key_shown_on_the_joining_device() {
     let mut thief = kit(device_id(5), 7);
     thief.self_join(START_MS).unwrap();
     thief.sync(&c.store, START_MS).unwrap();
+    // The main device sees the thief's SelfJoin first.
+    c.sync(0).unwrap();
     let mut joiner = kit(device_id(5), 5);
     joiner.forging = false;
     joiner.self_join(START_MS).unwrap();
@@ -833,27 +838,16 @@ fn review_k1_a_keyless_junk_file_at_the_next_position_retires_nobody() {
             "device {i}: {events:?}"
         );
         assert_eq!(c.devices[i].device(), device_id(i), "keeps its id");
-        assert!(c.devices[i]
-            .alarms()
+        // It deletes what is not its segment and goes on by itself (review F1).
+        assert!(events
             .iter()
-            .any(|a| matches!(a, Alarm::OwnStreamTampered { .. })));
+            .any(|e| matches!(e, Event::OwnStreamCleaned { .. })));
+        assert!(c.devices[i].alarms().is_empty());
     }
     assert!(
         !c.devices[0].halted,
         "the main device never halts on unverified evidence"
-    ); // The user removes the junk and accepts: the devices go on under their ids.
-    for i in 0..2 {
-        let alarm = c.devices[i]
-            .alarms()
-            .into_iter()
-            .find(|a| matches!(a, Alarm::OwnStreamTampered { .. }))
-            .unwrap();
-        let Alarm::OwnStreamTampered { seq } = alarm else {
-            unreachable!()
-        };
-        c.store.remove_segment(&device_id(i), seq);
-        assert!(c.devices[i].accept_alarm(&alarm));
-    }
+    );
     c.heal();
     c.assert_converged();
     assert_eq!(c.devices[1].device(), device_id(1));
@@ -1019,6 +1013,9 @@ impl Transport for FrozenRoot<'_> {
     fn delete_snapshot(&self, name: &str) -> Result<()> {
         self.inner.delete_snapshot(name)
     }
+    fn delete_segment(&self, stream: &DeviceId, first_seq: u64) -> Result<()> {
+        self.inner.delete_segment(stream, first_seq)
+    }
     fn root_head_file(&self) -> Result<Fetched<Vec<u8>>> {
         Ok(Fetched::Ready(self.frozen.clone()))
     }
@@ -1097,4 +1094,162 @@ fn review_i2_existing_devices_alarm_on_a_header_naming_another_root() {
             c.devices[i].alarms()
         );
     }
+}
+
+#[test]
+fn review_f1_a_squatter_at_the_roots_next_position_cannot_block_a_removal() {
+    let mut c = Cluster::new(3, 1, Faults::NONE);
+    let vault = c.devices[0].create_vault("Personal", START_MS).unwrap();
+    c.heal();
+    c.devices[0].revoke(device_id(2), c.clocks[0]).unwrap();
+    for round in 0..3 {
+        // The stolen device (folder access, no key needed) squats the main device's next
+        // position, and a position far ahead (a raised stored head), every round.
+        let next = c.devices[0].sent.seq + 1;
+        let _ = c.store.append(&junk_segment(device_id(0), next));
+        let _ = c.store.append(&junk_segment(device_id(0), next + 50));
+        let json = Cluster::item_json(ITEM, &format!("r{round}"), &[]);
+        c.devices[0]
+            .save_item(vault, ITEM, &json, c.clocks[0])
+            .unwrap();
+        c.sync(0).unwrap();
+        let events = c.devices[0].take_events();
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, Event::OwnStreamCleaned { .. })),
+            "{events:?}"
+        );
+        assert!(
+            c.devices[0].alarms().is_empty(),
+            "{:?}",
+            c.devices[0].alarms()
+        );
+    }
+    c.sync(1).unwrap();
+    assert!(c.devices[1]
+        .trust()
+        .device(&device_id(2))
+        .unwrap()
+        .cut
+        .is_some());
+    assert_eq!(title(&c.devices[1].view(), ITEM), "r2");
+}
+
+/// The main device's link: every append fails (a squatter always wins the race).
+struct NoAppends<'a>(&'a MemoryTransport);
+
+impl Transport for NoAppends<'_> {
+    fn streams(&self) -> Result<Vec<DeviceId>> {
+        self.0.streams()
+    }
+    fn segments(&self, stream: &DeviceId, after_seq: u64) -> Result<Vec<Fetched<Vec<u8>>>> {
+        self.0.segments(stream, after_seq)
+    }
+    fn append(&self, _: &[u8]) -> Result<AppendOutcome> {
+        Err(Error::Transport("occupied".into()))
+    }
+    fn delete_segment(&self, stream: &DeviceId, first_seq: u64) -> Result<()> {
+        self.0.delete_segment(stream, first_seq)
+    }
+    fn head(&self, stream: &DeviceId) -> Result<Option<u64>> {
+        self.0.head(stream)
+    }
+    fn headers(&self) -> Result<Vec<(String, Fetched<Vec<u8>>)>> {
+        self.0.headers()
+    }
+    fn put_header(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        self.0.put_header(name, bytes)
+    }
+    fn delete_header(&self, name: &str) -> Result<()> {
+        self.0.delete_header(name)
+    }
+    fn snapshots(&self) -> Result<Vec<(String, DeviceId)>> {
+        self.0.snapshots()
+    }
+    fn get_snapshot(&self, name: &str) -> Result<Fetched<Vec<u8>>> {
+        self.0.get_snapshot(name)
+    }
+    fn put_snapshot(&self, bytes: &[u8]) -> Result<String> {
+        self.0.put_snapshot(bytes)
+    }
+    fn delete_snapshot(&self, name: &str) -> Result<()> {
+        self.0.delete_snapshot(name)
+    }
+    fn root_head_file(&self) -> Result<Fetched<Vec<u8>>> {
+        self.0.root_head_file()
+    }
+    fn put_root_head_file(&self, bytes: &[u8]) -> Result<()> {
+        self.0.put_root_head_file(bytes)
+    }
+}
+
+#[test]
+fn review_f1_a_removal_also_travels_in_the_root_head_file() {
+    let mut c = Cluster::new(3, 1, Faults::NONE);
+    let vault = c.devices[0].create_vault("Personal", START_MS).unwrap();
+    c.heal();
+    let stolen_head = c.devices[0].heads[&device_id(2)].seq;
+    c.devices[0].revoke(device_id(2), c.clocks[0]).unwrap();
+    let store = c.store.clone();
+    c.devices[0].sync(&NoAppends(&store), c.clocks[0]).unwrap();
+    // The stolen device writes on; device 1 learns of the removal from the head file alone.
+    c.devices[2].forging = true;
+    let json = Cluster::item_json(ITEM, "after", &[]);
+    c.devices[2]
+        .save_item(vault, ITEM, &json, c.clocks[2])
+        .unwrap();
+    c.devices[2].push(&c.store);
+    c.sync(1).unwrap();
+    assert_eq!(
+        c.devices[1].trust().device(&device_id(2)).unwrap().cut,
+        Some(stolen_head)
+    );
+    assert!(!c.devices[1].view().items.contains_key(&ITEM));
+    // Once the stream catches up, the entry is the same decision: nothing changes.
+    c.sync(0).unwrap();
+    c.sync(1).unwrap();
+    assert_eq!(
+        c.devices[1].trust().device(&device_id(2)).unwrap().cut,
+        Some(stolen_head)
+    );
+    assert!(!c.devices[1]
+        .take_events()
+        .iter()
+        .any(|e| matches!(e, Event::TrustEntryIgnored { .. })));
+}
+
+#[test]
+fn review_f2_the_main_device_cannot_leave_its_id() {
+    let mut c = Cluster::new(2, 1, Faults::NONE);
+    c.heal();
+    assert!(matches!(
+        c.devices[0].leave_id(c.clocks[0]),
+        Err(Error::Refused(_))
+    ));
+    assert!(!c.devices[0].halted);
+}
+
+#[test]
+fn review_f3_a_frozen_partitioned_view_is_noticed_even_with_no_other_movement() {
+    let mut c = Cluster::new(3, 1, Faults::NONE);
+    let vault = c.devices[0].create_vault("Personal", START_MS).unwrap();
+    c.heal();
+    // Device 1 is kept on a frozen copy of the store; only its own pushes land there.
+    let frozen = c.store.deep_copy();
+    let mut warned = false;
+    for day in 0..10u8 {
+        c.devices[0].revoke(device_id(2), c.clocks[0]).ok();
+        c.sync(0).unwrap();
+        let id = Uuid::from_bytes([0x70 + day; 16]);
+        let json = Cluster::item_json(id, "mine", &[]);
+        c.devices[1].save_item(vault, id, &json, c.clocks[1]).unwrap();
+        c.devices[1].sync(&frozen, c.clocks[1]).unwrap();
+        warned |= c.devices[1]
+            .take_events()
+            .iter()
+            .any(|e| matches!(e, Event::RootSilent { .. }));
+        c.tick(24 * 60 * 60 * 1000);
+    }
+    assert!(warned);
 }

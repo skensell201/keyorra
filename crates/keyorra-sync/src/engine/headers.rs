@@ -9,7 +9,7 @@
 //! older header files are deleted, because an old header still opens the account with the old
 //! password.
 
-use crate::root_head::{open_root_head, seal_root_head, ROOT_HEAD_FILE};
+use crate::root_head::{open_root_head, seal_root_head, RootHead, ROOT_HEAD_FILE};
 
 use super::*;
 
@@ -220,48 +220,72 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         }
     }
 
-    /// The main device writes its confirmed head for everyone to compare with: when it
-    /// moved, and at least daily while online (a heartbeat, review I1).
+    /// The main device writes its confirmed head for everyone to compare with: when it moved
+    /// or its pending removals changed, and at least daily while online (a heartbeat,
+    /// review I1). Removals written but not yet confirmed travel in it too (review F1).
     pub(super) fn write_root_head_file(&mut self, transport: &impl Transport, wall_ms: u64) {
         if !self.is_root() || self.sent.seq == 0 {
             return;
         }
-        let (seq, at) = self.root_head_written;
-        if seq == self.sent.seq && wall_ms < at + ROOT_HEARTBEAT_MS {
+        let pending: Vec<(u64, Entry)> = self
+            .root_log
+            .iter()
+            .filter(|(seq, e)| *seq > self.sent.seq && matches!(e, Entry::Revoke { .. }))
+            .cloned()
+            .collect();
+        let (seq, at, count) = self.root_head_written;
+        if seq == self.sent.seq && count == pending.len() && wall_ms < at + ROOT_HEARTBEAT_MS {
             return;
         }
-        let bytes = seal_root_head(&self.account_id, &self.sent, wall_ms, &self.signer);
+        let file = RootHead {
+            head: self.sent,
+            at_ms: wall_ms,
+            pending,
+        };
+        let bytes = seal_root_head(&self.account_id, &file, &self.signer);
         if transport.put_root_head_file(&bytes).is_ok() {
-            self.root_head_written = (self.sent.seq, wall_ms);
+            self.root_head_written = (self.sent.seq, wall_ms, file.pending.len());
         }
     }
 
-    /// Other devices read it (only forward; a bad file is ignored). If the main device's
-    /// time in it stops advancing for a week while other devices' streams move on, the store
-    /// may be freezing it while hiding the main device's newest entries: a warning.
+    /// Other devices read it (only forward; a bad file is ignored). Pending removals are
+    /// applied at once (provisionally; the stream's own entry settles them). If the main
+    /// device's time in it has not advanced for a week, a mild warning: it may be switched
+    /// off, or the store may be freezing the file (review F3).
     pub(super) fn read_root_head_file(&mut self, transport: &impl Transport, wall_ms: u64) {
         if self.is_root() {
             return;
         }
-        let others: u64 = self
-            .heads
-            .iter()
-            .filter(|(d, _)| **d != self.trust.root())
-            .map(|(_, h)| h.seq)
-            .sum();
         let opened = match transport.root_head_file() {
             Ok(Fetched::Ready(bytes)) => {
                 open_root_head(&self.account_id, &self.trust.root_key(), &bytes).ok()
             }
             _ => None,
         };
-        if let Some((head, at_ms)) = opened {
-            self.set_root_head(head);
-            if self.root_time.is_none_or(|t| at_ms > t.root_ms) {
+        if let Some(file) = opened {
+            self.set_root_head(file.head);
+            let received = self.heads.get(&self.trust.root()).map_or(0, |h| h.seq);
+            let mut changed = false;
+            for (seq, entry) in &file.pending {
+                if *seq <= received {
+                    continue;
+                }
+                if let Entry::Revoke {
+                    device,
+                    last_valid_seq,
+                    ..
+                } = entry
+                {
+                    changed |= self.trust.provisional_revoke(*device, *last_valid_seq);
+                }
+            }
+            if changed {
+                self.trust_changed();
+            }
+            if self.root_time.is_none_or(|t| file.at_ms > t.root_ms) {
                 self.root_time = Some(RootTime {
-                    root_ms: at_ms,
+                    root_ms: file.at_ms,
                     since_ms: wall_ms,
-                    others,
                     reported: false,
                 });
                 return;
@@ -270,10 +294,9 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         let t = self.root_time.get_or_insert(RootTime {
             root_ms: 0,
             since_ms: wall_ms,
-            others,
             reported: false,
         });
-        if !t.reported && wall_ms >= t.since_ms + ROOT_SILENT_AFTER_MS && others > t.others {
+        if !t.reported && wall_ms >= t.since_ms + ROOT_SILENT_AFTER_MS {
             t.reported = true;
             let since_ms = t.since_ms;
             self.events.push(Event::RootSilent { since_ms });

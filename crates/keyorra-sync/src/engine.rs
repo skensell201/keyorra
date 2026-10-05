@@ -74,8 +74,6 @@ struct RootTime {
     root_ms: u64,
     /// Local wall time when it last advanced.
     since_ms: u64,
-    /// Sum of the other streams' received heads then.
-    others: u64,
     reported: bool,
 }
 
@@ -295,11 +293,16 @@ pub enum Event {
         seq: u64,
         by: DeviceId,
     },
-    /// The main device's head file has not advanced since `since_ms` (a week) while other
-    /// devices kept writing: the store may be freezing it and hiding the main device's newest
-    /// entries. A warning (the main device may simply be switched off).
+    /// The main device's head file has not advanced since `since_ms` (a week): the main
+    /// device may be switched off, or the store may be freezing the file while hiding its
+    /// newest entries. A mild warning.
     RootSilent {
         since_ms: u64,
+    },
+    /// Something at this device's own position `seq` was not its segment (a keyless writer's
+    /// junk, a squatter): deleted, and the device went on (review F1).
+    OwnStreamCleaned {
+        seq: u64,
     },
     /// The outbox could not be persisted; nothing is appended until it can.
     OutboxNotSaved(String),
@@ -431,7 +434,7 @@ pub struct Engine<R> {
     outbox_unsaved: bool,
     bootstrap_tried: bool,
     /// The own head and wall time last written to the root head file (main device).
-    root_head_written: (u64, u64),
+    root_head_written: (u64, u64, usize),
     /// The main device's time in its head file, as last seen advancing (other devices).
     root_time: Option<RootTime>,
     /// The main device's trust entries applied so far, in its stream's order (for snapshots).
@@ -549,7 +552,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             own_segments: BTreeMap::new(),
             outbox_unsaved: false,
             bootstrap_tried: false,
-            root_head_written: (0, 0),
+            root_head_written: (0, 0, 0),
             root_time: None,
             root_log: Vec::new(),
             #[cfg(test)]
@@ -2065,13 +2068,15 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         }
     }
 
-    /// Something occupies this device's next position. Only a segment that verifies with this
-    /// device's own key proves another copy of it (a clone, a restored backup): then it
-    /// retires. Anything else (a keyless writer's junk) is an alarm and the id is kept.
-    fn own_stream_occupied(&mut self, transport: &impl Transport) {
+    /// Something occupies this device's own stream beyond its confirmed position. Only a
+    /// segment that verifies with this device's own key proves another copy of it (a clone,
+    /// a restored backup): then it retires. Anything else (a keyless writer's junk, a squatter)
+    /// is deleted and the device goes on by itself (review F1); only if deleting fails is it
+    /// an alarm. Returns whether the way is clear again.
+    fn own_stream_occupied(&mut self, transport: &impl Transport) -> bool {
         let own_key = self.signer.verifying_key();
         let unsent = self.unsent.as_ref().map(|u| u.bytes.clone());
-        let mut tampered_at = None;
+        let mut junk = Vec::new();
         let mut copy = false;
         if let Ok(found) = transport.segments(&self.device, self.sent.seq) {
             for f in found {
@@ -2079,31 +2084,49 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                 if Some(&bytes) == unsent.as_ref() {
                     continue;
                 }
+                let Ok(header) = SegmentHeader::parse(&bytes) else {
+                    continue;
+                };
+                if header.device_id != self.device || header.first_seq <= self.sent.seq {
+                    continue;
+                }
                 let verified = decrypt_segment(&self.segment_key, &bytes)
                     .ok()
                     .and_then(|u| u.verify(&own_key).ok())
-                    .is_some_and(|seg| seg.header.device_id == self.device);
+                    .is_some();
                 if verified {
                     copy = true;
-                } else if let Ok(h) = SegmentHeader::parse(&bytes) {
-                    let at = tampered_at.get_or_insert(h.first_seq);
-                    *at = (*at).min(h.first_seq);
+                } else {
+                    junk.push(header.first_seq);
                 }
             }
         }
         if copy {
             self.events.push(Event::OwnStreamConflict);
             self.retire_due = Some(RetireReason::OtherCopyWrote);
-        } else {
-            let seq = tampered_at.unwrap_or(self.sent.seq + 1);
-            self.raise_own_tampered(seq);
+            return false;
         }
+        let mut cleared = true;
+        for seq in junk {
+            if transport.delete_segment(&self.device, seq).is_ok() {
+                self.events.push(Event::OwnStreamCleaned { seq });
+            } else {
+                cleared = false;
+                self.raise_own_tampered(seq);
+            }
+        }
+        cleared
     }
 
     /// The user chose to leave this device's id behind (its stream is occupied for good):
     /// it continues under a new id, pending approval. The main device cannot; it asks to start
     /// over instead.
     pub fn leave_id(&mut self, wall_ms: u64) -> Result<()> {
+        if self.is_root() {
+            return Err(Error::Refused(
+                "the main device cannot leave its id (that would stop the account)".into(),
+            ));
+        }
         self.alarms
             .retain(|a| !matches!(a, Alarm::OwnStreamTampered { .. }));
         self.retire(RetireReason::OtherCopyWrote, wall_ms)
@@ -2145,8 +2168,10 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                     });
                     return;
                 }
-                if stored > self.sent.seq && self.unsent.is_none() {
-                    self.own_stream_occupied(transport);
+                if stored > self.sent.seq
+                    && self.unsent.is_none()
+                    && !self.own_stream_occupied(transport)
+                {
                     return;
                 }
             }
@@ -2158,6 +2183,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         if self.outbox_unsaved && !self.save_outbox() {
             return;
         }
+        let mut retries = 0;
         loop {
             if self.unsent.is_none() {
                 if self.outbox.is_empty() {
@@ -2205,8 +2231,10 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                     self.upload_header_files(transport);
                 }
                 Ok(AppendOutcome::Conflict) => {
-                    self.own_stream_occupied(transport);
-                    return;
+                    retries += 1;
+                    if retries > 3 || !self.own_stream_occupied(transport) {
+                        return;
+                    }
                 }
                 Err(e) => {
                     self.events.push(Event::PushFailed(e.to_string()));

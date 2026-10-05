@@ -174,6 +174,10 @@ impl<T: Transport> Transport for Faulty<T> {
         self.inner.delete_snapshot(name)
     }
 
+    fn delete_segment(&self, stream: &DeviceId, first_seq: u64) -> Result<()> {
+        self.inner.delete_segment(stream, first_seq)
+    }
+
     fn root_head_file(&self) -> Result<Fetched<Vec<u8>>> {
         self.inner.root_head_file()
     }
@@ -264,6 +268,10 @@ impl<T: Transport> Transport for Rollback<T> {
         self.inner.delete_snapshot(name)
     }
 
+    fn delete_segment(&self, stream: &DeviceId, first_seq: u64) -> Result<()> {
+        self.inner.delete_segment(stream, first_seq)
+    }
+
     fn root_head_file(&self) -> Result<Fetched<Vec<u8>>> {
         self.inner.root_head_file()
     }
@@ -335,6 +343,10 @@ impl<T: Transport, U: Transport> Transport for Overlay<T, U> {
 
     fn delete_snapshot(&self, name: &str) -> Result<()> {
         self.base.delete_snapshot(name)
+    }
+
+    fn delete_segment(&self, stream: &DeviceId, first_seq: u64) -> Result<()> {
+        self.base.delete_segment(stream, first_seq)
     }
 
     fn root_head_file(&self) -> Result<Fetched<Vec<u8>>> {
