@@ -8,7 +8,7 @@ export const THEMES: { id: Theme; label: string }[] = [
   { id: "index", label: "Index" },
 ];
 
-const KEY = "keepsake.theme";
+const KEY = "keyorra.theme";
 const DARK_QUERY = "(prefers-color-scheme: dark)";
 
 /** The saved theme; storage can be unavailable, so fall back to following the system. */

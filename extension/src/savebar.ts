@@ -55,7 +55,7 @@ export class SaveBar {
     this.trusted = options.trusted ?? ((e) => e.isTrusted);
     this.visible = options.visible ?? defaultVisible;
     this.settleMs = options.settleMs ?? 300;
-    this.host = document.createElement("keepsake-savebar");
+    this.host = document.createElement("keyorra-savebar");
     this.host.style.setProperty("opacity", "1", "important");
     // The host is in the page only while the bar is shown.
     this.root = this.host.attachShadow({ mode: "closed" });

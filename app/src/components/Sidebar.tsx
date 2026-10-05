@@ -49,7 +49,7 @@ export function Sidebar(props: Props) {
     <nav className="sidebar" aria-label="Vaults">
       <div className="brand">
         <Keyhole />
-        Keepsake
+        Keyorra
       </div>
       <button className="nav" aria-current={isCurrent({ kind: "all" })} onClick={() => onSelect({ kind: "all" })}>
         <IconGrid />

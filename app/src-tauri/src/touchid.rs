@@ -7,9 +7,9 @@ use zeroize::Zeroizing;
 /// Keychain service of the Touch ID record. Debug builds are signed ad hoc and can't read the
 /// release app's item (or the other way round), so they keep their own.
 pub const SERVICE: &str = if cfg!(debug_assertions) {
-    "app.keepsake.mac.touchid.dev"
+    "app.keyorra.mac.touchid.dev"
 } else {
-    "app.keepsake.mac.touchid"
+    "app.keyorra.mac.touchid"
 };
 
 /// Why a call failed; mirrors the status codes in TouchId.swift.
@@ -171,7 +171,7 @@ pub fn keychain_delete(name: &str) -> Result<(), Failure> {
 /// The login keychain as the session's Touch ID store.
 pub struct MacKeyring;
 
-impl keepsake_session::touchid::Keyring for MacKeyring {
+impl keyorra_session::touchid::Keyring for MacKeyring {
     fn load(&self) -> Option<Vec<u8>> {
         keychain_load(SERVICE).ok()
     }
@@ -203,12 +203,12 @@ mod tests {
         let _ = available();
     }
 
-    /// Run by hand: `cargo test -p keepsake-app -- --ignored`. Creates a Secure Enclave key and a
+    /// Run by hand: `cargo test -p keyorra-app -- --ignored`. Creates a Secure Enclave key and a
     /// keychain item under a test service, then removes the item. Never shows a prompt.
     #[test]
     #[ignore = "touches the Secure Enclave and the login keychain"]
     fn enclave_key_and_keychain_round_trip() {
-        const TEST: &str = "app.keepsake.mac.touchid.test";
+        const TEST: &str = "app.keyorra.mac.touchid.test";
         let (blob, public) = create_key().unwrap();
         assert!(!blob.is_empty());
         assert_eq!(public[0], 4, "uncompressed X9.63 point");

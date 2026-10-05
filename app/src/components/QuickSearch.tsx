@@ -63,7 +63,7 @@ export function QuickSearch({ onDone }: { onDone: () => void }) {
         <input
           autoFocus
           aria-label="Quick search"
-          placeholder="Search Keepsake"
+          placeholder="Search Keyorra"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
           onKeyDown={onKeyDown}

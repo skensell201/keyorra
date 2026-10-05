@@ -2249,12 +2249,33 @@ dependencies = [
 ]
 
 [[package]]
-name = "keepsake-app"
+name = "keyboard-types"
+version = "0.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b750dcadc39a09dbadd74e118f6dd6598df77fa01df0cfcdc52c28dece74528a"
+dependencies = [
+ "bitflags 2.13.2",
+ "serde",
+ "unicode-segmentation",
+]
+
+[[package]]
+name = "keyboard-types"
+version = "0.8.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0fbe853b403ae61a04233030ae8a79d94975281ed9770a1f9e246732b534b28d"
+dependencies = [
+ "bitflags 2.13.2",
+ "serde",
+]
+
+[[package]]
+name = "keyorra-app"
 version = "0.1.0"
 dependencies = [
  "core-foundation",
- "keepsake-core",
- "keepsake-session",
+ "keyorra-core",
+ "keyorra-session",
  "serde",
  "serde_json",
  "tauri",
@@ -2267,7 +2288,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "keepsake-core"
+name = "keyorra-core"
 version = "0.1.0"
 dependencies = [
  "argon2",
@@ -2294,12 +2315,12 @@ dependencies = [
 ]
 
 [[package]]
-name = "keepsake-session"
+name = "keyorra-session"
 version = "0.1.0"
 dependencies = [
  "chacha20poly1305",
  "data-encoding",
- "keepsake-core",
+ "keyorra-core",
  "p256",
  "psl",
  "rand 0.8.8",
@@ -2311,27 +2332,6 @@ dependencies = [
  "uuid",
  "x25519-dalek",
  "zeroize",
-]
-
-[[package]]
-name = "keyboard-types"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b750dcadc39a09dbadd74e118f6dd6598df77fa01df0cfcdc52c28dece74528a"
-dependencies = [
- "bitflags 2.13.2",
- "serde",
- "unicode-segmentation",
-]
-
-[[package]]
-name = "keyboard-types"
-version = "0.8.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0fbe853b403ae61a04233030ae8a79d94975281ed9770a1f9e246732b534b28d"
-dependencies = [
- "bitflags 2.13.2",
- "serde",
 ]
 
 [[package]]

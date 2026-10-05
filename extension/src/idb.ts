@@ -4,7 +4,7 @@ const STORE = "kv";
 
 function db(): Promise<IDBDatabase> {
   return new Promise((resolve, reject) => {
-    const req = indexedDB.open("keepsake", 1);
+    const req = indexedDB.open("keyorra", 1);
     req.onupgradeneeded = () => req.result.createObjectStore(STORE);
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);

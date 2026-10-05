@@ -9,8 +9,8 @@ mod tray;
 use std::sync::{Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use keepsake_core::crypto::KdfParams;
-use keepsake_session::Session;
+use keyorra_core::crypto::KdfParams;
+use keyorra_session::Session;
 use tauri::{AppHandle, Emitter, Manager};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 
@@ -36,22 +36,22 @@ pub fn run() {
         .plugin(tauri_plugin_clipboard_manager::init())
         .plugin(quick::plugin())
         .setup(|app| {
-            let path = app.path().app_data_dir()?.join("keepsake.db");
+            let path = app.path().app_data_dir()?.join("keyorra.db");
             let mut session = Session::new(path, KdfParams::DEFAULT, now());
             session.set_keyring(Box::new(touchid::MacKeyring));
             app.manage(AppState(Mutex::new(session)));
             // After `manage`: both call commands that need the session. Neither is essential;
-            // without them Keepsake still works from its main window.
+            // without them Keyorra still works from its main window.
             if let Err(e) = tray::install(app.handle()) {
-                eprintln!("keepsake: menu bar icon unavailable: {e}");
+                eprintln!("keyorra: menu bar icon unavailable: {e}");
             }
             if let Err(e) = quick::install(app.handle()) {
-                eprintln!("keepsake: quick search unavailable: {e}");
+                eprintln!("keyorra: quick search unavailable: {e}");
             }
             let handle = app.handle().clone();
             std::thread::spawn(move || housekeeping(handle));
             if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
-                let socket = keepsake_session::bridge::wire::socket_path(&home);
+                let socket = keyorra_session::bridge::wire::socket_path(&home);
                 let bridge_app = app.handle().clone();
                 std::thread::spawn(move || bridge::serve(bridge_app, socket));
             }
@@ -98,7 +98,7 @@ pub fn run() {
             commands::remove_paired_browser,
         ])
         .on_window_event(|window, event| {
-            // Closing the main window keeps Keepsake in the menu bar; Quit is in the tray menu.
+            // Closing the main window keeps Keyorra in the menu bar; Quit is in the tray menu.
             if let tauri::WindowEvent::CloseRequested { api, .. } = event {
                 if window.label() == "main" {
                     api.prevent_close();
@@ -107,7 +107,7 @@ pub fn run() {
             }
         })
         .build(tauri::generate_context!())
-        .expect("error while building Keepsake")
+        .expect("error while building Keyorra")
         .run(|app, event| {
             if let tauri::RunEvent::Reopen {
                 has_visible_windows: false,

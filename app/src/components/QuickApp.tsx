@@ -37,7 +37,7 @@ export function QuickApp() {
       {status === "locked" && (
         <Unlock key={opened} onUnlocked={() => setStatus("unlocked")} onStartOver={() => setStatus("new")} />
       )}
-      {status === "new" && <p className="empty">Set up Keepsake in its main window first.</p>}
+      {status === "new" && <p className="empty">Set up Keyorra in its main window first.</p>}
     </div>
   );
 }

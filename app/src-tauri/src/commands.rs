@@ -2,16 +2,14 @@
 
 use std::path::PathBuf;
 
-use keepsake_core::model::{Item, ItemKind};
-use keepsake_core::watchtower::Hibp;
-use keepsake_session::dto::{
+use keyorra_core::model::{Item, ItemKind};
+use keyorra_core::watchtower::Hibp;
+use keyorra_session::dto::{
     GeneratorRequest, ImportPreview, ImportResult, ItemFilter, ItemSummary, TotpCode, VaultDto,
 };
-use keepsake_session::touchid::TouchIdState;
-use keepsake_session::watchtower::Report;
-use keepsake_session::{
-    CmdError, CmdResult, ErrorKind, PairedBrowser, QuickCopy, Settings, Status,
-};
+use keyorra_session::touchid::TouchIdState;
+use keyorra_session::watchtower::Report;
+use keyorra_session::{CmdError, CmdResult, ErrorKind, PairedBrowser, QuickCopy, Settings, Status};
 use tauri::{AppHandle, Emitter, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
 use uuid::Uuid;
@@ -171,13 +169,13 @@ pub fn connect_browsers() -> CmdResult<Vec<String>> {
     if exe.to_string_lossy().contains("/AppTranslocation/") {
         return Err(CmdError::new(
             ErrorKind::Invalid,
-            "Move Keepsake to Applications, then try again",
+            "Move Keyorra to Applications, then try again",
         ));
     }
     let app_support = home.join("Library/Application Support");
     let mut done = Vec::new();
     let mut failure = None;
-    for m in keepsake_session::bridge::host::manifests(&app_support, &exe) {
+    for m in keyorra_session::bridge::host::manifests(&app_support, &exe) {
         let written = match m.path.parent() {
             Some(dir) => std::fs::create_dir_all(dir),
             None => Ok(()),
@@ -194,7 +192,7 @@ pub fn connect_browsers() -> CmdResult<Vec<String>> {
         }
     }
     let safari =
-        keepsake_session::bridge::host::safari_status(std::path::Path::new("/Applications"));
+        keyorra_session::bridge::host::safari_status(std::path::Path::new("/Applications"));
     done.push(safari.to_string());
     Ok(done)
 }
@@ -311,7 +309,7 @@ pub fn unlock_with_touch_id(app: AppHandle, state: State<'_, AppState>) -> CmdRe
             )
         })?;
     let _hold = crate::quick::HoldOpen::new();
-    let shared = match crate::touchid::agree(&request.enclave_key, &peer, "unlock Keepsake") {
+    let shared = match crate::touchid::agree(&request.enclave_key, &peer, "unlock Keyorra") {
         Ok(shared) => shared,
         Err(Failure::Cancelled) => return Err(CmdError::new(ErrorKind::Cancelled, "Cancelled")),
         Err(Failure::Lockout) => {

@@ -33,7 +33,7 @@ pub fn shortcut() -> Shortcut {
 /// Creates the hidden window and registers the shortcut. A taken shortcut is not fatal.
 pub fn install(app: &AppHandle) -> tauri::Result<()> {
     let window = WebviewWindowBuilder::new(app, LABEL, WebviewUrl::App("index.html#quick".into()))
-        .title("Keepsake Quick Search")
+        .title("Keyorra Quick Search")
         .inner_size(640.0, 420.0)
         .resizable(false)
         .decorations(false)
@@ -52,7 +52,7 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         }
     });
     if let Err(e) = app.global_shortcut().register(shortcut()) {
-        eprintln!("keepsake: ⌘⇧Space is not available: {e}");
+        eprintln!("keyorra: ⌘⇧Space is not available: {e}");
     }
     Ok(())
 }

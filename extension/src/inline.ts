@@ -1,4 +1,4 @@
-// The Keepsake icon inside focused login fields and its dropdown, isolated in a shadow root.
+// The Keyorra icon inside focused login fields and its dropdown, isolated in a shadow root.
 import type { Candidate, CardSummary, IdentitySummary, State } from "./client";
 import { defaultVisible, VisibilityTracker } from "./visibility";
 
@@ -100,7 +100,7 @@ export class InlineMenu {
     this.settleMs = options.settleMs ?? 300;
     this.confirmMs = options.confirmMs ?? 300;
     this.confirmWindowMs = options.confirmWindowMs ?? 3000;
-    this.host = document.createElement("keepsake-inline");
+    this.host = document.createElement("keyorra-inline");
     this.host.style.setProperty("opacity", "1", "important");
     // Closed: page scripts cannot reach in and click the buttons.
     this.root = this.host.attachShadow({ mode: "closed" });
@@ -110,7 +110,7 @@ export class InlineMenu {
     this.icon = document.createElement("button");
     this.icon.className = "icon";
     this.icon.type = "button";
-    this.icon.setAttribute("aria-label", "Fill with Keepsake");
+    this.icon.setAttribute("aria-label", "Fill with Keyorra");
     this.icon.innerHTML = KEYHOLE;
     this.icon.hidden = true;
     this.icon.addEventListener("mousedown", (e) => e.preventDefault());
@@ -212,7 +212,7 @@ export class InlineMenu {
         items = r.items.map((c) => ({ id: c.id, title: c.title, sub: c.username + (c.hasTotp ? " · one-time code" : "") }));
       }
     } catch {
-      if (this.panel === panel) panel.replaceChildren(note("Keepsake was updated — reload the page."));
+      if (this.panel === panel) panel.replaceChildren(note("Keyorra was updated — reload the page."));
       return;
     }
     if (this.panel !== panel) return;
@@ -229,11 +229,11 @@ export class InlineMenu {
       void this.choose(run);
     };
     if (state === "locked") {
-      panel.append(note("Keepsake is locked"), unlock("Unlock Keepsake"));
+      panel.append(note("Keyorra is locked"), unlock("Unlock Keyorra"));
     } else if (state === "unpaired" || state === "pairing") {
-      panel.append(note("Connect this browser: open the Keepsake extension in the toolbar."));
+      panel.append(note("Connect this browser: open the Keyorra extension in the toolbar."));
     } else if (state === "noApp") {
-      panel.append(note("Keepsake isn't running."), unlock("Open Keepsake"));
+      panel.append(note("Keyorra isn't running."), unlock("Open Keyorra"));
     } else if (mode === "generator") {
       if (!generated) {
         panel.append(note("Couldn't generate a password"));
@@ -245,9 +245,9 @@ export class InlineMenu {
       panel.append(
         note(
           mode === "cards"
-            ? secure ? "No cards in Keepsake" : "Cards are only filled on secure pages"
+            ? secure ? "No cards in Keyorra" : "Cards are only filled on secure pages"
             : mode === "identities"
-              ? secure ? "No addresses in Keepsake" : "Addresses are only filled on secure pages"
+              ? secure ? "No addresses in Keyorra" : "Addresses are only filled on secure pages"
               : "No logins for this site",
         ),
       );

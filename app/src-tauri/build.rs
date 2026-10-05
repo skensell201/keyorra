@@ -18,7 +18,7 @@ fn build_touch_id() {
         other => other,
     }
     .to_owned();
-    let lib = out.join("libkeepsake_touchid.a");
+    let lib = out.join("libkeyorra_touchid.a");
     let status = Command::new("xcrun")
         .args([
             "swiftc",
@@ -27,7 +27,7 @@ fn build_touch_id() {
             "-O",
             "-parse-as-library",
         ])
-        .args(["-module-name", "KeepsakeTouchId", "-target"])
+        .args(["-module-name", "KeyorraTouchId", "-target"])
         .arg(format!("{arch}-apple-macosx13.0"))
         .arg(source)
         .arg("-o")
@@ -36,7 +36,7 @@ fn build_touch_id() {
         .expect("xcrun swiftc (install Xcode or the Command Line Tools)");
     assert!(status.success(), "compiling {source} failed");
     println!("cargo:rustc-link-search=native={}", out.display());
-    println!("cargo:rustc-link-lib=static=keepsake_touchid");
+    println!("cargo:rustc-link-lib=static=keyorra_touchid");
     let swiftc = xcrun(&["--find", "swiftc"]);
     let toolchain = Path::new(&swiftc).parent().unwrap().parent().unwrap();
     println!(

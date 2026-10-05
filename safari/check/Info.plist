@@ -3,8 +3,8 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleIdentifier</key>
-	<string>app.keepsake.safari.check</string>
+	<string>app.keyorra.safari.check</string>
 	<key>CFBundleName</key>
-	<string>keepsake-sandbox-check</string>
+	<string>keyorra-sandbox-check</string>
 </dict>
 </plist>

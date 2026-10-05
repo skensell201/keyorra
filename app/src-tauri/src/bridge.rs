@@ -5,9 +5,9 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use keepsake_session::bridge::protocol::{Inbound, Outbound};
-use keepsake_session::bridge::wire::{read_frame, write_frame};
-use keepsake_session::BridgeEvent;
+use keyorra_session::bridge::protocol::{Inbound, Outbound};
+use keyorra_session::bridge::wire::{read_frame, write_frame};
+use keyorra_session::BridgeEvent;
 use tauri::{AppHandle, Emitter, Manager};
 
 use crate::{lock_session, now, AppState};
@@ -21,7 +21,7 @@ pub fn serve(app: AppHandle, socket: PathBuf) {
     }
     // A live socket means another instance is already serving; leave it alone.
     if UnixStream::connect(&socket).is_ok() {
-        eprintln!("keepsake: browser bridge already served by another instance");
+        eprintln!("keyorra: browser bridge already served by another instance");
         return;
     }
     // A stale socket from a previous run would make bind fail.
@@ -29,7 +29,7 @@ pub fn serve(app: AppHandle, socket: PathBuf) {
     let listener = match UnixListener::bind(&socket) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("keepsake: browser bridge unavailable: {e}");
+            eprintln!("keyorra: browser bridge unavailable: {e}");
             return;
         }
     };

@@ -1,4 +1,4 @@
-// Mirrors crates/keepsake-session/src/bridge/crypto.rs; both are pinned by the same test vectors.
+// Mirrors crates/keyorra-session/src/bridge/crypto.rs; both are pinned by the same test vectors.
 import { x25519 } from "@noble/curves/ed25519.js";
 import { xchacha20poly1305 } from "@noble/ciphers/chacha.js";
 import { sha256 } from "@noble/hashes/sha2.js";

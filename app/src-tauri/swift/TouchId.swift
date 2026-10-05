@@ -1,7 +1,7 @@
-// Touch ID for Keepsake: a Secure Enclave key that only the current Touch ID set can use, and a
+// Touch ID for Keyorra: a Secure Enclave key that only the current Touch ID set can use, and a
 // login-keychain item for the wrapped account key. Called from Rust (src/touchid.rs) through C.
 //
-// Why this shape (see docs/superpowers/plans/2026-10-05-keepsake-desktop-2c.md, "Touch ID"):
+// Why this shape (see docs/superpowers/plans/2026-10-05-keyorra-desktop-2c.md, "Touch ID"):
 // a Personal Team app can't get a provisioning profile, so the data-protection keychain and
 // biometric keychain ACLs are unavailable (errSecMissingEntitlement). CryptoKit Secure Enclave
 // keys need no entitlement, and the enclave itself enforces .biometryCurrentSet.
@@ -102,7 +102,7 @@ public func ks_keychain_save(_ service: UnsafePointer<CChar>, _ data: UnsafePoin
     withoutDialogs {
         SecItemDelete(baseQuery(service) as CFDictionary)
         var add = baseQuery(service)
-        add[kSecAttrLabel as String] = "Keepsake Touch ID"
+        add[kSecAttrLabel as String] = "Keyorra Touch ID"
         add[kSecValueData as String] = Data(bytes: data, count: len)
         return SecItemAdd(add as CFDictionary, nil) == errSecSuccess ? OK : FAILED
     }

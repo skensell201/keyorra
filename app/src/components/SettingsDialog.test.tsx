@@ -140,7 +140,7 @@ test("connects browsers and removes a paired one", async () => {
   expect(await screen.findByText("Chrome")).toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "Connect browsers" }));
   expect(
-    await screen.findByText("Ready in Chrome, Opera. Load the Keepsake extension there and click Connect."),
+    await screen.findByText("Ready in Chrome, Opera. Load the Keyorra extension there and click Connect."),
   ).toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "Disconnect Chrome" }));
   expect(api.removePairedBrowser).toHaveBeenCalledWith("c1");
@@ -155,13 +155,13 @@ test("says so when the browsers cannot be loaded", async () => {
 });
 
 test("tells how to add Safari when its app is missing", async () => {
-  vi.mocked(api.connectBrowsers).mockResolvedValue(["Chrome", "Safari: install Keepsake for Safari"]);
+  vi.mocked(api.connectBrowsers).mockResolvedValue(["Chrome", "Safari: install Keyorra for Safari"]);
   const user = userEvent.setup();
   render(<SettingsDialog onClose={vi.fn()} />);
   await user.click(await screen.findByRole("button", { name: "Connect browsers" }));
   expect(
     await screen.findByText(
-      "Ready in Chrome. Load the Keepsake extension there and click Connect. Safari: install Keepsake for Safari.",
+      "Ready in Chrome. Load the Keyorra extension there and click Connect. Safari: install Keyorra for Safari.",
     ),
   ).toBeInTheDocument();
 });

@@ -1,6 +1,6 @@
 import type { SVGProps } from "react";
 
-/** The Keepsake mark: a keyhole. Inherits the text colour. */
+/** The Keyorra mark: a keyhole. Inherits the text colour. */
 export function Keyhole(props: SVGProps<SVGSVGElement>) {
   return (
     <svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true" {...props}>

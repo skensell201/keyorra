@@ -52,12 +52,12 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   async function connectBrowsers() {
     try {
       const found = await api.connectBrowsers();
-      // Entries like "Safari: install Keepsake for Safari" are advice, not ready browsers.
+      // Entries like "Safari: install Keyorra for Safari" are advice, not ready browsers.
       const ready = found.filter((b) => !b.includes(":"));
       const advice = found.filter((b) => b.includes(":")).map((a) => ` ${a}.`);
       setBrowsersNote(
         (ready.length
-          ? `Ready in ${ready.join(", ")}. Load the Keepsake extension there and click Connect.`
+          ? `Ready in ${ready.join(", ")}. Load the Keyorra extension there and click Connect.`
           : "No supported browsers found.") + advice.join(""),
       );
     } catch (e) {
@@ -193,7 +193,7 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
             </label>
           )}
           <p className="muted">
-            Keepsake still asks for your master password every 14 days and after your fingerprints change.
+            Keyorra still asks for your master password every 14 days and after your fingerprints change.
           </p>
           {touchIdError && (
             <p className="error" role="alert">

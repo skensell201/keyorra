@@ -8,7 +8,7 @@ let field: HTMLInputElement;
 
 beforeEach(() => {
   // The menu attaches to <html>, which body.innerHTML does not reset.
-  document.querySelectorAll("keepsake-inline").forEach((n) => n.remove());
+  document.querySelectorAll("keyorra-inline").forEach((n) => n.remove());
   document.body.innerHTML = `<input id="u">`;
   field = document.getElementById("u") as HTMLInputElement;
   actions = {
@@ -31,7 +31,7 @@ test("focusing a field shows the icon; clicking it lists logins; picking one fil
   menu.watch(field);
   field.dispatchEvent(new FocusEvent("focus"));
   const icon = shadow().querySelector<HTMLButtonElement>("button.icon")!;
-  expect(icon.getAttribute("aria-label")).toBe("Fill with Keepsake");
+  expect(icon.getAttribute("aria-label")).toBe("Fill with Keyorra");
   icon.click();
   await vi.waitFor(() => expect(shadow().querySelector(".item")).not.toBeNull());
   expect(shadow().querySelector(".item")!.textContent).toContain("GitHub");
@@ -44,7 +44,7 @@ test("locked and unpaired states", async () => {
   menu.watch(field);
   field.dispatchEvent(new FocusEvent("focus"));
   shadow().querySelector<HTMLButtonElement>("button.icon")!.click();
-  await vi.waitFor(() => expect(shadow().textContent).toContain("Keepsake is locked"));
+  await vi.waitFor(() => expect(shadow().textContent).toContain("Keyorra is locked"));
   shadow().querySelector<HTMLButtonElement>("button.unlock")!.click();
   expect(actions.unlock).toHaveBeenCalled();
 
@@ -62,7 +62,7 @@ test("no logins for the site", async () => {
 });
 
 test("the shadow root is closed to the page", () => {
-  expect(document.querySelector("keepsake-inline")!.shadowRoot).toBeNull();
+  expect(document.querySelector("keyorra-inline")!.shadowRoot).toBeNull();
 });
 
 test("untrusted (script-made) clicks do nothing", async () => {
@@ -77,7 +77,7 @@ test("untrusted (script-made) clicks do nothing", async () => {
 test("a click on a hidden host does nothing", async () => {
   menu.watch(field);
   field.dispatchEvent(new FocusEvent("focus"));
-  document.querySelector<HTMLElement>("keepsake-inline")!.style.setProperty("opacity", "0", "important");
+  document.querySelector<HTMLElement>("keyorra-inline")!.style.setProperty("opacity", "0", "important");
   shadow().querySelector<HTMLButtonElement>("button.icon")!.click();
   await Promise.resolve();
   expect(actions.list).not.toHaveBeenCalled();
@@ -106,7 +106,7 @@ test("a failing list shows a reload hint; Escape closes the panel", async () => 
 test("a host with a tabindex does nothing", async () => {
   menu.watch(field);
   field.dispatchEvent(new FocusEvent("focus"));
-  document.querySelector("keepsake-inline")!.setAttribute("tabindex", "0");
+  document.querySelector("keyorra-inline")!.setAttribute("tabindex", "0");
   shadow().querySelector<HTMLButtonElement>("button.icon")!.click();
   await Promise.resolve();
   expect(actions.list).not.toHaveBeenCalled();
@@ -115,7 +115,7 @@ test("a host with a tabindex does nothing", async () => {
 test("a transformed or blended host does nothing", async () => {
   menu.watch(field);
   field.dispatchEvent(new FocusEvent("focus"));
-  const host = document.querySelector<HTMLElement>("keepsake-inline")!;
+  const host = document.querySelector<HTMLElement>("keyorra-inline")!;
   host.style.setProperty("mix-blend-mode", "difference", "important");
   shadow().querySelector<HTMLButtonElement>("button.icon")!.click();
   await Promise.resolve();
@@ -175,10 +175,10 @@ test("generator mode offers a strong password and uses it", async () => {
   expect(actions.useGenerated).toHaveBeenCalledWith("Xk9-very-long-generated-password-Qz7", field);
 });
 
-test("generator mode handles a locked Keepsake", async () => {
+test("generator mode handles a locked Keyorra", async () => {
   vi.mocked(actions.generate).mockResolvedValue({ state: "locked", value: "" });
   openMenu("generator");
-  await vi.waitFor(() => expect(shadow().textContent).toContain("Keepsake is locked"));
+  await vi.waitFor(() => expect(shadow().textContent).toContain("Keyorra is locked"));
 });
 
 test("cards mode shows title and last four digits; picking fills", async () => {
@@ -202,15 +202,15 @@ test("a card without last digits shows no mask", async () => {
 test("no cards, and the secure-page note on an insecure page", async () => {
   vi.mocked(actions.cards).mockResolvedValue({ state: "ready", items: [] });
   openMenu("cards");
-  await vi.waitFor(() => expect(shadow().textContent).toMatch(/No cards in Keepsake|only filled on secure pages/));
+  await vi.waitFor(() => expect(shadow().textContent).toMatch(/No cards in Keyorra|only filled on secure pages/));
   // jsdom runs on http://localhost:3000, which counts as secure.
-  expect(shadow().textContent).toContain("No cards in Keepsake");
+  expect(shadow().textContent).toContain("No cards in Keyorra");
   vi.stubGlobal("location", { protocol: "http:", hostname: "example.com" });
   shadow().querySelector<HTMLButtonElement>("button.icon")!.click();
   await vi.waitFor(() => expect(shadow().textContent).toContain("Cards are only filled on secure pages"));
   vi.stubGlobal("location", { protocol: "https:", hostname: "example.com" });
   shadow().querySelector<HTMLButtonElement>("button.icon")!.click();
-  await vi.waitFor(() => expect(shadow().textContent).toContain("No cards in Keepsake"));
+  await vi.waitFor(() => expect(shadow().textContent).toContain("No cards in Keyorra"));
   vi.unstubAllGlobals();
 });
 
@@ -229,7 +229,7 @@ test("identities mode shows title and detail; picking fills; empty notes", async
   await vi.waitFor(() => expect(shadow().textContent).toContain("Addresses are only filled on secure pages"));
   vi.stubGlobal("location", { protocol: "https:", hostname: "example.com" });
   shadow().querySelector<HTMLButtonElement>("button.icon")!.click();
-  await vi.waitFor(() => expect(shadow().textContent).toContain("No addresses in Keepsake"));
+  await vi.waitFor(() => expect(shadow().textContent).toContain("No addresses in Keyorra"));
   vi.unstubAllGlobals();
 });
 
@@ -323,7 +323,7 @@ test("a host moved out of the place it was attached to is refused", async () => 
   const guarded = new InlineMenu(actions, { onRoot: (r) => (root = r), trusted: () => true, settleMs: 0 });
   guarded.watch(field);
   field.dispatchEvent(new FocusEvent("focus"));
-  const hosts = document.querySelectorAll("keepsake-inline");
+  const hosts = document.querySelectorAll("keyorra-inline");
   document.body.append(hosts[hosts.length - 1]);
   shadow().querySelector<HTMLButtonElement>("button.icon")!.click();
   await Promise.resolve();

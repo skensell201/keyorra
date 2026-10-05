@@ -17,7 +17,7 @@ beforeEach(() => {
   vi.mocked(api.touchIdState).mockReset().mockResolvedValue(touchOff);
   vi.mocked(api.unlockWithTouchId).mockReset().mockResolvedValue(undefined);
   vi.mocked(api.unlock).mockReset();
-  vi.mocked(api.startOver).mockReset().mockResolvedValue("/x/keepsake.db.unreadable-1");
+  vi.mocked(api.startOver).mockReset().mockResolvedValue("/x/keyorra.db.unreadable-1");
 });
 
 test("unlocks with the master password", async () => {
@@ -77,11 +77,11 @@ test("the throttle error clears when the countdown ends", async () => {
 test("an unreadable database offers to start over", async () => {
   const user = userEvent.setup();
   const onStartOver = vi.fn();
-  vi.mocked(api.unlock).mockRejectedValue({ kind: "notADatabase", message: "not a keepsake database: file is not a database" });
+  vi.mocked(api.unlock).mockRejectedValue({ kind: "notADatabase", message: "not a keyorra database: file is not a database" });
   render(<Unlock onUnlocked={vi.fn()} onStartOver={onStartOver} />);
   await user.type(screen.getByLabelText("Master password"), "whatever");
   await user.click(screen.getByRole("button", { name: "Unlock" }));
-  expect(await screen.findByRole("heading", { name: "This file is not a Keepsake database" })).toBeInTheDocument();
+  expect(await screen.findByRole("heading", { name: "This file is not a Keyorra database" })).toBeInTheDocument();
   expect(screen.getByText(/never deleted/)).toBeInTheDocument();
 
   // A double click on "Start over…" must not also confirm: the second step is a dialog.
@@ -97,7 +97,7 @@ test("an unreadable database offers to start over", async () => {
   expect(screen.getByRole("button", { name: "Back" })).toHaveFocus();
   await user.click(screen.getByRole("button", { name: "Move aside and start over" }));
   expect(api.startOver).toHaveBeenCalledTimes(1);
-  expect(await screen.findByText("/x/keepsake.db.unreadable-1")).toBeInTheDocument();
+  expect(await screen.findByText("/x/keyorra.db.unreadable-1")).toBeInTheDocument();
   expect(onStartOver).not.toHaveBeenCalled();
   await user.click(screen.getByRole("button", { name: "Set up a new vault" }));
   expect(onStartOver).toHaveBeenCalled();

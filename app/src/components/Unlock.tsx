@@ -134,9 +134,9 @@ export function Unlock({ onUnlocked, onStartOver }: Props) {
     return (
       <div className="center">
         <div className="card auth" role="group" aria-labelledby="unreadable-title">
-          <h1 id="unreadable-title">This file is not a Keepsake database</h1>
+          <h1 id="unreadable-title">This file is not a Keyorra database</h1>
           <p className="muted">
-            Keepsake can't read its database: it belongs to another app or is damaged. You can start over with a new,
+            Keyorra can't read its database: it belongs to another app or is damaged. You can start over with a new,
             empty vault. The old file is moved aside next to it (it ends in ".unreadable-…"), never deleted.
           </p>
           {error && (
@@ -157,7 +157,7 @@ export function Unlock({ onUnlocked, onStartOver }: Props) {
               onConfirm={startOver}
               onCancel={() => setConfirmStartOver(false)}
             >
-              Keepsake renames the unreadable file and sets up a new, empty vault. Nothing is deleted.
+              Keyorra renames the unreadable file and sets up a new, empty vault. Nothing is deleted.
             </ConfirmDialog>
           )}
         </div>
@@ -171,7 +171,7 @@ export function Unlock({ onUnlocked, onStartOver }: Props) {
         <div className="logo">
           <Keyhole width={24} height={24} />
         </div>
-        <h1>Keepsake is locked</h1>
+        <h1>Keyorra is locked</h1>
         <label>
           Master password
           <input type="password" autoFocus value={password} onChange={(e) => setPassword(e.target.value)} />
@@ -190,7 +190,7 @@ export function Unlock({ onUnlocked, onStartOver }: Props) {
           </button>
         )}
         {touchId?.enabled && touchId.passwordDue && (
-          <p className="muted">Enter your master password. Keepsake asks for it every 14 days, then Touch ID works again.</p>
+          <p className="muted">Enter your master password. Keyorra asks for it every 14 days, then Touch ID works again.</p>
         )}
       </form>
     </div>

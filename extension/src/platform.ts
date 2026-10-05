@@ -25,8 +25,8 @@ interface NativeRuntime {
 export function nativeSender(runtime: NativeRuntime, host: string): Send {
   return async (msg) => {
     const reply = await runtime.sendNativeMessage(host, msg);
-    if (reply == null) throw new Error("No reply from Keepsake");
-    if (reply.kind === "noApp") throw new Error(reply.message ?? "Keepsake is not running");
+    if (reply == null) throw new Error("No reply from Keyorra");
+    if (reply.kind === "noApp") throw new Error(reply.message ?? "Keyorra is not running");
     return reply;
   };
 }

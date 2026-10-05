@@ -1,18 +1,18 @@
 #!/bin/sh
-# Builds the web extension, then "Keepsake for Safari.app" around it, and installs the app to
-# /Applications. Signs with the team in Signing.xcconfig; KEEPSAKE_TEAM=ABCDE12345 overrides it.
+# Builds the web extension, then "Keyorra for Safari.app" around it, and installs the app to
+# /Applications. Signs with the team in Signing.xcconfig; KEYORRA_TEAM=ABCDE12345 overrides it.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(dirname "$here")
-app="Keepsake for Safari.app"
+app="Keyorra for Safari.app"
 
 (cd "$root/extension" && pnpm build)
 
-set -- -project "$here/Keepsake for Safari.xcodeproj" -scheme "Keepsake for Safari" \
+set -- -project "$here/Keyorra for Safari.xcodeproj" -scheme "Keyorra for Safari" \
   -configuration Release -derivedDataPath "$here/build"
 set -- "$@" -allowProvisioningUpdates
-if [ -n "${KEEPSAKE_TEAM:-}" ]; then
-  set -- "$@" DEVELOPMENT_TEAM="$KEEPSAKE_TEAM"
+if [ -n "${KEYORRA_TEAM:-}" ]; then
+  set -- "$@" DEVELOPMENT_TEAM="$KEYORRA_TEAM"
 fi
 # Clean every time: the copied extension files change without Xcode noticing, which breaks the signature.
 xcodebuild "$@" clean build
@@ -26,5 +26,5 @@ lsregister=/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchSe
 "$lsregister" -u "$built" 2>/dev/null || true
 rm -rf "$built"
 "$lsregister" -f -R "/Applications/$app"
-pluginkit -a "/Applications/$app/Contents/PlugIns/Keepsake for Safari Extension.appex"
+pluginkit -a "/Applications/$app/Contents/PlugIns/Keyorra for Safari Extension.appex"
 echo "Installed /Applications/$app"

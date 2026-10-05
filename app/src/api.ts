@@ -31,7 +31,7 @@ export function errorMessage(e: unknown): string {
 
 export type ItemKind = "login" | "secure_note" | "credit_card" | "identity" | "password" | "api_credential";
 
-/** Matches keepsake-core's `FieldValue` JSON. */
+/** Matches keyorra-core's `FieldValue` JSON. */
 export type FieldValue =
   | { type: "text" | "concealed" | "email" | "url" | "totp" | "phone"; value: string }
   | { type: "date"; value: number }
@@ -50,7 +50,7 @@ export interface Section {
   fields: Field[];
 }
 
-/** keepsake-core's `Item`, snake_case as stored. Send it back unchanged except edited fields. */
+/** keyorra-core's `Item`, snake_case as stored. Send it back unchanged except edited fields. */
 export interface Item {
   id: string;
   vault_id: string;

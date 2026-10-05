@@ -1,4 +1,4 @@
-// Talks to the Keepsake app: pairing, then sealed list/fill calls. Transport and storage are injected.
+// Talks to the Keyorra app: pairing, then sealed list/fill calls. Transport and storage are injected.
 import { commitment, derive, fromB64, newKeyPair, openReply, seal, toB64 } from "./crypto";
 
 export type State = "noApp" | "unpaired" | "pairing" | "locked" | "ready";
@@ -202,9 +202,9 @@ export class Client {
       await this.store.clear();
       throw new UnpairedError();
     }
-    if (res.kind !== "reply") throw new Error(res.message ?? "Keepsake error");
+    if (res.kind !== "reply") throw new Error(res.message ?? "Keyorra error");
     const reply = openReply<any>(key, pairing.clientId, requestBox, res.box);
-    if (!reply) throw new Error("Keepsake sent a reply that did not authenticate");
+    if (!reply) throw new Error("Keyorra sent a reply that did not authenticate");
     if (reply.error) throw new Error(reply.error);
     return reply;
   }

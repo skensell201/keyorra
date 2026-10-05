@@ -1,5 +1,5 @@
 // Code signing for both targets: the owner's free Apple ID (Personal Team), so Safari keeps the
-// extension enabled across restarts. Building for another team: KEEPSAKE_TEAM=ABCDE12345
+// extension enabled across restarts. Building for another team: KEYORRA_TEAM=ABCDE12345
 // safari/build.sh overrides DEVELOPMENT_TEAM. Without any team, set CODE_SIGN_STYLE = Manual,
 // CODE_SIGN_IDENTITY = - and enable Develop → Allow Unsigned Extensions in Safari.
 DEVELOPMENT_TEAM = 4889865CU4

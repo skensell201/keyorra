@@ -1,6 +1,6 @@
 [workspace]
-members = ["crates/keepsake-core", "crates/keepsake-session", "app/src-tauri"]
-default-members = ["crates/keepsake-core", "crates/keepsake-session"]
+members = ["crates/keyorra-core", "crates/keyorra-session", "app/src-tauri"]
+default-members = ["crates/keyorra-core", "crates/keyorra-session"]
 resolver = "2"
 
 # Argon2 with 64 MiB is painfully slow unoptimized; keep debug builds usable.

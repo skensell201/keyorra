@@ -1,0 +1,408 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		KS0000000000000000000101 /* KeyorraForSafariApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = KS0000000000000000000201 /* KeyorraForSafariApp.swift */; };
+		KS0000000000000000000102 /* AppIcon.icns in Resources */ = {isa = PBXBuildFile; fileRef = KS0000000000000000000202 /* AppIcon.icns */; };
+		KS0000000000000000000103 /* SafariWebExtensionHandler.swift in Sources */ = {isa = PBXBuildFile; fileRef = KS0000000000000000000211 /* SafariWebExtensionHandler.swift */; };
+		KS0000000000000000000104 /* BridgeClient.swift in Sources */ = {isa = PBXBuildFile; fileRef = KS0000000000000000000212 /* BridgeClient.swift */; };
+		KS0000000000000000000105 /* Keyorra for Safari Extension.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = KS0000000000000000000302 /* Keyorra for Safari Extension.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		KS0000000000000000000601 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = KS0000000000000000000001 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = KS0000000000000000000502;
+			remoteInfo = "Keyorra for Safari Extension";
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		KS0000000000000000000404 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				KS0000000000000000000105 /* Keyorra for Safari Extension.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXFileReference section */
+		KS0000000000000000000201 /* KeyorraForSafariApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = KeyorraForSafariApp.swift; sourceTree = "<group>"; };
+		KS0000000000000000000202 /* AppIcon.icns */ = {isa = PBXFileReference; lastKnownFileType = image.icns; path = AppIcon.icns; sourceTree = "<group>"; };
+		KS0000000000000000000203 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		KS0000000000000000000204 /* App.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = App.entitlements; sourceTree = "<group>"; };
+		KS0000000000000000000211 /* SafariWebExtensionHandler.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SafariWebExtensionHandler.swift; sourceTree = "<group>"; };
+		KS0000000000000000000212 /* BridgeClient.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BridgeClient.swift; sourceTree = "<group>"; };
+		KS0000000000000000000213 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		KS0000000000000000000214 /* Extension.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Extension.entitlements; sourceTree = "<group>"; };
+		KS0000000000000000000221 /* Signing.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = Signing.xcconfig; sourceTree = "<group>"; };
+		KS0000000000000000000301 /* Keyorra for Safari.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = "Keyorra for Safari.app"; sourceTree = BUILT_PRODUCTS_DIR; };
+		KS0000000000000000000302 /* Keyorra for Safari Extension.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = "Keyorra for Safari Extension.appex"; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		KS0000000000000000000402 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		KS0000000000000000000412 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		KS0000000000000000000700 = {
+			isa = PBXGroup;
+			children = (
+				KS0000000000000000000221 /* Signing.xcconfig */,
+				KS0000000000000000000701 /* Keyorra for Safari */,
+				KS0000000000000000000702 /* Keyorra for Safari Extension */,
+				KS0000000000000000000703 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		KS0000000000000000000701 /* Keyorra for Safari */ = {
+			isa = PBXGroup;
+			children = (
+				KS0000000000000000000201 /* KeyorraForSafariApp.swift */,
+				KS0000000000000000000202 /* AppIcon.icns */,
+				KS0000000000000000000203 /* Info.plist */,
+				KS0000000000000000000204 /* App.entitlements */,
+			);
+			path = "Keyorra for Safari";
+			sourceTree = "<group>";
+		};
+		KS0000000000000000000702 /* Keyorra for Safari Extension */ = {
+			isa = PBXGroup;
+			children = (
+				KS0000000000000000000211 /* SafariWebExtensionHandler.swift */,
+				KS0000000000000000000212 /* BridgeClient.swift */,
+				KS0000000000000000000213 /* Info.plist */,
+				KS0000000000000000000214 /* Extension.entitlements */,
+			);
+			path = "Keyorra for Safari Extension";
+			sourceTree = "<group>";
+		};
+		KS0000000000000000000703 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				KS0000000000000000000301 /* Keyorra for Safari.app */,
+				KS0000000000000000000302 /* Keyorra for Safari Extension.appex */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		KS0000000000000000000501 /* Keyorra for Safari */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = KS0000000000000000000902 /* Build configuration list for PBXNativeTarget "Keyorra for Safari" */;
+			buildPhases = (
+				KS0000000000000000000401 /* Sources */,
+				KS0000000000000000000402 /* Frameworks */,
+				KS0000000000000000000403 /* Resources */,
+				KS0000000000000000000404 /* Embed Foundation Extensions */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				KS0000000000000000000602 /* PBXTargetDependency */,
+			);
+			name = "Keyorra for Safari";
+			productName = "Keyorra for Safari";
+			productReference = KS0000000000000000000301 /* Keyorra for Safari.app */;
+			productType = "com.apple.product-type.application";
+		};
+		KS0000000000000000000502 /* Keyorra for Safari Extension */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = KS0000000000000000000903 /* Build configuration list for PBXNativeTarget "Keyorra for Safari Extension" */;
+			buildPhases = (
+				KS0000000000000000000411 /* Sources */,
+				KS0000000000000000000412 /* Frameworks */,
+				KS0000000000000000000413 /* Copy extension/dist/safari */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = "Keyorra for Safari Extension";
+			productName = "Keyorra for Safari Extension";
+			productReference = KS0000000000000000000302 /* Keyorra for Safari Extension.appex */;
+			productType = "com.apple.product-type.app-extension";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		KS0000000000000000000001 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2660;
+				LastUpgradeCheck = 2660;
+			};
+			buildConfigurationList = KS0000000000000000000901 /* Build configuration list for PBXProject "Keyorra for Safari" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = KS0000000000000000000700;
+			productRefGroup = KS0000000000000000000703 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				KS0000000000000000000501 /* Keyorra for Safari */,
+				KS0000000000000000000502 /* Keyorra for Safari Extension */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXResourcesBuildPhase section */
+		KS0000000000000000000403 /* Resources */ = {
+			isa = PBXResourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				KS0000000000000000000102 /* AppIcon.icns in Resources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXResourcesBuildPhase section */
+
+/* Begin PBXShellScriptBuildPhase section */
+		KS0000000000000000000413 /* Copy extension/dist/safari */ = {
+			isa = PBXShellScriptBuildPhase;
+			alwaysOutOfDate = 1;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			inputFileListPaths = (
+			);
+			inputPaths = (
+			);
+			name = "Copy extension/dist/safari";
+			outputFileListPaths = (
+			);
+			outputPaths = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+			shellPath = /bin/sh;
+			shellScript = "# The web extension itself is built by extension/build.mjs; always take the current build.\nsrc=\"${SRCROOT}/../extension/dist/safari\"\ndst=\"${TARGET_BUILD_DIR}/${UNLOCALIZED_RESOURCES_FOLDER_PATH}\"\nif [ ! -f \"$src/manifest.json\" ]; then\n  echo \"error: $src/manifest.json is missing. Run 'pnpm build' in extension/ first.\"\n  exit 1\nfi\nmkdir -p \"$dst\"\nrsync -a --delete \"$src/\" \"$dst/\"\n";
+			showEnvVarsInLog = 0;
+		};
+/* End PBXShellScriptBuildPhase section */
+
+/* Begin PBXSourcesBuildPhase section */
+		KS0000000000000000000401 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				KS0000000000000000000101 /* KeyorraForSafariApp.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		KS0000000000000000000411 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				KS0000000000000000000103 /* SafariWebExtensionHandler.swift in Sources */,
+				KS0000000000000000000104 /* BridgeClient.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		KS0000000000000000000602 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = KS0000000000000000000502 /* Keyorra for Safari Extension */;
+			targetProxy = KS0000000000000000000601 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin XCBuildConfiguration section */
+		KS0000000000000000000801 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = KS0000000000000000000221 /* Signing.xcconfig */;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = dwarf;
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				ENABLE_TESTABILITY = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.1.0;
+				ONLY_ACTIVE_ARCH = YES;
+				SDKROOT = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_OPTIMIZATION_LEVEL = "-Onone";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Debug;
+		};
+		KS0000000000000000000802 /* Release */ = {
+			isa = XCBuildConfiguration;
+			baseConfigurationReference = KS0000000000000000000221 /* Signing.xcconfig */;
+			buildSettings = {
+				ALWAYS_SEARCH_USER_PATHS = NO;
+				CLANG_ENABLE_MODULES = YES;
+				CLANG_ENABLE_OBJC_ARC = YES;
+				CODE_SIGN_INJECT_BASE_ENTITLEMENTS = NO;
+				COPY_PHASE_STRIP = NO;
+				CURRENT_PROJECT_VERSION = 1;
+				DEBUG_INFORMATION_FORMAT = "dwarf-with-dsym";
+				ENABLE_HARDENED_RUNTIME = YES;
+				ENABLE_NS_ASSERTIONS = NO;
+				ENABLE_STRICT_OBJC_MSGSEND = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.1.0;
+				SDKROOT = macosx;
+				SWIFT_COMPILATION_MODE = wholemodule;
+				SWIFT_OPTIMIZATION_LEVEL = "-O";
+				SWIFT_VERSION = 5.0;
+			};
+			name = Release;
+		};
+		KS0000000000000000000811 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "Keyorra for Safari/App.entitlements";
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Keyorra for Safari/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "Keyorra for Safari";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = app.keyorra.safari;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+			};
+			name = Debug;
+		};
+		KS0000000000000000000812 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "Keyorra for Safari/App.entitlements";
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Keyorra for Safari/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = "Keyorra for Safari";
+				INFOPLIST_KEY_LSApplicationCategoryType = "public.app-category.productivity";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = app.keyorra.safari;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+			};
+			name = Release;
+		};
+		KS0000000000000000000821 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "Keyorra for Safari Extension/Extension.entitlements";
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Keyorra for Safari Extension/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = Keyorra;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"-framework",
+					SafariServices,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = app.keyorra.safari.extension;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+			};
+			name = Debug;
+		};
+		KS0000000000000000000822 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CODE_SIGN_ENTITLEMENTS = "Keyorra for Safari Extension/Extension.entitlements";
+				ENABLE_USER_SCRIPT_SANDBOXING = NO;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = "Keyorra for Safari Extension/Info.plist";
+				INFOPLIST_KEY_CFBundleDisplayName = Keyorra;
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/../Frameworks",
+					"@executable_path/../../../../Frameworks",
+				);
+				OTHER_LDFLAGS = (
+					"-framework",
+					SafariServices,
+				);
+				PRODUCT_BUNDLE_IDENTIFIER = app.keyorra.safari.extension;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		KS0000000000000000000901 /* Build configuration list for PBXProject "Keyorra for Safari" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				KS0000000000000000000801 /* Debug */,
+				KS0000000000000000000802 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		KS0000000000000000000902 /* Build configuration list for PBXNativeTarget "Keyorra for Safari" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				KS0000000000000000000811 /* Debug */,
+				KS0000000000000000000812 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		KS0000000000000000000903 /* Build configuration list for PBXNativeTarget "Keyorra for Safari Extension" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				KS0000000000000000000821 /* Debug */,
+				KS0000000000000000000822 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = KS0000000000000000000001 /* Project object */;
+}

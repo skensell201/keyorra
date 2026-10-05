@@ -1,0 +1,195 @@
+//! The native-messaging host: how browsers start us and where their host manifests live.
+
+use std::path::{Path, PathBuf};
+
+use serde_json::json;
+
+pub const HOST_NAME: &str = "app.keyorra.bridge";
+pub const CHROMIUM_EXTENSION_ID: &str = "kaaofpbpmnghapcafbbhjflonijdijbj";
+pub const FIREFOX_EXTENSION_ID: &str = "keyorra@keyorra.app";
+
+/// Chromium passes the caller's origin; Firefox passes the manifest path and the extension id.
+pub fn is_host_launch(args: &[String]) -> bool {
+    args.iter()
+        .skip(1)
+        .any(|a| a.starts_with("chrome-extension://") || a == FIREFOX_EXTENSION_ID)
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Family {
+    Chromium,
+    Firefox,
+}
+
+pub struct Browser {
+    pub name: &'static str,
+    /// Profile folder under `~/Library/Application Support`.
+    pub dir: &'static str,
+    pub family: Family,
+}
+
+pub const BROWSERS: &[Browser] = &[
+    Browser {
+        name: "Chrome",
+        dir: "Google/Chrome",
+        family: Family::Chromium,
+    },
+    Browser {
+        name: "Chrome Beta",
+        dir: "Google/Chrome Beta",
+        family: Family::Chromium,
+    },
+    Browser {
+        name: "Chromium",
+        dir: "Chromium",
+        family: Family::Chromium,
+    },
+    Browser {
+        name: "Opera",
+        dir: "com.operasoftware.Opera",
+        family: Family::Chromium,
+    },
+    Browser {
+        name: "Yandex",
+        dir: "Yandex/YandexBrowser",
+        family: Family::Chromium,
+    },
+    Browser {
+        name: "Brave",
+        dir: "BraveSoftware/Brave-Browser",
+        family: Family::Chromium,
+    },
+    Browser {
+        name: "Edge",
+        dir: "Microsoft Edge",
+        family: Family::Chromium,
+    },
+    Browser {
+        name: "Vivaldi",
+        dir: "Vivaldi",
+        family: Family::Chromium,
+    },
+    Browser {
+        name: "Arc",
+        dir: "Arc/User Data",
+        family: Family::Chromium,
+    },
+    Browser {
+        name: "Firefox",
+        dir: "Mozilla",
+        family: Family::Firefox,
+    },
+];
+
+pub struct Manifest {
+    pub browser: &'static str,
+    pub path: PathBuf,
+    pub contents: String,
+}
+
+/// Host manifests for every browser whose profile folder exists under `app_support`.
+pub fn manifests(app_support: &Path, exe: &Path) -> Vec<Manifest> {
+    BROWSERS
+        .iter()
+        .filter(|b| app_support.join(b.dir).is_dir())
+        .map(|b| Manifest {
+            browser: b.name,
+            path: app_support
+                .join(b.dir)
+                .join("NativeMessagingHosts")
+                .join(format!("{HOST_NAME}.json")),
+            contents: manifest_json(b.family, exe),
+        })
+        .collect()
+}
+
+/// Safari needs no host manifest: its extension ships inside "Keyorra for Safari.app" and
+/// reaches the app's socket itself. Ready means that app is installed in `applications`.
+pub fn safari_status(applications: &Path) -> &'static str {
+    if applications.join("Keyorra for Safari.app").is_dir() {
+        "Safari"
+    } else {
+        "Safari: install Keyorra for Safari"
+    }
+}
+
+fn manifest_json(family: Family, exe: &Path) -> String {
+    let mut m = json!({
+        "name": HOST_NAME,
+        "description": "Keyorra password manager",
+        "path": exe.to_string_lossy(),
+        "type": "stdio",
+    });
+    match family {
+        Family::Chromium => {
+            m["allowed_origins"] = json!([format!("chrome-extension://{CHROMIUM_EXTENSION_ID}/")])
+        }
+        Family::Firefox => m["allowed_extensions"] = json!([FIREFOX_EXTENSION_ID]),
+    }
+    serde_json::to_string_pretty(&m).expect("manifest serializes")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn args(list: &[&str]) -> Vec<String> {
+        list.iter().map(|s| s.to_string()).collect()
+    }
+
+    #[test]
+    fn recognises_browser_launches() {
+        assert!(is_host_launch(&args(&[
+            "keyorra-app",
+            "chrome-extension://kaaofpbpmnghapcafbbhjflonijdijbj/"
+        ])));
+        assert!(is_host_launch(&args(&[
+            "keyorra-app",
+            "/x/app.keyorra.bridge.json",
+            "keyorra@keyorra.app"
+        ])));
+        assert!(!is_host_launch(&args(&["keyorra-app"])));
+        assert!(!is_host_launch(&args(&["keyorra-app", "--hidden"])));
+    }
+
+    #[test]
+    fn safari_is_ready_once_its_app_is_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            safari_status(dir.path()),
+            "Safari: install Keyorra for Safari"
+        );
+        std::fs::create_dir_all(dir.path().join("Keyorra for Safari.app/Contents")).unwrap();
+        assert_eq!(safari_status(dir.path()), "Safari");
+    }
+
+    #[test]
+    fn writes_manifests_only_for_installed_browsers() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("Google/Chrome")).unwrap();
+        std::fs::create_dir_all(dir.path().join("Mozilla")).unwrap();
+        let exe = std::path::Path::new("/Applications/Keyorra.app/Contents/MacOS/keyorra-app");
+        let found = manifests(dir.path(), exe);
+        let names: Vec<_> = found.iter().map(|m| m.browser).collect();
+        assert_eq!(names, ["Chrome", "Firefox"]);
+        assert_eq!(
+            found[0].path,
+            dir.path()
+                .join("Google/Chrome/NativeMessagingHosts/app.keyorra.bridge.json")
+        );
+
+        let chrome: serde_json::Value = serde_json::from_str(&found[0].contents).unwrap();
+        assert_eq!(chrome["name"], "app.keyorra.bridge");
+        assert_eq!(chrome["type"], "stdio");
+        assert_eq!(chrome["path"], exe.to_str().unwrap());
+        assert_eq!(
+            chrome["allowed_origins"][0],
+            "chrome-extension://kaaofpbpmnghapcafbbhjflonijdijbj/"
+        );
+        assert!(chrome.get("allowed_extensions").is_none());
+
+        let firefox: serde_json::Value = serde_json::from_str(&found[1].contents).unwrap();
+        assert_eq!(firefox["allowed_extensions"][0], "keyorra@keyorra.app");
+        assert!(firefox.get("allowed_origins").is_none());
+    }
+}

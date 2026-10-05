@@ -6,7 +6,7 @@ import { browserName, nativeRuntime, nativeSender } from "./platform";
 import type { ErrorKind, Result, ToBackground, ToContent } from "./messages";
 
 // Safari ignores the host name and hands every native message to its app extension.
-const HOST = "app.keepsake.bridge";
+const HOST = "app.keyorra.bridge";
 
 // The pairing key is kept in IndexedDB, which only this worker opens; chrome.storage is readable by content scripts.
 const client = new Client(nativeSender(nativeRuntime(), HOST), {

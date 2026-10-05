@@ -34,7 +34,7 @@ export function Setup({ onDone }: { onDone: () => void }) {
         <div className="logo">
           <Keyhole width={24} height={24} />
         </div>
-        <h1>Create your Keepsake</h1>
+        <h1>Create your Keyorra</h1>
         <p className="muted">
           Your master password encrypts everything. It can't be recovered, so write it down and keep it somewhere safe.
         </p>

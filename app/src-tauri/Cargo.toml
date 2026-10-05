@@ -1,12 +1,12 @@
 [package]
-name = "keepsake-app"
+name = "keyorra-app"
 version = "0.1.0"
-description = "Keepsake password manager for macOS"
+description = "Keyorra password manager for macOS"
 edition = "2021"
 publish = false
 
 [lib]
-name = "keepsake_app_lib"
+name = "keyorra_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [build-dependencies]
@@ -17,8 +17,8 @@ tauri = { version = "2", features = ["macos-private-api", "tray-icon"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-global-shortcut = "2"
-keepsake-core = { path = "../../crates/keepsake-core" }
-keepsake-session = { path = "../../crates/keepsake-session" }
+keyorra-core = { path = "../../crates/keyorra-core" }
+keyorra-session = { path = "../../crates/keyorra-session" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["serde"] }

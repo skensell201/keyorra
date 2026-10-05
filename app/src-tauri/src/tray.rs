@@ -1,4 +1,4 @@
-//! Menu bar icon: Open Keepsake, Quick search, Lock, Quit.
+//! Menu bar icon: Open Keyorra, Quick search, Lock, Quit.
 
 use tauri::image::Image;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
@@ -30,16 +30,16 @@ pub fn glyph(size: u32) -> Vec<u8> {
 }
 
 pub fn install(app: &AppHandle) -> tauri::Result<()> {
-    let open = MenuItem::with_id(app, "open", "Open Keepsake", true, None::<&str>)?;
+    let open = MenuItem::with_id(app, "open", "Open Keyorra", true, None::<&str>)?;
     let quick = MenuItem::with_id(app, "quick", "Quick Search", true, None::<&str>)?;
     let lock = MenuItem::with_id(app, "lock", "Lock", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "Quit Keepsake", true, None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit Keyorra", true, None::<&str>)?;
     let separator = PredefinedMenuItem::separator(app)?;
     let menu = Menu::with_items(app, &[&open, &quick, &lock, &separator, &quit])?;
     TrayIconBuilder::with_id("main")
         .icon(Image::new_owned(glyph(GLYPH_SIZE), GLYPH_SIZE, GLYPH_SIZE))
         .icon_as_template(true)
-        .tooltip("Keepsake")
+        .tooltip("Keyorra")
         .menu(&menu)
         .show_menu_on_left_click(true)
         .on_menu_event(|app, event| match event.id().as_ref() {

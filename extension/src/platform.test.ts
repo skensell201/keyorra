@@ -45,8 +45,8 @@ test("replies from the app pass through untouched", async () => {
         return { kind: "status", locked: true, version: 1 };
       },
     },
-    "app.keepsake.bridge",
+    "app.keyorra.bridge",
   );
   expect(await send({ kind: "status" })).toEqual({ kind: "status", locked: true, version: 1 });
-  expect(seen).toEqual([["app.keepsake.bridge", { kind: "status" }]]);
+  expect(seen).toEqual([["app.keyorra.bridge", { kind: "status" }]]);
 });
