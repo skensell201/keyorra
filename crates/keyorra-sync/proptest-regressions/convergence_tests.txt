@@ -5,3 +5,5 @@
 # It is recommended to check this file in to source control so that
 # everyone who runs the test benefits from these saved cases.
 cc 960fd6f839134d19eee75b7f07162709f5e7d2de70e507b8468bd56823656e1b # shrinks to seed = 0, ops = [RenameVault { dev: 1 }], shuffle = 128935009567670462
+cc ba67c4aedb06d06bd1593d1a8d461b6e0587aa57359ff7a6bb931879d3a0bf55 # shrinks to seed = 0, ops = [Save { dev: 2, item: 2 }, Trash { dev: 2, item: 2 }, Save { dev: 0, item: 2 }, DeleteVault { dev: 2 }], shuffle = 0, skew = [-1321, 585274, 236358, 631698]
+cc 5959f52c95b4bbb688cbc2733d51f159b5b1be83c1a0f67e40653b9b2db7d9dc # shrinks to devices = 4, seed = 0, ops = [Save { dev: 0, item: 3 }, Trash { dev: 0, item: 3 }, DeleteVault { dev: 0 }, Save { dev: 1, item: 3 }], skew = [0, 0, 2148, 132670]

@@ -35,9 +35,9 @@ fn op(devices: usize) -> impl Strategy<Value = Op> {
     let i = 0..ITEMS;
     prop_oneof![
         4 => (d.clone(), i.clone()).prop_map(|(dev, item)| Op::Save { dev, item }),
-        1 => (d.clone(), i.clone()).prop_map(|(dev, item)| Op::Trash { dev, item }),
+        2 => (d.clone(), i.clone()).prop_map(|(dev, item)| Op::Trash { dev, item }),
         1 => (d.clone(), i.clone()).prop_map(|(dev, item)| Op::Restore { dev, item }),
-        1 => (d.clone(), i.clone()).prop_map(|(dev, item)| Op::Purge { dev, item }),
+        3 => (d.clone(), i.clone()).prop_map(|(dev, item)| Op::Purge { dev, item }),
         1 => (d.clone(), i.clone()).prop_map(|(dev, item)| Op::Attach { dev, item }),
         1 => (d.clone(), i.clone()).prop_map(|(dev, item)| Op::Detach { dev, item }),
         1 => d.clone().prop_map(|dev| Op::RenameVault { dev }),
@@ -57,12 +57,31 @@ fn title_of(view: &View, id: Uuid) -> Option<String> {
     Some(v["title"].as_str()?.to_owned())
 }
 
+/// Wall-clock offset of each device from the shared start, in ms (up to ±15 minutes, so
+/// beyond the 5-minute bound the HLC refuses to adopt).
+fn offsets() -> impl Strategy<Value = Vec<i64>> {
+    prop::collection::vec(-900_000i64..900_000, 4)
+}
+
 /// Runs `ops` on a fresh cluster; every save writes a unique title. Returns the cluster and
 /// the vault id. Operations that do not apply (trash a missing item, …) are skipped.
 fn run(devices: usize, seed: u64, faults: Faults, ops: &[Op]) -> (Cluster, Uuid) {
+    run_skewed(devices, seed, faults, ops, &[])
+}
+
+fn run_skewed(
+    devices: usize,
+    seed: u64,
+    faults: Faults,
+    ops: &[Op],
+    offsets: &[i64],
+) -> (Cluster, Uuid) {
     let mut c = Cluster::new(devices, seed, Faults::NONE);
     let vault = c.devices[0].create_vault("Personal", START_MS).unwrap();
     c.heal();
+    for (clock, offset) in c.clocks.iter_mut().zip(offsets) {
+        *clock = clock.saturating_add_signed(*offset);
+    }
     for link in &c.links {
         link.set_faults(faults);
     }
@@ -154,19 +173,25 @@ fn assert_nothing_unaccounted(fold: &Fold, view: &View) {
 }
 
 proptest! {
-    #![proptest_config(ProptestConfig { cases: 48, ..ProptestConfig::default() })]
+    // 48 cases by default; `PROPTEST_CASES=20000 cargo test --release …` for a stress run.
+    #![proptest_config(ProptestConfig {
+        cases: std::env::var("PROPTEST_CASES").ok().and_then(|v| v.parse().ok()).unwrap_or(48),
+        ..ProptestConfig::default()
+    })]
 
     #[test]
     fn devices_converge_through_chaos(
         devices in 2usize..=4,
         seed in any::<u64>(),
         ops in prop::collection::vec(op(4), 1..60),
+        skew in offsets(),
     ) {
         let ops: Vec<Op> = ops.into_iter().map(|o| clamp(o, devices)).collect();
-        let (c, _) = run(devices, seed, Faults::CHAOS, &ops);
+        let (c, _) = run_skewed(devices, seed, Faults::CHAOS, &ops, &skew);
         c.assert_converged();
         for d in &c.devices {
             assert_nothing_unaccounted(d.fold(), &d.view());
+            assert_no_lost_edit(d.fold(), &d.view());
         }
     }
 
@@ -175,8 +200,10 @@ proptest! {
         seed in any::<u64>(),
         ops in prop::collection::vec(op(3), 1..40),
         shuffle in any::<u64>(),
+        skew in offsets(),
     ) {
-        let (c, _) = run(3, seed, Faults::NONE, &ops);
+        let (c, _) = run_skewed(3, seed, Faults::NONE, &ops, &skew);
+        assert_no_lost_edit(c.devices[0].fold(), &c.devices[0].view());
         let reference = c.devices[0].view();
         // Replay every accepted version, interleaving the streams pseudo-randomly while keeping
         // each stream's own order.
@@ -284,6 +311,8 @@ fn tombstones_and_vaults_survive_the_replay_too() {
 /// The review's oracle: on every item record that is not purged, every edit (a version whose
 /// `content_from` is its own vector) that no other edit of the record dominates must still be
 /// visible somewhere (as the item or as a conflict copy, live or in Recently Deleted).
+/// Refinement: an edit that a purge has seen (a tombstone dominates it) was deleted on purpose,
+/// even when a concurrent edit keeps the record itself alive.
 fn assert_no_lost_edit(fold: &Fold, view: &View) {
     let titles: BTreeSet<String> = view
         .items
@@ -312,7 +341,20 @@ fn assert_no_lost_edit(fold: &Fold, view: &View) {
                 _ => None,
             })
             .collect();
+        let purges: Vec<_> = fold
+            .retained()
+            .filter(|a| {
+                a.kind == RecordKind::Item && a.record_id == record && a.doc == Doc::Tombstone
+            })
+            .collect();
         for (a, p) in &edits {
+            let purged = purges.iter().any(|t| {
+                crate::vv::compare(&a.version.vector, &t.version.vector)
+                    == crate::vv::Causality::Before
+            });
+            if purged {
+                continue;
+            }
             let dominated = edits.iter().any(|(b, _)| {
                 crate::vv::compare(&a.version.vector, &b.version.vector)
                     == crate::vv::Causality::Before
