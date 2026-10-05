@@ -15,7 +15,10 @@
 //! is kept as sealed meta of the store (`sync:config`, `sync:outbox`, `sync:memo`) and in its
 //! `sync_segments` table. Attachment contents travel with the folder transport (plan A2).
 
+mod enclave_keys;
 mod keys;
+mod merge;
+mod setup;
 #[cfg(test)]
 mod tests;
 
@@ -40,11 +43,16 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+pub use enclave_keys::{Enclave, EnclaveDeviceKeys};
 pub use keys::{DeviceKeyStore, MemoryDeviceKeys};
+pub use merge::{carry_over, disable, rejoin, start_new_account, Rejoined};
+pub use setup::SetupCode;
 
 const CONFIG: &str = "sync:config";
 const OUTBOX: &str = "sync:outbox";
 const MEMO: &str = "sync:memo";
+/// What every record looked like when sync was turned off (kept for rejoining).
+const BASE: &str = "sync-base";
 
 /// What this device knows about its synced account (sealed meta `sync:config`).
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -56,6 +64,29 @@ struct SyncConfig {
     root_key: [u8; 32],
     secret_key: [u8; 16],
     secret_key_id: String,
+}
+
+/// Sync as the UI shows it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncStatus {
+    pub main_device: bool,
+    /// This device self-joined and waits for the main device.
+    pub waiting_for_approval: bool,
+    /// This device's key code (compared on the main device before approving it).
+    pub key_code: String,
+    pub devices: Vec<SyncDevice>,
+    pub alarms: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncDevice {
+    pub id: String,
+    pub name: String,
+    pub approved: bool,
+    pub main: bool,
+    pub this_device: bool,
 }
 
 /// What the user writes down when sync is enabled (spec §7.6). The location is the
@@ -150,6 +181,12 @@ pub struct Synced<T: Transport> {
     engine: Engine<OsRng>,
     transport: T,
     config: SyncConfig,
+    /// Rejoining: what each record looked like when sync was turned off; a record changed
+    /// both here and in the account since then becomes a conflict copy.
+    base: Option<merge::Base>,
+    /// A round read the store since this started: before that the engine's view may lack
+    /// what a local change refers to (a joining device knows no vault yet).
+    caught_up: bool,
 }
 
 fn random_id() -> [u8; 16] {
@@ -261,6 +298,8 @@ pub fn enable<T: Transport>(
         engine,
         transport,
         config,
+        base: None,
+        caught_up: false,
     };
     synced.commit(store)?;
     let first_round = synced.round(store, wall_ms);
@@ -375,15 +414,62 @@ pub fn join<T: Transport>(
     unlock: impl FnMut(&Header) -> Result<Key>,
     wall_ms: u64,
 ) -> Result<Joined<T>> {
+    let (header, account_key) = open_account(&transport, pin, unlock)?;
+    let mut store = Store::create_with_account_key(path, password, local_kdf, account_key.clone())?;
+    match join_store(
+        &mut store,
+        transport,
+        keys,
+        device_name,
+        (secret_key, secret_key_id),
+        &header,
+        account_key,
+        None,
+        wall_ms,
+    ) {
+        Ok((synced, first_round)) => Ok(Joined {
+            store,
+            synced,
+            first_round,
+        }),
+        Err(e) => {
+            drop(store);
+            remove_database(path);
+            Err(e)
+        }
+    }
+}
+
+/// The account header the transport holds, unlocked: (header, account key).
+fn open_account<T: Transport>(
+    transport: &T,
+    pin: Option<&RootPin>,
+    unlock: impl FnMut(&Header) -> Result<Key>,
+) -> Result<(Header, Key)> {
     let files = transport.headers()?;
     let root_head = match transport.root_head_file()? {
         Fetched::Ready(b) => Some(b),
         _ => None,
     };
     let joined = unlock_join_with(&files, root_head.as_deref(), pin, unlock)?;
-    let header = joined.file.header.clone();
-    let mut store =
-        Store::create_with_account_key(path, password, local_kdf, joined.account_key.clone())?;
+    Ok((joined.file.header.clone(), joined.account_key))
+}
+
+/// A new device id for `store` in the account: self-joins and waits for approval. On an
+/// error nothing of sync is left in the store and the key is forgotten; otherwise sync is
+/// committed and the first round's result is returned with it.
+#[allow(clippy::too_many_arguments)]
+fn join_store<T: Transport>(
+    store: &mut Store,
+    transport: T,
+    keys: &mut dyn DeviceKeyStore,
+    device_name: &str,
+    (secret_key, secret_key_id): (&SecretKey, &str),
+    header: &Header,
+    account_key: Key,
+    base: Option<merge::Base>,
+    wall_ms: u64,
+) -> Result<(Synced<T>, Result<RoundReport>)> {
     let device = random_id();
     let started = (|| -> Result<Synced<T>> {
         let signer = new_signer();
@@ -395,7 +481,7 @@ pub fn join<T: Transport>(
             signer,
             device_name,
             header.account_id,
-            joined.account_key,
+            account_key,
             header.root_device,
             root_key,
             OsRng,
@@ -416,25 +502,31 @@ pub fn join<T: Transport>(
             engine,
             transport,
             config,
+            base,
+            caught_up: false,
         };
-        synced.commit(&mut store)?;
+        if let Some(base) = &synced.base {
+            // What changed here while sync was off is written once the device may write.
+            let changed = merge::changed_since(store, base)?;
+            synced.commit(store)?;
+            store.record_changes(&changed)?;
+        } else {
+            synced.commit(store)?;
+        }
         Ok(synced)
     })();
     let mut synced = match started {
         Ok(s) => s,
         Err(e) => {
-            drop(store);
             keys.forget(&device);
-            remove_database(path);
+            let _ = store.delete_sealed_meta(OUTBOX);
+            let _ = store.delete_sealed_meta(CONFIG);
+            let _ = store.set_sync_tracking(false);
             return Err(e);
         }
     };
-    let first_round = synced.round(&mut store, wall_ms);
-    Ok(Joined {
-        store,
-        synced,
-        first_round,
-    })
+    let first_round = synced.round(store, wall_ms);
+    Ok((synced, first_round))
 }
 
 /// Removes a database file this module created, with SQLite's companions.
@@ -487,6 +579,8 @@ pub fn resume<T: Transport>(
         engine,
         transport,
         config,
+        base: merge::load_base(store)?,
+        caught_up: false,
     })
 }
 
@@ -519,6 +613,9 @@ impl<T: Transport> Synced<T> {
         let mut report = RoundReport::default();
         let before = self.write_changes(store, wall_ms, &mut report);
         let synced = self.engine.sync(&self.transport, wall_ms);
+        if synced.is_ok() {
+            self.caught_up = true;
+        }
         // What could not be written before (the engine was still reading its own stream).
         let after = self.write_changes(store, wall_ms, &mut report);
         // While the engine reads its streams again after a restart, its view lacks this
@@ -548,10 +645,11 @@ impl<T: Transport> Synced<T> {
         wall_ms: u64,
         report: &mut RoundReport,
     ) -> Result<()> {
-        if !self.engine.can_write() {
+        if !self.caught_up || !self.engine.can_write() {
             return Ok(());
         }
         let mut done = Vec::new();
+        let mut all = true;
         for change in store.pending_changes()? {
             match self.write_change(store, change, wall_ms) {
                 Ok(Outcome::Written) => done.push(change),
@@ -559,9 +657,10 @@ impl<T: Transport> Synced<T> {
                     done.push(change);
                     report.reverted.push((change, reason));
                 }
-                Err(Error::Refused(_)) => {}
+                Err(Error::Refused(_)) => all = false,
                 Err(Error::NotFound(reason)) => {
                     if still_here(store, change)? {
+                        all = false;
                         report.failed.push((change.id, reason));
                     } else {
                         done.push(change);
@@ -575,10 +674,13 @@ impl<T: Transport> Synced<T> {
             return Ok(());
         }
         store.clear_changes(&done)?;
+        if all && self.base.take().is_some() {
+            store.delete_sealed_meta(BASE)?;
+        }
         Ok(())
     }
 
-    fn write_change(&mut self, store: &Store, change: Change, wall_ms: u64) -> Result<Outcome> {
+    fn write_change(&mut self, store: &mut Store, change: Change, wall_ms: u64) -> Result<Outcome> {
         let view = self.engine.view();
         let now_secs = wall_ms / 1000;
         match change.kind {
@@ -615,6 +717,17 @@ impl<T: Transport> Synced<T> {
                 Ok(Outcome::Written)
             }
             ChangeKind::Item => {
+                if let Some(base) = &self.base {
+                    if merge::copy_if_both_changed(
+                        store,
+                        base,
+                        &view,
+                        change.id,
+                        self.config.device,
+                    )? {
+                        return Ok(Outcome::Written);
+                    }
+                }
                 let synced = view.items.get(&change.id);
                 let shown = |state: ItemState| {
                     synced.filter(|v| v.state == state).and_then(|v| {
@@ -716,6 +829,79 @@ impl<T: Transport> Synced<T> {
         EmergencyKit {
             account_id: data_encoding::HEXLOWER.encode(&self.config.account_id),
             secret_key: sk.display(&self.config.secret_key_id),
+        }
+    }
+
+    /// A new master password for the account (main device only): a new header epoch.
+    /// `account_key` is the store's (the same as the account's).
+    pub fn change_password(
+        &mut self,
+        account_key: &Key,
+        password: &str,
+        kdf: KdfParams,
+        wall_ms: u64,
+    ) -> Result<()> {
+        if !self.engine.is_root() {
+            return Err(Error::Refused(
+                "the master password is changed on the main device".into(),
+            ));
+        }
+        let current = self
+            .engine
+            .current_header()
+            .cloned()
+            .ok_or_else(|| Error::NotFound("account header".into()))?;
+        let mut salt = [0u8; 16];
+        OsRng.fill_bytes(&mut salt);
+        let sk = SecretKey::from_bytes(self.config.secret_key);
+        let keys = derive_sync_keys(password, &salt, kdf, &sk, &self.config.account_id)?;
+        let mut header = Header {
+            epoch: current.epoch + 1,
+            kdf,
+            salt,
+            wrapped_account_key: Vec::new(),
+            ..current
+        };
+        header.wrapped_account_key = wrap_account_key(&keys.kek, account_key, &header, &mut OsRng);
+        self.engine.publish_header(header, wall_ms)
+    }
+
+    /// What the UI shows about sync.
+    pub fn status(&self) -> SyncStatus {
+        let trust = self.engine.trust();
+        let mut devices: Vec<SyncDevice> = trust
+            .devices()
+            .iter()
+            .map(|(id, d)| SyncDevice {
+                id: data_encoding::HEXLOWER.encode(id),
+                name: d.name.clone(),
+                approved: true,
+                main: *id == trust.root(),
+                this_device: *id == self.engine.device(),
+            })
+            .collect();
+        devices.extend(trust.unapproved().iter().map(|(id, d)| SyncDevice {
+            id: data_encoding::HEXLOWER.encode(id),
+            name: d.name.clone(),
+            approved: false,
+            main: false,
+            this_device: *id == self.engine.device(),
+        }));
+        SyncStatus {
+            main_device: self.engine.is_root(),
+            waiting_for_approval: !trust.devices().contains_key(&self.engine.device()),
+            key_code: self.engine.key_fingerprint(),
+            devices,
+            alarms: self.engine.alarms().len(),
+        }
+    }
+
+    /// The setup code for adding a device (secret: it carries the Secret Key).
+    pub fn setup_code(&self) -> SetupCode {
+        SetupCode {
+            secret_key_id: self.config.secret_key_id.clone(),
+            secret_key: SecretKey::from_bytes(self.config.secret_key),
+            pin: self.root_pin(),
         }
     }
 

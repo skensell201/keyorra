@@ -550,3 +550,366 @@ fn review_a1d_i5_a_failed_join_leaves_no_file() {
     assert!(!path.exists());
     assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 0);
 }
+
+// ---- setup code, turning sync off and on, other accounts (plan A1d-2) ----
+
+fn item_id(store: &Store, title: &str) -> uuid::Uuid {
+    store
+        .list_items(None)
+        .unwrap()
+        .into_iter()
+        .find_map(|e| match e {
+            keyorra_core::store::ItemEntry::Ok(i) if i.title == title => Some(i.id),
+            _ => None,
+        })
+        .unwrap()
+}
+
+fn retitle(store: &mut Store, old: &str, title: &str) {
+    let mut item = store.get_item(item_id(store, old)).unwrap();
+    item.title = title.into();
+    store.save_item(&item).unwrap();
+}
+
+fn approve_all(main: &mut Device, other: &mut Device, from: u64) {
+    round(main, from);
+    let code = other.synced.key_code();
+    let id = other.synced.engine().device();
+    main.synced.approve(id, &code, from + 1).unwrap();
+    for t in from + 2..from + 6 {
+        round(main, t);
+        round(other, t);
+    }
+}
+
+#[test]
+fn a_device_joins_with_the_setup_code_alone() {
+    let transport = MemoryTransport::new();
+    let (mut main, _kit) = main_device(&transport);
+    let code = SetupCode::parse(&main.synced.setup_code().to_text()).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("j.db");
+    let mut keys = MemoryDeviceKeys::default();
+    let sk = *code.secret_key.as_bytes();
+    let Joined {
+        store,
+        synced,
+        first_round,
+    } = join(
+        &path,
+        PW,
+        KdfParams::INSECURE_FAST,
+        &code.secret_key,
+        &code.secret_key_id,
+        Some(&code.pin),
+        transport.clone(),
+        &mut keys,
+        "Laptop",
+        cheap_unlock(PW, sk),
+        NOW_MS,
+    )
+    .unwrap();
+    first_round.unwrap();
+    let mut laptop = Device {
+        _dir: dir,
+        path,
+        store,
+        synced,
+        keys,
+    };
+    approve_all(&mut main, &mut laptop, NOW_MS + 1);
+    assert!(titles(&laptop.store).contains("before sync"));
+}
+
+#[test]
+fn turning_sync_off_keeps_everything_and_records_nothing() {
+    let (_t, _main, mut laptop) = pair();
+    let before = titles(&laptop.store);
+    disable(&mut laptop.store, Some(laptop.synced), &mut laptop.keys).unwrap();
+    assert_eq!(titles(&laptop.store), before);
+    assert!(!is_enabled(&laptop.store).unwrap());
+    let vault = laptop.store.vaults().unwrap()[0].id;
+    laptop
+        .store
+        .save_item(&Item::new(vault, ItemKind::Login, "offline", 50))
+        .unwrap();
+    assert!(laptop.store.pending_changes().unwrap().is_empty());
+    assert!(
+        laptop.keys.0.lock().unwrap().is_empty(),
+        "device key forgotten"
+    );
+}
+
+#[test]
+fn the_main_device_cannot_turn_sync_off_under_other_devices() {
+    let (_t, mut main, _laptop) = pair();
+    let synced = std::mem::replace(
+        &mut main.synced,
+        main_device(&MemoryTransport::new()).0.synced,
+    );
+    assert!(matches!(
+        disable(&mut main.store, Some(synced), &mut main.keys),
+        Err(Error::Refused(_))
+    ));
+}
+
+#[test]
+fn rejoining_merges_by_record_id_and_keeps_both_sides_of_a_double_edit() {
+    let (transport, mut main, mut laptop) = pair();
+    let vault = main.store.vaults().unwrap()[0].id;
+    for title in ["only here", "both", "only there"] {
+        main.store
+            .save_item(&Item::new(vault, ItemKind::Login, title, 60))
+            .unwrap();
+    }
+    for t in 60..64 {
+        round(&mut main, NOW_MS + t);
+        round(&mut laptop, NOW_MS + t);
+    }
+    let Device {
+        _dir,
+        path,
+        mut store,
+        synced,
+        mut keys,
+    } = laptop;
+    disable(&mut store, Some(synced), &mut keys).unwrap();
+    // While sync is off here: edits on both sides.
+    retitle(&mut store, "only here", "only here, edited here");
+    retitle(&mut store, "both", "both, edited here");
+    retitle(&mut main.store, "both", "both, edited there");
+    retitle(&mut main.store, "only there", "only there, edited there");
+    round(&mut main, NOW_MS + 70);
+
+    let kit = main.synced.emergency_kit();
+    let (id, sk) = SecretKey::parse(&kit.secret_key).unwrap();
+    let synced = rejoin(
+        &mut store,
+        &sk,
+        &id,
+        Some(&main.synced.root_pin()),
+        transport.clone(),
+        &mut keys,
+        "Laptop",
+        cheap_unlock(PW, *sk.as_bytes()),
+        NOW_MS + 71,
+    )
+    .unwrap()
+    .synced;
+    let mut laptop = Device {
+        _dir,
+        path,
+        store,
+        synced,
+        keys,
+    };
+    approve_all(&mut main, &mut laptop, NOW_MS + 72);
+    for t in 80..84 {
+        round(&mut main, NOW_MS + t);
+        round(&mut laptop, NOW_MS + t);
+    }
+    let seen = titles(&main.store);
+    for title in [
+        "before sync",
+        "only here, edited here",
+        "only there, edited there",
+        "both, edited there",
+        "both, edited here",
+    ] {
+        assert!(seen.contains(title), "{title}: {seen:?}");
+    }
+    assert_eq!(titles(&laptop.store), seen);
+    assert_eq!(seen.len(), 5, "nothing doubled: {seen:?}");
+    let copy = laptop
+        .store
+        .get_item(item_id(&laptop.store, "both, edited here"))
+        .unwrap();
+    assert_eq!(
+        copy.conflict.unwrap().of,
+        item_id(&laptop.store, "both, edited there")
+    );
+    assert!(laptop.store.sealed_meta("sync-base").unwrap().is_none());
+}
+
+#[test]
+fn a_vault_of_another_account_cannot_rejoin() {
+    let (transport, main, _laptop) = pair();
+    let (other, _) = main_device(&MemoryTransport::new());
+    let Device {
+        mut store,
+        synced,
+        mut keys,
+        ..
+    } = other;
+    disable(&mut store, Some(synced), &mut keys).unwrap();
+    let kit = main.synced.emergency_kit();
+    let (id, sk) = SecretKey::parse(&kit.secret_key).unwrap();
+    let result = rejoin(
+        &mut store,
+        &sk,
+        &id,
+        None,
+        transport,
+        &mut keys,
+        "Other",
+        cheap_unlock(PW, *sk.as_bytes()),
+        NOW_MS + 90,
+    );
+    assert!(matches!(result, Err(Error::Refused(_))));
+}
+
+#[test]
+fn another_accounts_vault_is_carried_over_as_new_records() {
+    let (_t, _main, mut laptop) = pair();
+    let dir = tempfile::tempdir().unwrap();
+    let mut old = Store::create(&dir.path().join("old.db"), PW, KdfParams::INSECURE_FAST).unwrap();
+    let v = old.create_vault("Old Mac").unwrap();
+    let item = Item::new(v.id, ItemKind::SecureNote, "carried", 1);
+    old.save_item(&item).unwrap();
+    old.add_attachment(item.id, "a.txt", b"bytes", 2).unwrap();
+    assert_eq!(carry_over(&old, &mut laptop.store).unwrap(), 1);
+    for t in 100..104 {
+        round(&mut laptop, NOW_MS + t);
+    }
+    let copied = laptop
+        .store
+        .get_item(item_id(&laptop.store, "carried"))
+        .unwrap();
+    assert_ne!(copied.id, item.id);
+    assert_eq!(
+        &laptop
+            .store
+            .get_attachment(copied.attachments[0].id)
+            .unwrap()[..],
+        b"bytes"
+    );
+}
+
+#[test]
+fn the_main_device_starts_a_new_account_with_new_keys() {
+    let (_t, mut main, _laptop) = pair();
+    let old_account = main.store.account_key_copy().unwrap();
+    let fresh = MemoryTransport::new();
+    let synced = std::mem::replace(
+        &mut main.synced,
+        main_device(&MemoryTransport::new()).0.synced,
+    );
+    let Enabled { synced, kit, .. } = start_new_account(
+        &mut main.store,
+        Some(synced),
+        fresh.clone(),
+        &mut main.keys,
+        "Main",
+        PW,
+        KdfParams::INSECURE_FAST,
+        NOW_MS + 110,
+    )
+    .unwrap();
+    main.synced = synced;
+    assert_ne!(
+        main.store.account_key().unwrap().as_bytes(),
+        old_account.as_bytes()
+    );
+    let mut newcomer = joiner(&fresh, &kit, Some(main.synced.root_pin()));
+    approve_all(&mut main, &mut newcomer, NOW_MS + 111);
+    assert_eq!(titles(&newcomer.store), titles(&main.store));
+    assert!(titles(&newcomer.store).contains("before sync"));
+}
+
+/// An edit not synced yet when sync is turned off is written when the vault rejoins (it is
+/// not mistaken for what the account already had).
+#[test]
+fn an_unsynced_edit_survives_turning_sync_off_and_rejoining() {
+    let (transport, mut main, laptop) = pair();
+    let Device {
+        _dir,
+        path,
+        mut store,
+        synced,
+        mut keys,
+    } = laptop;
+    retitle(
+        &mut store,
+        "before sync",
+        "edited just before turning sync off",
+    );
+    disable(&mut store, Some(synced), &mut keys).unwrap();
+    let kit = main.synced.emergency_kit();
+    let (id, sk) = SecretKey::parse(&kit.secret_key).unwrap();
+    let synced = rejoin(
+        &mut store,
+        &sk,
+        &id,
+        Some(&main.synced.root_pin()),
+        transport.clone(),
+        &mut keys,
+        "Laptop",
+        cheap_unlock(PW, *sk.as_bytes()),
+        NOW_MS + 120,
+    )
+    .unwrap()
+    .synced;
+    let mut laptop = Device {
+        _dir,
+        path,
+        store,
+        synced,
+        keys,
+    };
+    approve_all(&mut main, &mut laptop, NOW_MS + 121);
+    assert!(titles(&main.store).contains("edited just before turning sync off"));
+    assert_eq!(titles(&laptop.store), titles(&main.store));
+}
+
+/// The conflict copy made when rejoining keeps the local version's attachments.
+#[test]
+fn a_rejoin_conflict_copy_keeps_its_attachments() {
+    let (transport, mut main, laptop) = pair();
+    let Device {
+        _dir,
+        path,
+        mut store,
+        synced,
+        mut keys,
+    } = laptop;
+    disable(&mut store, Some(synced), &mut keys).unwrap();
+    let local = item_id(&store, "before sync");
+    store
+        .add_attachment(local, "mine.txt", b"local bytes", 130)
+        .unwrap();
+    retitle(&mut store, "before sync", "edited here");
+    retitle(&mut main.store, "before sync", "edited there");
+    round(&mut main, NOW_MS + 131);
+    let kit = main.synced.emergency_kit();
+    let (id, sk) = SecretKey::parse(&kit.secret_key).unwrap();
+    let synced = rejoin(
+        &mut store,
+        &sk,
+        &id,
+        Some(&main.synced.root_pin()),
+        transport.clone(),
+        &mut keys,
+        "Laptop",
+        cheap_unlock(PW, *sk.as_bytes()),
+        NOW_MS + 132,
+    )
+    .unwrap()
+    .synced;
+    let mut laptop = Device {
+        _dir,
+        path,
+        store,
+        synced,
+        keys,
+    };
+    approve_all(&mut main, &mut laptop, NOW_MS + 133);
+    let copy = laptop
+        .store
+        .get_item(item_id(&laptop.store, "edited here"))
+        .unwrap();
+    assert_eq!(copy.attachments.len(), 1);
+    assert_eq!(
+        &laptop.store.get_attachment(copy.attachments[0].id).unwrap()[..],
+        b"local bytes"
+    );
+}

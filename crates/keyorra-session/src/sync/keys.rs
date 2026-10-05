@@ -1,6 +1,6 @@
-//! Device signing keys. A1d-2 keeps them in the macOS Keychain with
-//! `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` (a Swift helper, like Touch ID), so a
-//! database restored or copied to another Mac finds no key and the device retires its id.
+//! Device signing keys: where they are kept ([`super::EnclaveDeviceKeys`] in the app, sealed
+//! to this Mac's Secure Enclave; in memory in tests). A database restored or copied to another
+//! Mac finds no key and the device retires its id.
 
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
