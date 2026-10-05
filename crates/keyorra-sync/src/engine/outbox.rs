@@ -78,6 +78,23 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             .iter()
             .map(|b| crate::cbor::decode(b))
             .collect::<Result<Vec<Value>>>()?;
+        // The queued entries must be exactly the ones whose chain hashes were kept.
+        let mut prev = if after_unsent == 0 {
+            chain_genesis(&self.account_id, &self.device)
+        } else {
+            *state
+                .own_hashes
+                .get(&after_unsent)
+                .ok_or_else(|| Error::Refused("outbox chain hashes are missing".into()))?
+        };
+        for (i, value) in outbox.iter().enumerate() {
+            prev = chain_next(&prev, value);
+            if state.own_hashes.get(&(after_unsent + 1 + i as u64)) != Some(&prev) {
+                return Err(Error::Refused(
+                    "queued outbox entries do not match their chain hashes".into(),
+                ));
+            }
+        }
         self.next_seq = state.next_seq;
         self.sent = state.sent;
         self.own_hashes = state.own_hashes;

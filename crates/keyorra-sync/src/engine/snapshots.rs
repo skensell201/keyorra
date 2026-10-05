@@ -452,6 +452,13 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                 .collect();
             // Positions are segment ends: the first lost segment starts right after `stored`.
             let have_all = self.own_segments.contains_key(&(stored + 1));
+            if !have_all && self.snapshot_covers(transport, &stream, self.sent.seq) {
+                // The main device's snapshot already covers what the store lost.
+                self.alarms.retain(|a| *a != alarm);
+                self.acknowledged_rollbacks.insert((stream, stored));
+                self.push(transport);
+                return Ok(());
+            }
             if !have_all {
                 return Err(Error::Refused(
                     "this device no longer has its lost changes; restore on the main device".into(),

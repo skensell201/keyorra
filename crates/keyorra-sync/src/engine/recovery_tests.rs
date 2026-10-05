@@ -322,18 +322,20 @@ fn after_a_restored_backup_everyone_continues_from_a_snapshot() {
         .restore(&store, device_id(1), c.clocks[0])
         .unwrap();
     assert!(c.devices[0].alarms().is_empty());
-    // Device 1's own stream went back: it notices before its next write, restores, goes on.
+    // Device 1's own stream went back, but the main device's snapshot covers it: nothing
+    // to restore, it goes on.
     save(&mut c, 1, vault, Uuid::from_bytes([0x61; 16]), "later");
     c.devices[1].sync(&store, c.clocks[1]).unwrap();
-    assert!(matches!(
-        c.devices[1].alarms().first(),
-        Some(Alarm::Rollback { stream, .. }) if *stream == device_id(1)
-    ));
-    c.devices[1]
-        .restore(&store, device_id(1), c.clocks[1])
-        .unwrap();
-    c.devices[1].sync(&store, c.clocks[1]).unwrap();
-    // Device 2 never saw the lost segment: it gets it again (device 1 appended it anew).
+    assert!(
+        c.devices[1].alarms().is_empty(),
+        "{:?}",
+        c.devices[1].alarms()
+    );
+    assert!(c.devices[1]
+        .take_events()
+        .iter()
+        .any(|e| matches!(e, Event::RollbackRepaired { .. })));
+    // Device 2 never saw the lost segment: it is anchored by the main device's snapshot.
     c.devices[2].sync(&store, c.clocks[2]).unwrap();
     for _ in 0..4 {
         for i in 0..3 {
@@ -515,4 +517,62 @@ fn an_inconsistent_outbox_state_is_refused() {
     bad.own_hashes.clear();
     assert!(restarted.restore_outbox(bad).is_err());
     restarted.restore_outbox(good).unwrap();
+}
+
+#[test]
+fn a_restored_outbox_must_chain_its_queued_entries() {
+    let (mut c, vault) = shared(2);
+    save(&mut c, 1, vault, ITEM, "queued");
+    let good = c.devices[1].outbox_state();
+    assert!(!good.outbox.is_empty());
+    let mut restarted = clone_of(&c.devices[1]);
+    let mut bad = good.clone();
+    let last = bad.outbox.len() - 1;
+    bad.outbox[last] = crate::cbor::encode(&Entry::Checkpoint(Heads::new()).to_value());
+    assert!(restarted.restore_outbox(bad).is_err());
+    restarted.restore_outbox(good).unwrap();
+}
+
+#[test]
+fn own_segments_covered_by_a_root_snapshot_are_not_kept() {
+    let (mut c, vault) = shared(2);
+    for t in ["a", "b", "c"] {
+        save(&mut c, 1, vault, ITEM, t);
+        c.sync(1).unwrap();
+    }
+    assert!(c.devices[1].own_segments.len() >= 3);
+    c.sync(0).unwrap();
+    c.devices[0].write_snapshot(&c.store, c.clocks[0]).unwrap();
+    c.sync(0).unwrap();
+    c.sync(1).unwrap();
+    let covered = c.devices[0].heads[&device_id(1)].seq;
+    assert!(c.devices[1]
+        .own_segments
+        .keys()
+        .all(|first| *first > covered));
+}
+
+#[test]
+fn a_device_restores_its_own_rolled_back_stream_by_appending_it_again() {
+    let (mut c, vault) = shared(3);
+    let backup = c.store.deep_copy();
+    save(&mut c, 1, vault, ITEM, "after the backup");
+    c.sync(1).unwrap();
+    let store = backup;
+    save(&mut c, 1, vault, Uuid::from_bytes([0x61; 16]), "later");
+    c.devices[1].sync(&store, c.clocks[1]).unwrap();
+    assert!(matches!(
+        c.devices[1].alarms().first(),
+        Some(Alarm::Rollback { stream, .. }) if *stream == device_id(1)
+    ));
+    c.devices[1]
+        .restore(&store, device_id(1), c.clocks[1])
+        .unwrap();
+    c.devices[1].sync(&store, c.clocks[1]).unwrap();
+    c.devices[2].sync(&store, c.clocks[2]).unwrap();
+    let seen = titles(&c.devices[2].view());
+    assert!(
+        seen.contains("after the backup") && seen.contains("later"),
+        "{seen:?}"
+    );
 }

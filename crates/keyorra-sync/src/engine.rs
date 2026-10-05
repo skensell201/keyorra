@@ -62,6 +62,9 @@ pub use outbox::{NoOutboxStore, OutboxState, OutboxStore};
 pub use retire::{DeviceKeys, KeepKeys, RetireReason};
 pub use snapshots::{SNAPSHOT_EVERY_ENTRIES, SNAPSHOT_EVERY_MS};
 
+/// Own confirmed segments kept for "Restore from this Mac" at most (older ones are covered
+/// by the main device's snapshots in practice).
+pub const MAX_OWN_SEGMENTS_KEPT: usize = 10_000;
 /// The main device rewrites its head file at least this often while online.
 pub const ROOT_HEARTBEAT_MS: u64 = 24 * 60 * 60 * 1000;
 /// The main device's head file not advancing for this long, while other streams move on,
@@ -1615,7 +1618,15 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                     }
                     // The first entry of an approved self-joined stream: nothing to do.
                     Entry::SelfJoin { .. } if seq == 1 && !is_root => {}
-                    Entry::Snapshot { .. } => {}
+                    // The main device's snapshot covers this device's own segments up to its
+                    // frontier: restoring them is the main device's job from now on.
+                    Entry::Snapshot { frontier, .. } => {
+                        if is_root {
+                            if let Some(h) = frontier.get(&self.device) {
+                                self.own_segments.retain(|first, _| *first > h.seq);
+                            }
+                        }
+                    }
                     Entry::HeaderSeen { .. } => self.note_header_entry(*stream, seq, &entry),
                     Entry::Header(_) if is_root => self.note_header_entry(*stream, seq, &entry),
                     entry if is_root => self.apply_root_entry(seq, &entry),
@@ -2160,7 +2171,16 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             Ok(stored) => {
                 let stored = stored.unwrap_or(0);
                 let acknowledged = self.acknowledged_rollbacks.contains(&(self.device, stored));
-                if stored < self.sent.seq && !acknowledged {
+                if stored < self.sent.seq
+                    && !acknowledged
+                    && self.snapshot_covers(transport, &self.device, self.sent.seq)
+                {
+                    // The main device's snapshot covers what the store lost: nothing to do.
+                    self.acknowledged_rollbacks.insert((self.device, stored));
+                    self.events.push(Event::RollbackRepaired {
+                        stream: self.device,
+                    });
+                } else if stored < self.sent.seq && !acknowledged {
                     self.raise(Alarm::Rollback {
                         stream: self.device,
                         received: self.sent.seq,
@@ -2219,6 +2239,9 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                 Ok(AppendOutcome::Appended | AppendOutcome::AlreadyThere) => {
                     let first = self.sent.seq + 1;
                     self.own_segments.insert(first, unsent.bytes.clone());
+                    while self.own_segments.len() > MAX_OWN_SEGMENTS_KEPT {
+                        self.own_segments.pop_first();
+                    }
                     self.sent = Head {
                         seq: unsent.last_seq,
                         hash: unsent.last_hash,
