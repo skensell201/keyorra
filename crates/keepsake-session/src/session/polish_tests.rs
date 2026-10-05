@@ -108,3 +108,40 @@ fn start_over_never_moves_a_working_vault() {
         .exists());
     s.unlock(PW, 5_001).unwrap();
 }
+
+#[test]
+fn quick_copy_finds_fields_by_purpose() {
+    let (_dir, mut s) = unlocked_session();
+    let p = personal(&mut s);
+    let mut item = save_login(&mut s, p, "GitHub", "ivan", "hunter2");
+    // Imported logins may use other field ids; purpose is what counts.
+    item.fields[0].id = "imported-user".into();
+    item.fields[1].id = "imported-pass".into();
+    let item = s.save_item(item, 1_000).unwrap();
+    assert_eq!(
+        s.copy_quick(item.id, QuickCopy::Username, 1_000).unwrap(),
+        "ivan"
+    );
+    assert_eq!(
+        s.copy_quick(item.id, QuickCopy::Password, 1_000).unwrap(),
+        "hunter2"
+    );
+    assert!(s.clipboard_pending(), "the clipboard guard is armed");
+    assert_eq!(
+        s.copy_quick(item.id, QuickCopy::Totp, 1_000)
+            .unwrap_err()
+            .kind,
+        ErrorKind::NotFound
+    );
+    let note = s.new_item(p, ItemKind::SecureNote, 1_000).unwrap();
+    let mut note = note;
+    note.title = "Note".into();
+    let note = s.save_item(note, 1_000).unwrap();
+    let err = s
+        .copy_quick(note.id, QuickCopy::Password, 1_000)
+        .unwrap_err();
+    assert_eq!(
+        (err.kind, err.message.as_str()),
+        (ErrorKind::NotFound, "This item has no password")
+    );
+}

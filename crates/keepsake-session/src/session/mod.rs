@@ -35,6 +35,15 @@ pub const MIN_PASSWORD_LEN: usize = 10;
 const MAX_IMPORT_BYTES: u64 = 1 << 30;
 pub const DEFAULT_VAULT: &str = "Personal";
 
+/// What the quick-search window copies.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum QuickCopy {
+    Username,
+    Password,
+    Totp,
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub enum Status {
@@ -583,6 +592,26 @@ impl Session {
         self.clipboard
             .copied(&text, now, self.settings.clipboard_seconds);
         Ok(text)
+    }
+
+    /// Quick search: copies the login's username, password or current one-time code. Fields
+    /// are found by purpose, so imported items with other field ids work too.
+    pub fn copy_quick(&mut self, id: Uuid, what: QuickCopy, now: u64) -> CmdResult<String> {
+        let (purpose, name) = match what {
+            QuickCopy::Totp => return self.copy_value(id, "totp", now),
+            QuickCopy::Username => (Purpose::Username, "username"),
+            QuickCopy::Password => (Purpose::Password, "password"),
+        };
+        let item = self.store()?.get_item(id)?;
+        let field_id = item
+            .fields
+            .iter()
+            .find(|f| f.purpose == Some(purpose))
+            .map(|f| f.id.clone())
+            .ok_or_else(|| {
+                CmdError::new(ErrorKind::NotFound, format!("This item has no {name}"))
+            })?;
+        self.copy_value(id, &field_id, now)
     }
 
     /// Parses a 1Password export (.1pux or .csv) and keeps the plan until `import_apply`.

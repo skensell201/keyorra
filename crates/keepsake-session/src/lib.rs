@@ -12,5 +12,5 @@ pub mod throttle;
 pub mod watchtower;
 
 pub use error::{CmdError, CmdResult, ErrorKind};
-pub use session::{BridgeEvent, PairedBrowser, PairingRequest, Session, Status};
+pub use session::{BridgeEvent, PairedBrowser, PairingRequest, QuickCopy, Session, Status};
 pub use settings::Settings;
