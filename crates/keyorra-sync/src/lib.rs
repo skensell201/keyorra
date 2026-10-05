@@ -17,6 +17,7 @@ pub mod header;
 pub mod keys;
 pub mod labels;
 mod nonce;
+pub mod pack;
 pub mod pad;
 pub mod payload;
 pub mod present;
