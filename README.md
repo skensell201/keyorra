@@ -19,6 +19,11 @@ unlocks with Touch ID. The core is written in Rust, the app is built with Tauri.
 
 Website: [keyorra.com](https://keyorra.com)
 
+<p align="center">
+  <img src="docs/assets/screenshots/item.png" alt="Keyorra: a login with a one-time code" width="49%">
+  <img src="docs/assets/screenshots/watchtower.png" alt="Keyorra: Watchtower" width="49%">
+</p>
+
 ## Features
 
 - **Vaults and items**: logins, credit cards, identities and secure notes, with favorites,
