@@ -117,7 +117,7 @@ fn an_edit_beats_a_concurrent_delete() {
 }
 
 #[test]
-fn a_purge_is_final_but_a_concurrent_edit_survives_as_a_copy() {
+fn a_concurrent_edit_beats_a_purge_and_keeps_its_id() {
     let (mut c, vault) = shared(2);
     c.devices[0].trash_item(ITEM, 100, c.clocks[0]).unwrap();
     c.heal();
@@ -134,10 +134,121 @@ fn a_purge_is_final_but_a_concurrent_edit_survives_as_a_copy() {
     c.heal();
     c.assert_converged();
     let view = c.devices[0].view();
-    assert_eq!(view.items[&ITEM].state, ItemState::Purged);
-    let copies = view.conflict_copies();
-    assert_eq!(copies.len(), 1);
-    assert_eq!(title(&view, copies[0]), "still needed");
+    assert_eq!(view.items[&ITEM].state, ItemState::Live);
+    assert_eq!(title(&view, ITEM), "still needed");
+    assert!(view.conflict_copies().is_empty());
+}
+
+#[test]
+fn a_restore_beats_a_concurrent_purge() {
+    let (mut c, _) = shared(2);
+    c.devices[0].trash_item(ITEM, 100, c.clocks[0]).unwrap();
+    c.heal();
+    c.clocks[0] += 10_000; // the purge is the later write
+    c.devices[0].purge_item(ITEM, c.clocks[0]).unwrap();
+    c.devices[1].restore_item(ITEM, c.clocks[1]).unwrap();
+    c.heal();
+    c.assert_converged();
+    let view = c.devices[0].view();
+    assert_eq!(view.items[&ITEM].state, ItemState::Live);
+    assert_eq!(title(&view, ITEM), "base");
+}
+
+/// Serves one stream only up to a sequence number.
+struct Upto<'a> {
+    inner: &'a crate::transport::MemoryTransport,
+    stream: DeviceId,
+    last_seq: u64,
+}
+
+impl Transport for Upto<'_> {
+    fn streams(&self) -> Result<Vec<DeviceId>> {
+        self.inner.streams()
+    }
+    fn segments(&self, stream: &DeviceId, after: u64) -> Result<Vec<Fetched<Vec<u8>>>> {
+        let all = self.inner.segments(stream, after)?;
+        if *stream != self.stream {
+            return Ok(all);
+        }
+        Ok(all
+            .into_iter()
+            .filter(|f| match f {
+                Fetched::Ready(b) => {
+                    SegmentHeader::parse(b).is_ok_and(|h| h.last_seq <= self.last_seq)
+                }
+                _ => true,
+            })
+            .collect())
+    }
+    fn append(&self, segment: &[u8]) -> Result<AppendOutcome> {
+        self.inner.append(segment)
+    }
+}
+
+#[test]
+fn a_deleted_copy_stays_deleted_when_another_device_also_wrote_it() {
+    let (mut c, vault) = shared(2);
+    let (a, b) = (device_id(0), device_id(1));
+    // Both edit and push without seeing each other.
+    c.devices[0]
+        .save_item(
+            vault,
+            ITEM,
+            &Cluster::item_json(ITEM, "A", &[]),
+            c.clocks[0],
+        )
+        .unwrap();
+    c.devices[1]
+        .save_item(
+            vault,
+            ITEM,
+            &Cluster::item_json(ITEM, "B", &[]),
+            c.clocks[1],
+        )
+        .unwrap();
+    let a_head = c.devices[0].sent.0;
+    let b_head = c.devices[1].sent.0;
+    let only_own_a = Upto {
+        inner: &c.store,
+        stream: b,
+        last_seq: b_head,
+    };
+    c.devices[0]
+        .sync(&only_own_a, &c.directory, c.clocks[0])
+        .unwrap();
+    let only_own_b = Upto {
+        inner: &c.store,
+        stream: a,
+        last_seq: a_head,
+    };
+    c.devices[1]
+        .sync(&only_own_b, &c.directory, c.clocks[1])
+        .unwrap();
+    // Each now sees the other's edit (and nothing else) and writes the same copy.
+    let a_view = Upto {
+        inner: &c.store,
+        stream: b,
+        last_seq: b_head + 1,
+    };
+    c.devices[0]
+        .sync(&a_view, &c.directory, c.clocks[0])
+        .unwrap();
+    let b_view = Upto {
+        inner: &c.store,
+        stream: a,
+        last_seq: a_head + 1,
+    };
+    c.devices[1]
+        .sync(&b_view, &c.directory, c.clocks[1])
+        .unwrap();
+    let copy = c.devices[0].view().conflict_copies()[0];
+    assert_eq!(c.devices[1].view().conflict_copies(), vec![copy]);
+    // A deletes the copy for good; B's own copy must not bring it back.
+    c.devices[0].trash_item(copy, 1, c.clocks[0]).unwrap();
+    c.devices[0].purge_item(copy, c.clocks[0]).unwrap();
+    c.heal();
+    c.assert_converged();
+    assert_eq!(c.devices[0].view().items[&copy].state, ItemState::Purged);
 }
 
 #[test]

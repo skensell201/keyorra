@@ -200,7 +200,9 @@ is accepted but does not move the local clock (and is logged).
 
 A new version of record `r` by device `D`: `vector = join(vectors of r's siblings)` with
 `vector[D] = max(that, D's previous counter for r) + 1`. An edit sets the item's
-`content_from` to the new vector; trashing and restoring keep the previous `content_from`.
+`content_from` to the new vector; trashing and restoring keep the previous `content_from`
+(an empty one, from a first copy, becomes the vector of the version being trashed or
+restored).
 
 ### 9.3 Validation
 
@@ -227,12 +229,14 @@ changes (section 10).
 Ranks: `(hlc, author)` compared as `(u64, bytes16)`, higher wins.
 
 **Items.** A sibling is *live* (no `deleted_at`), *trashed* (`deleted_at` set) or *purged*
-(tombstone). It is *stale* when another sibling that is a tombstone or has a different
-`content_from` has a vector covering (≥ in every entry) its `content_from`. Siblings are ordered fresh before stale, then by rank. Shown: the first
-purged sibling if any; else the first live one; else the first trashed one. Every other
-sibling becomes a conflict copy unless it is stale, its content equals content already shown
-(the shown sibling's or an earlier copy's; JSON values compared without `updated_at`), or
-(with a purge shown) it is trashed. A trashed sibling's copy keeps its `deleted_at`.
+(tombstone). A *first copy* (item payload with an empty `content_from`) is left out when the
+record has any other sibling. Among the rest, a sibling is *stale* when another sibling that
+is a tombstone or has a different `content_from` has a vector covering (≥ in every entry) its
+`content_from`. Siblings are ordered fresh before stale, then by rank. Shown: the first live
+sibling if any; else the first purged one; else the first trashed one. Every other sibling
+becomes a conflict copy unless it is stale, its content equals content already shown (the
+shown sibling's or an earlier copy's; JSON values compared without `updated_at`), or (with a
+purge shown) it is trashed. A trashed sibling's copy keeps its `deleted_at`.
 
 **Vaults.** Shown: the highest-ranked sibling's payload. It counts as deleted only if it is
 `deleted` and no live item has this vault; otherwise a `deleted` vault is shown as revived.
@@ -256,8 +260,9 @@ replaced by its copy attachment id with `"copied_from"` = the original id. The t
 changed.
 
 A device whose fold shows a copy that does not exist as a record writes, before its next user
-edit: each missing copy (a new record; `content_from` = its own version), then a version of
-`r` with the shown sibling's content and `content_from` (or a tombstone if `r` is purged).
+edit: each missing copy (a new record; empty `content_from`), then a version of `r` with the
+shown sibling's content and `content_from` (an empty one replaced by the shown sibling's
+vector), or a tombstone if `r` is purged.
 For each attachment reference with `copied_from` in a shown copy whose record does not exist,
 a device that has the original attachment live writes it: the original payload with
 `item_id` = the copy.

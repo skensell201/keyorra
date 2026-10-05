@@ -391,17 +391,24 @@ impl Fold {
                             item_json: copy_item_json(source, c.copy_id, &marker, &map)
                                 .expect("item payloads are JSON objects"),
                             deleted_at: if c.trashed { source.deleted_at } else { None },
-                            // Filled with the copy's own version when it is written.
+                            // Empty: marks the copy as first written (spec §3.5).
                             content_from: Vector::new(),
                         },
                     }
                 })
                 .collect();
             if !copies.is_empty() {
+                let mut collapse = visible.doc.clone();
+                if let Doc::Item(p) = &mut collapse {
+                    if p.content_from.is_empty() {
+                        // A copy as first written: its content originates in that version.
+                        p.content_from = visible.version.vector.clone();
+                    }
+                }
                 view.resolutions.push(Resolution {
                     record_id: *id,
                     copies,
-                    collapse: visible.doc.clone(),
+                    collapse,
                     vault_id: visible.vault_id,
                 });
             }

@@ -249,15 +249,20 @@ next to a third concurrent edit; found by review of A1b). (Revised while
 planning A1b: comparing a trashed sibling's content with the *concurrent* edit cannot tell a
 pure delete from an edit-then-delete, because a pure delete carries the old content.)
 
-1. Any purged sibling: the item stays purged (ids never come back). Every live sibling that
-   is not stale becomes a live copy. Trashed siblings are dropped (the user meant to delete
-   them).
-2. Else any live sibling: the visible item is the best live sibling, where "best" prefers
-   fresh over stale, then the higher `(hlc, author)`. So an edit beats a concurrent delete
-   and a concurrent pure restore. Every other sibling that is not stale and whose content is
-   not already shown becomes a copy: live siblings as live copies, trashed ones (edited, then
-   trashed, concurrently with an edit elsewhere) as copies **in Recently Deleted**, so the
-   edit is not lost and the delete is still honoured.
+A conflict copy as first written has an empty `content_from`. Such a **first copy** is left
+out whenever its record has other siblings: another device wrote the same copy, or the copy
+has been edited or deleted since (so a deleted copy does not come back because a second
+device also wrote it).
+
+1. Any live sibling: the visible item is the best live sibling, where "best" prefers fresh
+   over stale, then the higher `(hlc, author)`. An edit **or a restore** beats a concurrent
+   trash **and a concurrent purge**, explicit or automatic, and keeps the item's id (revised
+   after the A1b review: purges no longer win over live versions; a purge only removes what
+   nobody concurrently kept). Every other sibling that is not stale and whose content is not
+   already shown becomes a copy: live siblings as live copies, trashed ones (edited, then
+   trashed, concurrently with an edit elsewhere) as copies **in Recently Deleted**.
+2. Else any purged sibling: the item stays purged. Trashed siblings are dropped (the user
+   meant to delete them).
 3. Else all trashed: the visible item is the best trashed sibling; others that are not stale
    and have different content become trashed copies.
 
@@ -276,18 +281,20 @@ invented "join author".
 **Materialising copies.** Any device whose fold yields a copy id that does not yet exist as
 a record writes, at the end of every pull (also when the pull failed part of the way) and
 again before any item edit (which is refused if the copies cannot be written): each such copy as a
-new record (its `content_from` is its own version), then a collapsing write of the original
-(content and `content_from` of the visible sibling, vector = join + 1). Two devices doing
-this concurrently produce copies with equal content and collapsing versions that are stale
-against each other, which yield no further copies, so no more writes follow: the process
-terminates. A copy that the user later deletes stays deleted (a record with that id exists,
+new record (with an empty `content_from`: a first copy), then a collapsing write of the
+original (content and `content_from` of the visible sibling, vector = join + 1). Two devices
+doing this concurrently produce first copies of which one is shown, and collapsing versions
+with the same content, which yield no further copies, so no more writes follow: the process
+terminates. Trashing or restoring a first copy sets its `content_from` to the first copy's
+version. A copy that the user later deletes stays deleted (a record with that id exists,
 so it is not materialised again).
 
 Conflict copies show a badge in the item list; Watchtower gets a **Sync conflicts**
 section; the item detail offers "Keep this version" (copies content into the original,
 deletes the copy) and "Delete this copy", both ordinary syncing edits.
 
-**Vaults.** A vault version carries name, icon, the wrapped vault key and `deleted`, so a
+**Vaults.** A vault version carries the name, the wrapped vault key and `deleted` (no icon:
+the local vault has none either), so a
 deleted vault still has everything needed to show or revive it. Visible version = sibling
 with the highest `(hlc, author)`. If it is deleted but the fold holds live items in that
 vault, the vault is shown live (with that version's name) and the Sync log says "'Work'

@@ -218,9 +218,9 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         let doc = Doc::Item(ItemPayload {
             item_json: Zeroizing::new(item_json.to_vec()),
             deleted_at: None,
-            content_from: Default::default(), // this write: filled in by `write`
+            content_from: Default::default(), // this write: set by `write_with`
         });
-        self.write(RecordKind::Item, id, Some(vault_id), doc, wall_ms)
+        self.write_with(RecordKind::Item, id, Some(vault_id), doc, wall_ms, true)
     }
 
     pub fn trash_item(&mut self, id: Uuid, at_secs: u64, wall_ms: u64) -> Result<()> {
@@ -301,12 +301,24 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             .set(RecordKind::Item, id)
             .ok_or_else(|| Error::NotFound(format!("item {id}")))?;
         let p = present_item(id, set);
-        match (p.state == want, p.visible.map(|v| (&v.doc, v.vault_id))) {
-            (true, Some((Doc::Item(payload), vault_id))) => Ok((vault_id, payload.clone())),
+        match (p.state == want, p.visible) {
+            (true, Some(v)) => match &v.doc {
+                Doc::Item(payload) => {
+                    let mut payload = payload.clone();
+                    if payload.content_from.is_empty() {
+                        // A copy as first written: its content originates in that version.
+                        payload.content_from = v.version.vector.clone();
+                    }
+                    Ok((v.vault_id, payload))
+                }
+                _ => Err(Error::NotFound(format!("item {id} in state {want:?}"))),
+            },
             _ => Err(Error::NotFound(format!("item {id} in state {want:?}"))),
         }
     }
 
+    /// A write that keeps the payload's `content_from` (trash, restore, collapse, and copies
+    /// as first written, whose empty `content_from` marks them; spec §3.5).
     fn write(
         &mut self,
         kind: RecordKind,
@@ -315,11 +327,24 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         doc: Doc,
         wall_ms: u64,
     ) -> Result<()> {
+        self.write_with(kind, id, vault_id, doc, wall_ms, false)
+    }
+
+    /// `edit`: the item's content changes here, so `content_from` becomes the new version.
+    fn write_with(
+        &mut self,
+        kind: RecordKind,
+        id: Uuid,
+        vault_id: Option<Uuid>,
+        doc: Doc,
+        wall_ms: u64,
+        edit: bool,
+    ) -> Result<()> {
         let hlc = self.hlc.tick(wall_ms);
         let version = self.fold.next_version(kind, id, self.device, hlc);
         let mut doc = doc;
         if let Doc::Item(p) = &mut doc {
-            if p.content_from.is_empty() {
+            if edit {
                 p.content_from = version.vector.clone();
             }
         }

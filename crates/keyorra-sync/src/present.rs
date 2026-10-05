@@ -71,23 +71,34 @@ fn state(s: &Sibling) -> ItemState {
     }
 }
 
-/// Spec §3.5 for items. A sibling is *stale* when another sibling with a different content
-/// origin (or a tombstone) has seen its content (its `content_from` is covered by that
-/// sibling's version): it only trashed or restored content that the other side then replaced
-/// or deleted.
+/// Spec §3.5 for items.
 ///
-/// Shown: a purge if there is one (purge is final), else the best live sibling (an edit beats a
-/// delete), else the best trashed one, where "best" prefers fresh over stale siblings, then the
-/// higher HLC, then the higher author id. Every other sibling becomes a copy unless it is stale
-/// or its content is already shown. With a purge, only live siblings can become copies.
+/// A *first copy* is the version a device wrote when it materialised a conflict copy (empty
+/// `content_from`); when other siblings exist it is redundant (another device wrote the same
+/// copy, or the copy was edited or deleted since) and is left out.
+///
+/// A sibling is *stale* when another sibling with a different content origin (or a tombstone)
+/// has seen its content (its `content_from` is covered by that sibling's version): it only
+/// trashed or restored content that the other side then replaced or deleted.
+///
+/// Shown: the best live sibling if there is one (an edit or a restore beats a concurrent trash
+/// or purge), else a purge, else the best trashed sibling; "best" prefers fresh over stale,
+/// then the higher HLC, then the higher author id. Every other sibling becomes a copy unless
+/// it is stale or its content is already shown. With a purge shown, trashed siblings are
+/// dropped.
 pub fn present_item(record_id: Uuid, set: &SiblingSet) -> ItemPresentation<'_> {
+    let first_copy = |s: &Sibling| payload(s).is_some_and(|p| p.content_from.is_empty());
+    let mut pool: Vec<&Sibling> = set.siblings().iter().filter(|s| !first_copy(s)).collect();
+    if pool.is_empty() {
+        pool = set.siblings().iter().collect();
+    }
     // `o` covers `s` when it has seen `s`'s content and carries other content (or none): two
     // versions with the same content origin never cover each other, or two devices that both
     // collapsed the same conflict would hide each other next to a third edit.
     let stale = |s: &Sibling| {
         payload(s).is_some_and(|p| {
-            set.siblings().iter().any(|o| {
-                !std::ptr::eq(o, s)
+            pool.iter().any(|o| {
+                !std::ptr::eq(*o, s)
                     && payload(o).is_none_or(|q| q.content_from != p.content_from)
                     && matches!(
                         compare(&p.content_from, &o.version.vector),
@@ -96,16 +107,16 @@ pub fn present_item(record_id: Uuid, set: &SiblingSet) -> ItemPresentation<'_> {
             })
         })
     };
-    let mut by_rank: Vec<&Sibling> = set.siblings().iter().collect();
+    let mut by_rank = pool.clone();
     by_rank.sort_by_key(|s| std::cmp::Reverse((!stale(s), s.rank())));
     let first = |st: ItemState| by_rank.iter().copied().find(|s| state(s) == st);
     let (shown_state, visible) = match (
-        first(ItemState::Purged),
         first(ItemState::Live),
+        first(ItemState::Purged),
         first(ItemState::Trashed),
     ) {
-        (Some(p), _, _) => (ItemState::Purged, p),
-        (None, Some(l), _) => (ItemState::Live, l),
+        (Some(l), _, _) => (ItemState::Live, l),
+        (None, Some(p), _) => (ItemState::Purged, p),
         (None, None, Some(t)) => (ItemState::Trashed, t),
         (None, None, None) => {
             return ItemPresentation {
@@ -391,24 +402,80 @@ mod tests {
     }
 
     #[test]
-    fn purge_is_final_and_live_edits_become_copies() {
+    fn a_live_version_beats_a_concurrent_purge() {
+        // B edited while A purged: the edit keeps the item, under its own id, without a copy.
         let s = set(vec![
-            sib(A, 1, &[(C, 2), (A, 1)], Doc::Tombstone),
-            edit(B, 9, &[(C, 2), (B, 1)], "b"),
+            sib(A, 9, &[(C, 2), (A, 1)], Doc::Tombstone),
+            edit(B, 1, &[(C, 2), (B, 1)], "b"),
             sib(C, 5, &[(C, 3)], item("c", Some(3), &[(C, 3)])),
         ]);
         assert_eq!(
             summary(&present_item(ID, &s)),
-            (ItemState::Purged, Some(A), vec![(B, false)])
+            (ItemState::Live, Some(B), vec![(C, true)])
         );
-        // A restore without an edit, concurrent with the purge, leaves nothing to keep.
+        // An explicit restore beats a concurrent (automatic or explicit) purge.
+        let s = set(vec![
+            sib(A, 9, &[(C, 2), (A, 1)], Doc::Tombstone),
+            sib(B, 1, &[(C, 2), (B, 1)], item("base", None, &[(C, 1)])),
+        ]);
+        assert_eq!(
+            summary(&present_item(ID, &s)),
+            (ItemState::Live, Some(B), vec![])
+        );
+        // A purge beats a concurrent trash; the trash is dropped.
         let s = set(vec![
             sib(A, 1, &[(C, 2), (A, 1)], Doc::Tombstone),
-            sib(B, 9, &[(C, 2), (B, 1)], item("base", None, &[(C, 1)])),
+            sib(
+                B,
+                9,
+                &[(C, 2), (B, 1)],
+                item("edited", Some(5), &[(C, 2), (B, 1)]),
+            ),
         ]);
         assert_eq!(
             summary(&present_item(ID, &s)),
             (ItemState::Purged, Some(A), vec![])
+        );
+    }
+
+    /// A copy as a device first writes it: empty `content_from`.
+    fn first_copy(author: [u8; 16], hlc: u64) -> Sibling {
+        sib(author, hlc, &[(author, 1)], item("copy", None, &[]))
+    }
+
+    #[test]
+    fn copies_written_by_two_devices_are_one_copy() {
+        let s = set(vec![first_copy(A, 1), first_copy(B, 2)]);
+        assert_eq!(
+            summary(&present_item(ID, &s)),
+            (ItemState::Live, Some(B), vec![])
+        );
+    }
+
+    #[test]
+    fn a_deleted_copy_does_not_come_back_from_another_devices_materialisation() {
+        // A wrote the copy, then trashed and purged it; B wrote the same copy concurrently.
+        let s = set(vec![sib(A, 3, &[(A, 3)], Doc::Tombstone), first_copy(B, 1)]);
+        assert_eq!(
+            summary(&present_item(ID, &s)),
+            (ItemState::Purged, Some(A), vec![])
+        );
+        let s = set(vec![
+            sib(A, 2, &[(A, 2)], item("copy", Some(9), &[(A, 1)])),
+            first_copy(B, 5),
+        ]);
+        assert_eq!(
+            summary(&present_item(ID, &s)),
+            (ItemState::Trashed, Some(A), vec![])
+        );
+    }
+
+    #[test]
+    fn an_edited_copy_beats_another_devices_materialisation() {
+        let s = set(vec![edit(A, 2, &[(A, 2)], "fixed"), first_copy(B, 9)]);
+        assert_eq!(
+            summary(&present_item(ID, &s)),
+            (ItemState::Live, Some(A), vec![])
         );
     }
 

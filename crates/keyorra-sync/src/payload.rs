@@ -27,7 +27,7 @@ pub struct ItemPayload {
     pub deleted_at: Option<u64>,
     /// The version vector of the write that last changed `item_json`. Trashing and restoring
     /// keep it; an edit sets it to its own vector. Lets the fold tell a pure delete or restore
-    /// from an edit (spec §3.5). Empty only before [`Engine`](crate::engine) fills it in.
+    /// from an edit (spec §3.5). Empty for a conflict copy as first written.
     pub content_from: Vector,
 }
 
@@ -142,7 +142,7 @@ impl Doc {
                 for (device, n) in f.get("content_from")?.as_map()? {
                     content_from.insert(device.as_array_of()?, n.as_uint()?);
                 }
-                if content_from.is_empty() || content_from.values().any(|n| *n == 0) {
+                if content_from.values().any(|n| *n == 0) {
                     return Err(malformed("item content_from"));
                 }
                 Doc::Item(ItemPayload {
@@ -363,11 +363,19 @@ mod tests {
             Doc::decode(RecordKind::Item, &not_object),
             Err(Error::Malformed(_))
         ));
-        let mut no_origin = item("{}", None);
-        no_origin.content_from.clear();
-        let no_origin = Doc::Item(no_origin).encode();
+        // An empty content_from (a copy as first written) is fine; a zero entry is not.
+        let mut first_copy = item("{}", None);
+        first_copy.content_from.clear();
+        let first_copy = Doc::Item(first_copy);
+        assert_eq!(
+            Doc::decode(RecordKind::Item, &first_copy.encode()).unwrap(),
+            first_copy
+        );
+        let mut zero = item("{}", None);
+        zero.content_from.insert([2; 16], 0);
+        let zero = Doc::Item(zero).encode();
         assert!(matches!(
-            Doc::decode(RecordKind::Item, &no_origin),
+            Doc::decode(RecordKind::Item, &zero),
             Err(Error::Malformed(_))
         ));
     }
