@@ -20,7 +20,6 @@ pub enum Error {
 
 pub type Result<T> = std::result::Result<T, Error>;
 
-#[allow(dead_code)] // used from Task 3 on
 pub(crate) fn malformed(what: impl Into<String>) -> Error {
     Error::Malformed(what.into())
 }

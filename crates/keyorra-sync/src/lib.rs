@@ -2,6 +2,7 @@
 //! Randomness (nonces, keys) is passed in by the caller so every format is reproducible
 //! from the test vectors in `docs/sync-test-vectors/`.
 
+pub mod cbor;
 pub mod error;
 pub mod labels;
 
