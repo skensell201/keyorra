@@ -7,6 +7,7 @@ pub mod chunk;
 pub mod clock;
 pub mod envelope;
 pub mod error;
+pub mod fold;
 pub mod header;
 pub mod keys;
 pub mod labels;
