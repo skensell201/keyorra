@@ -232,34 +232,48 @@ are not thrown away when they leave the sibling set:
 ### 3.5 Presentation: what the user sees
 
 **Items.** Classify the siblings of an item: *live* (no `deleted_at`), *trashed*
-(`deleted_at` set), *purged* (tombstone, no body). "Same content" compares the item's
-canonical JSON without `updated_at` and `deleted_at`.
+(`deleted_at` set), *purged* (tombstone, no body). "Same content" compares the item's JSON
+values without `updated_at` (`deleted_at` is outside the JSON).
 
-1. Any purged sibling: the item stays purged (ids never come back). Every live sibling
-   becomes a live copy. Trashed siblings are dropped (the user meant to delete them).
-2. Else any live sibling: the visible item is the live sibling with the highest
-   `(hlc, author)`. Every other live sibling with different content becomes a live copy.
-   A trashed sibling whose content equals some live sibling is dropped (pure delete; edit
-   wins). A trashed sibling with content of its own (edited, then trashed, concurrently
-   with an edit elsewhere) becomes a copy **in Recently Deleted**, so its edit is not lost
-   and the delete is still honoured.
-3. Else all trashed: the visible item is the trashed sibling with the highest
-   `(hlc, author)`; others with different content become trashed copies.
+Every item version also carries `content_from`: the version vector of the write that last
+changed its content. An edit sets it to its own vector; trashing and restoring keep it. A
+sibling is **stale** when another sibling's version covers its `content_from`: it only
+trashed or restored content that the other side then kept or replaced. (Revised while
+planning A1b: comparing a trashed sibling's content with the *concurrent* edit cannot tell a
+pure delete from an edit-then-delete, because a pure delete carries the old content.)
+
+1. Any purged sibling: the item stays purged (ids never come back). Every live sibling that
+   is not stale becomes a live copy. Trashed siblings are dropped (the user meant to delete
+   them).
+2. Else any live sibling: the visible item is the best live sibling, where "best" prefers
+   fresh over stale, then the higher `(hlc, author)`. So an edit beats a concurrent delete
+   and a concurrent pure restore. Every other sibling that is not stale and whose content is
+   not already shown becomes a copy: live siblings as live copies, trashed ones (edited, then
+   trashed, concurrently with an edit elsewhere) as copies **in Recently Deleted**, so the
+   edit is not lost and the delete is still honoured.
+3. Else all trashed: the visible item is the best trashed sibling; others that are not stale
+   and have different content become trashed copies.
 
 A copy of sibling `s`: id = `UUIDv8(SHA-256("keyorra/sync/v1/conflict-copy\0" ‖ record_id
-‖ version_hash(s))[0..16])`, title `"<title> (conflict from <name of s.author>)"`, item
-field `conflict = { of: record_id, version: version_hash(s), from_device: s.author }`, same
-vault, attachments referencing new attachment records that reuse the same chunks and
-attachment keys (§3.6). Each copy derives from its sibling's *own* version, so the result
-is the same on every device and there is no invented "join author".
+‖ version_hash(s))[0..16])`, item field `conflict = { of: record_id, version:
+version_hash(s), from_device: s.author }`, same vault. The stored title is unchanged; the app
+shows "(conflict from <device name>)" from the marker, because device names can differ
+between devices at the moment of writing and the copy must be byte-identical everywhere.
+Its attachment references point to new ids `UUIDv8(SHA-256("keyorra/sync/v1/conflict-copy\0"
+‖ copy_id ‖ attachment_id)[0..16])` and keep `copied_from = attachment_id`; any device that
+knows the original attachment record writes the copy's attachment record (same key and
+chunks, `item_id` = the copy), so a copy never waits for an attachment. Each copy derives
+from its sibling's *own* version, so the result is the same on every device and there is no
+invented "join author".
 
-**Materialising copies.** The first device whose fold yields a copy id that does not yet
-exist as a record writes, in one segment: each such copy as a new record (version
-`{D: 1}`), and a collapsing write of the original (content = the visible sibling, vector =
-join + 1). Two devices doing this concurrently produce content-equal siblings, which yield
-no further copies, so no more writes follow: the process terminates. A copy that the user
-later deletes stays deleted (a record with that id exists, so it is not materialised
-again).
+**Materialising copies.** Any device whose fold yields a copy id that does not yet exist as
+a record writes, at the end of the pull and before the next user edit: each such copy as a
+new record (its `content_from` is its own version), then a collapsing write of the original
+(content and `content_from` of the visible sibling, vector = join + 1). Two devices doing
+this concurrently produce copies with equal content and collapsing versions that are stale
+against each other, which yield no further copies, so no more writes follow: the process
+terminates. A copy that the user later deletes stays deleted (a record with that id exists,
+so it is not materialised again).
 
 Conflict copies show a badge in the item list; Watchtower gets a **Sync conflicts**
 section; the item detail offers "Keep this version" (copies content into the original,
@@ -987,8 +1001,9 @@ Each line becomes one implementation plan in `docs/superpowers/plans/`.
 | Plan | Content | Done when |
 |---|---|---|
 | **A1a** Keys and formats | HKDF derivations, labels, canonical CBOR, Padmé, envelopes, chunks, segment/snapshot/header framing, test vectors, `docs/sync-protocol.md` draft | Suite 1 green; protocol draft reviewed |
-| **A1b** Fold | Versions/HLC, sibling sets, presentation, conflict copies and materialisation, `MemoryTransport`, property tests; store migration v2, single change path, `Item.extra` | Suites 2, 4 (single stream trust stubbed), 6 (fold part), 11 green |
-| **A1c** Streams and trust | Entries, chains, signatures, Keychain device key, endorsement, SelfJoin, revocation and re-fold, acceptance rule, causal delivery, headers, snapshots (bootstrap, restore), clone detection, fault transports | Suites 3, 5, 6 green |
+| **A1b** Fold | Versions/HLC, validation, payloads, sibling sets, presentation, conflict copies and materialisation, the fold with an admission hook, a first engine (`Put` entries only, fixed device directory), `MemoryTransport`, fault-injecting transport, property tests | Suites 2, 4 (trust stubbed), 5 (transient faults), 6 green |
+| **A1c** Streams and trust | Entry types, Keychain device key, endorsement, SelfJoin, revocation and re-fold, acceptance rule, causal delivery, headers, snapshots (bootstrap, restore), clone detection, rollback/fork faults | Suites 3, 5, 6 green |
+| **A1d** Store integration | Store migration v2, single change path, `Item.extra` and the `conflict` field, the engine reading from and writing to the local store | Suite 11 green; a vault survives enable → edit → sync → restart |
 | **A2** Folder transport | `keyorra-sync-fs`: layout, temp-outside-tree writes, strict reading, iCloud/File Provider download state, `NSFileCoordinator`, FSEvents + poll, deadlines, `keyorra-inspect` | Suite 7 green; two processes on one folder converge |
 | **A3** UI | Enable/join/leave, Emergency Kit, setup code, folder-based approval, Sync screen, conflicts in list/detail/Watchtower, alarms | Suite 10 (folder) green; manual two-Mac iCloud test |
 | **B1** Server | Schema, API, auth, approval exchange, SSE, limits, quotas, TLS modes, logs, admin CLI, backup/restore/check | Suite 8 green |
