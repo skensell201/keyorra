@@ -204,6 +204,10 @@ pub struct Synced<T: Transport> {
     /// A round read the store since this started: before that the engine's view may lack
     /// what a local change refers to (a joining device knows no vault yet).
     caught_up: bool,
+    /// Attachments whose chunks did not open, by the chunks named (not read again).
+    unopenable: BTreeSet<(Uuid, Vec<[u8; 32]>)>,
+    /// Size of the chunks new attachments are cut into (tests make it small).
+    chunk_size: usize,
 }
 
 fn random_id() -> [u8; 16] {
@@ -250,11 +254,52 @@ pub fn account_id(store: &Store) -> Result<AccountId> {
 /// Whether `transport` holds an account whose header names this Secret Key id (choosing the
 /// account folder to join without trying the password on each, plan A2).
 pub fn holds_account<T: Transport>(transport: &T, secret_key_id: &str) -> Result<bool> {
-    Ok(transport.headers()?.into_iter().any(|(_, f)| match f {
-        Fetched::Ready(bytes) => keyorra_sync::header::HeaderFile::decode(&bytes)
-            .is_ok_and(|h| h.header.secret_key_id == secret_key_id),
-        _ => false,
-    }))
+    Ok(matches!(
+        find_account(transport, secret_key_id)?,
+        AccountMatch::Account(_)
+    ))
+}
+
+/// What a folder says about a Secret Key id.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AccountMatch {
+    /// A header names it, of this account.
+    Account(AccountId),
+    /// No header names it, but some header file is not on this device yet.
+    Downloading,
+    None,
+}
+
+/// Which account of `transport` a Secret Key id belongs to, from its header files.
+pub fn find_account<T: Transport>(transport: &T, secret_key_id: &str) -> Result<AccountMatch> {
+    let mut downloading = false;
+    for (_, f) in transport.headers()? {
+        match f {
+            Fetched::Ready(bytes) => {
+                if let Ok(h) = keyorra_sync::header::HeaderFile::decode(&bytes) {
+                    if h.header.secret_key_id == secret_key_id {
+                        return Ok(AccountMatch::Account(h.header.account_id));
+                    }
+                }
+            }
+            Fetched::Pending => downloading = true,
+            Fetched::Missing => {}
+        }
+    }
+    Ok(if downloading {
+        AccountMatch::Downloading
+    } else {
+        AccountMatch::None
+    })
+}
+
+/// Whether the account in `transport` opens with this unlock (and pin).
+pub fn opens<T: Transport>(
+    transport: &T,
+    pin: Option<&RootPin>,
+    unlock: impl FnMut(&Header) -> Result<Key>,
+) -> Result<()> {
+    open_account(transport, pin, unlock).map(drop)
 }
 
 /// Every live attachment of the store, as changes (written unless sync has them).
@@ -364,6 +409,8 @@ pub fn enable<T: Transport>(
         config,
         base: None,
         caught_up: false,
+        unopenable: BTreeSet::new(),
+        chunk_size: keyorra_sync::chunk::MAX_CHUNK,
     };
     synced.commit(store)?;
     // Attachment contents go through the normal path (chunks first, then the record).
@@ -570,6 +617,8 @@ fn join_store<T: Transport>(
             config,
             base,
             caught_up: false,
+            unopenable: BTreeSet::new(),
+            chunk_size: keyorra_sync::chunk::MAX_CHUNK,
         };
         if let Some(base) = &synced.base {
             // What changed here while sync was off is written once the device may write.
@@ -658,6 +707,8 @@ pub fn resume<T: Transport>(
         config,
         base: merge::load_base(store)?,
         caught_up: false,
+        unopenable: BTreeSet::new(),
+        chunk_size: keyorra_sync::chunk::MAX_CHUNK,
     })
 }
 
@@ -687,6 +738,14 @@ impl<T: Transport> Synced<T> {
     /// One round: write the local changes, sync, show the result in the store, persist.
     /// The engine's state is persisted whatever else fails.
     pub fn round(&mut self, store: &mut Store, wall_ms: u64) -> Result<RoundReport> {
+        // The whole round shares one time budget, which ends with it (review A2 I1).
+        self.transport.begin_round();
+        let result = self.round_inner(store, wall_ms);
+        self.transport.end_round();
+        result
+    }
+
+    fn round_inner(&mut self, store: &mut Store, wall_ms: u64) -> Result<RoundReport> {
         let mut report = RoundReport::default();
         let before = self.write_changes(store, wall_ms, &mut report);
         let synced = self.engine.sync(&self.transport, wall_ms);
@@ -888,7 +947,7 @@ impl<T: Transport> Synced<T> {
                         item.id,
                         &name,
                         &bytes,
-                        keyorra_sync::chunk::MAX_CHUNK,
+                        self.chunk_size,
                     )?;
                     for chunk in &chunks {
                         self.transport.put_chunk(chunk)?;
@@ -923,26 +982,46 @@ impl<T: Transport> Synced<T> {
             if store.item_state(payload.item_id)?.is_none() {
                 continue;
             }
+            if self.unopenable.contains(&(*id, payload.chunks.clone())) {
+                failed.push((*id, "the attachment's content does not open".to_owned()));
+                continue;
+            }
+            // First whether every chunk is here (missing ones are asked for, all at once),
+            // then read them, each once (review A2 I6).
+            let mut waiting = None;
+            for name in &payload.chunks {
+                match self
+                    .transport
+                    .chunk_state(&data_encoding::HEXLOWER.encode(name))
+                {
+                    Ok(Fetched::Ready(())) => {}
+                    Ok(_) => {
+                        waiting.get_or_insert_with(|| {
+                            "waiting for the attachment's content".to_owned()
+                        });
+                    }
+                    Err(e) => waiting = Some(e.to_string()),
+                }
+            }
+            if let Some(why) = waiting {
+                failed.push((*id, why));
+                continue;
+            }
             let mut chunks = Vec::with_capacity(payload.chunks.len());
-            let mut waiting = false;
             for name in &payload.chunks {
                 match self
                     .transport
                     .get_chunk(&data_encoding::HEXLOWER.encode(name))
                 {
                     Ok(Fetched::Ready(bytes)) => chunks.push(bytes),
-                    Ok(_) => {
-                        waiting = true;
-                        break;
-                    }
+                    Ok(_) => break,
                     Err(e) => {
                         failed.push((*id, e.to_string()));
-                        waiting = true;
                         break;
                     }
                 }
             }
-            if waiting {
+            if chunks.len() != payload.chunks.len() {
                 if !failed.iter().any(|(f, _)| f == id) {
                     failed.push((*id, "waiting for the attachment's content".to_owned()));
                 }
@@ -954,7 +1033,11 @@ impl<T: Transport> Synced<T> {
                         failed.push((*id, e.to_string()));
                     }
                 }
-                Err(e) => failed.push((*id, e.to_string())),
+                Err(e) => {
+                    // Not tried again until the record names other chunks.
+                    self.unopenable.insert((*id, payload.chunks.clone()));
+                    failed.push((*id, e.to_string()));
+                }
             }
         }
         // Removed in sync: an attachment record the account has that is no longer live.

@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 
 use keyorra_sync::transport::MemoryTransport;
 
+use super::sync::choose_join_folder;
 use super::tests::{new_session, unlocked_session, PW};
 use super::*;
 use crate::sync::{DeviceKeyStore, MemoryDeviceKeys};
@@ -53,14 +54,19 @@ impl SyncLink for TestLink {
         self.place.0.lock().unwrap().insert(*account, t.clone());
         Ok(Box::new(t))
     }
-    fn join_candidates(&self) -> Result<Vec<BoxedTransport>, String> {
+    fn join_candidates(&self) -> Result<Vec<(String, BoxedTransport)>, String> {
         Ok(self
             .place
             .0
             .lock()
             .unwrap()
-            .values()
-            .map(|t| Box::new(t.clone()) as BoxedTransport)
+            .iter()
+            .map(|(a, t)| {
+                (
+                    data_encoding::HEXLOWER.encode(a),
+                    Box::new(t.clone()) as BoxedTransport,
+                )
+            })
             .collect())
     }
     fn device_keys(&self) -> Box<dyn DeviceKeyStore> {
@@ -382,4 +388,106 @@ fn review_a1d2_i8_an_interrupted_carry_over_is_finished_on_start() {
     assert_eq!(s.status(), Status::Locked);
     assert!(!joining.exists());
     drop(dir);
+}
+
+/// Review A2 I4: the folder to join must be named after its account, exactly one may open,
+/// a folder that cannot be read does not stop the others, and files still downloading say so.
+#[test]
+fn review_a2_i4_choosing_the_folder_to_join() {
+    let (place, (_d1, main), _laptop) = two_macs();
+    let (account, folder) = place
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .next()
+        .map(|(a, t)| (*a, t.clone()))
+        .unwrap();
+    let kit = main.synced.as_ref().unwrap().emergency_kit();
+    let (sk_id, _) = SecretKey::parse(&kit.secret_key).unwrap();
+    let name = data_encoding::HEXLOWER.encode(&account);
+    let ok = |_: &MemoryTransport| Ok(());
+    // The right name: chosen.
+    assert!(choose_join_folder(vec![(name.clone(), folder.clone())], &sk_id, ok).is_ok());
+    // A copy under another name (a sync client's "Keyorra (1)") is never taken.
+    assert_eq!(
+        choose_join_folder(vec![("copy".into(), folder.clone())], &sk_id, ok)
+            .err()
+            .unwrap()
+            .kind,
+        ErrorKind::NotFound
+    );
+    // One that does not open (wrong password) next to one that does: the one that opens.
+    let mut calls = 0;
+    let chosen = choose_join_folder(
+        vec![
+            (name.clone(), folder.clone()),
+            (name.clone(), folder.clone()),
+        ],
+        &sk_id,
+        |_| {
+            calls += 1;
+            if calls == 1 {
+                Err(keyorra_sync::Error::WrongPassword)
+            } else {
+                Ok(())
+            }
+        },
+    );
+    assert!(chosen.is_ok());
+    // Two that open: ambiguous.
+    assert_eq!(
+        choose_join_folder(
+            vec![
+                (name.clone(), folder.clone()),
+                (name.clone(), folder.clone())
+            ],
+            &sk_id,
+            ok
+        )
+        .err()
+        .unwrap()
+        .kind,
+        ErrorKind::Invalid
+    );
+    // None opens: the password error.
+    assert_eq!(
+        choose_join_folder(vec![(name, folder)], &sk_id, |_| Err(
+            keyorra_sync::Error::WrongPassword
+        ))
+        .err()
+        .unwrap()
+        .kind,
+        ErrorKind::WrongPassword
+    );
+}
+
+/// Review A2 I4: header files that are not on this Mac yet make a retryable error.
+#[test]
+fn review_a2_i4_a_folder_still_downloading_says_so() {
+    use keyorra_sync_fs::{Availability, FileState, FolderTransport};
+    struct NothingHere;
+    impl Availability for NothingHere {
+        fn state(&self, _: &std::path::Path) -> FileState {
+            FileState::NotDownloaded
+        }
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let account = dir.path().join("01".repeat(16)).join("account");
+    std::fs::create_dir_all(&account).unwrap();
+    std::fs::write(
+        account.join(format!("00000001-{}.hdr", "02".repeat(16))),
+        b"x",
+    )
+    .unwrap();
+    let folder = FolderTransport::probe(
+        &dir.path().join("01".repeat(16)),
+        None,
+        std::sync::Arc::new(NothingHere),
+    )
+    .unwrap();
+    let err = choose_join_folder(vec![("01".repeat(16), folder)], "ABCD", |_| Ok(()))
+        .err()
+        .unwrap();
+    assert!(err.message.contains("still downloading"), "{}", err.message);
 }

@@ -1284,3 +1284,158 @@ fn enabling_refuses_a_folder_that_holds_an_account() {
     assert!(matches!(result, Err(Error::Refused(_))));
     assert!(!is_enabled(&store).unwrap());
 }
+
+// ---- review of A2 ----
+
+/// Review A2 I1: the time budget of one round does not leak into the next one (the local
+/// changes written at the start of a round used to hit the last round's deadline).
+#[test]
+fn review_a2_i1_each_round_has_its_own_budget() {
+    use keyorra_sync_fs::{FolderTransport, LocalDisk};
+    let folder = tempfile::tempdir().unwrap();
+    let transport = FolderTransport::open(folder.path(), None, std::sync::Arc::new(LocalDisk))
+        .unwrap()
+        .with_round_budget(std::time::Duration::from_millis(500));
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::create(&dir.path().join("m.db"), PW, KdfParams::INSECURE_FAST).unwrap();
+    let vault = store.create_vault("Personal").unwrap();
+    let item = Item::new(vault.id, ItemKind::Login, "x", 1);
+    store.save_item(&item).unwrap();
+    let Enabled { mut synced, .. } = enable(
+        &mut store,
+        new_account_id(),
+        transport,
+        &mut MemoryDeviceKeys::default(),
+        "Main",
+        PW,
+        KdfParams::INSECURE_FAST,
+        NOW_MS,
+    )
+    .unwrap();
+    synced.round(&mut store, NOW_MS + 1).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(700));
+    store.add_attachment(item.id, "a.txt", b"bytes", 2).unwrap();
+    let report = synced.round(&mut store, NOW_MS + 2).unwrap();
+    assert!(report.failed.is_empty(), "{:?}", report.failed);
+    assert!(store.pending_changes().unwrap().is_empty());
+}
+
+/// Counts chunk reads of a memory store.
+struct CountingChunks {
+    inner: MemoryTransport,
+    reads: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+
+impl keyorra_sync::transport::Transport for CountingChunks {
+    fn streams(&self) -> Result<Vec<DeviceId>> {
+        self.inner.streams()
+    }
+    fn segments(&self, s: &DeviceId, after: u64) -> Result<Vec<Fetched<Vec<u8>>>> {
+        self.inner.segments(s, after)
+    }
+    fn append(&self, segment: &[u8]) -> Result<keyorra_sync::transport::AppendOutcome> {
+        self.inner.append(segment)
+    }
+    fn head(&self, s: &DeviceId) -> Result<Option<u64>> {
+        self.inner.head(s)
+    }
+    fn headers(&self) -> Result<Vec<(String, Fetched<Vec<u8>>)>> {
+        self.inner.headers()
+    }
+    fn put_header(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        self.inner.put_header(name, bytes)
+    }
+    fn delete_header(&self, name: &str) -> Result<()> {
+        self.inner.delete_header(name)
+    }
+    fn snapshots(&self) -> Result<Vec<(String, DeviceId)>> {
+        self.inner.snapshots()
+    }
+    fn get_snapshot(&self, name: &str) -> Result<Fetched<Vec<u8>>> {
+        self.inner.get_snapshot(name)
+    }
+    fn put_snapshot(&self, bytes: &[u8]) -> Result<String> {
+        self.inner.put_snapshot(bytes)
+    }
+    fn delete_snapshot(&self, name: &str) -> Result<()> {
+        self.inner.delete_snapshot(name)
+    }
+    fn delete_segment(&self, s: &DeviceId, first: u64) -> Result<()> {
+        self.inner.delete_segment(s, first)
+    }
+    fn root_head_file(&self) -> Result<Fetched<Vec<u8>>> {
+        self.inner.root_head_file()
+    }
+    fn put_root_head_file(&self, bytes: &[u8]) -> Result<()> {
+        self.inner.put_root_head_file(bytes)
+    }
+    fn put_chunk(&self, bytes: &[u8]) -> Result<String> {
+        self.inner.put_chunk(bytes)
+    }
+    fn get_chunk(&self, name: &str) -> Result<Fetched<Vec<u8>>> {
+        self.reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        self.inner.get_chunk(name)
+    }
+    fn chunk_state(&self, name: &str) -> Result<Fetched<()>> {
+        self.inner.chunk_state(name)
+    }
+}
+
+/// Review A2 I6: an attachment whose chunks are not all here is not read at all; once they
+/// are, each is read once.
+#[test]
+fn review_a2_i6_chunks_are_read_only_when_all_are_here() {
+    let (transport, main, mut laptop) = pair();
+    let reads = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let Device {
+        _dir,
+        path,
+        store,
+        synced,
+        keys,
+    } = main;
+    drop(synced);
+    drop(store);
+    let mut store = Store::open(&path).unwrap();
+    store.unlock(PW).unwrap();
+    let mut main = resume(
+        &store,
+        CountingChunks {
+            inner: transport.clone(),
+            reads: reads.clone(),
+        },
+        &keys,
+    )
+    .unwrap();
+    main.round(&mut store, NOW_MS + 400).unwrap();
+    laptop.synced.chunk_size = 3;
+    let item = find(&laptop.store, "before sync");
+    let att = laptop
+        .store
+        .add_attachment(item.id, "a.bin", b"twelve bytes", 401)
+        .unwrap();
+    round(&mut laptop, NOW_MS + 401);
+    // One of the four chunks has not arrived.
+    let mut chunks = transport.take_chunks();
+    assert_eq!(chunks.len(), 4);
+    let late = chunks.pop().unwrap();
+    for c in &chunks {
+        transport.put_chunk(c).unwrap();
+    }
+    for t in 402..405 {
+        let report = main.round(&mut store, NOW_MS + t).unwrap();
+        assert!(report.failed.iter().any(|(id, _)| *id == att.id));
+    }
+    assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 0);
+    transport.put_chunk(&late).unwrap();
+    main.round(&mut store, NOW_MS + 405).unwrap();
+    assert_eq!(&store.get_attachment(att.id).unwrap()[..], b"twelve bytes");
+    assert_eq!(reads.load(std::sync::atomic::Ordering::SeqCst), 4);
+    main.round(&mut store, NOW_MS + 406).unwrap();
+    assert_eq!(
+        reads.load(std::sync::atomic::Ordering::SeqCst),
+        4,
+        "not read again"
+    );
+    let _ = _dir;
+}

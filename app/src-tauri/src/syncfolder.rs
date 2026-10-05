@@ -112,7 +112,9 @@ impl Availability for MacCloud {
         extern "C" fn body(ctx: *mut c_void) -> i32 {
             // SAFETY: `ctx` is the `Call` below, alive for the whole coordinated call.
             let call = unsafe { &mut *(ctx as *mut Call<'_>) };
-            let r = (call.f)();
+            // A panic must not unwind into Swift (review A2 M10).
+            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (call.f)()))
+                .unwrap_or_else(|_| Err(std::io::Error::other("the file access panicked")));
             let ok = r.is_ok();
             call.result = Some(r);
             if ok {
@@ -231,7 +233,7 @@ impl SyncLink for FolderLink {
         self.open(&folder)
     }
 
-    fn join_candidates(&self) -> Result<Vec<BoxedTransport>, String> {
+    fn join_candidates(&self) -> Result<Vec<(String, BoxedTransport)>, String> {
         let entries = match std::fs::read_dir(&self.place) {
             Ok(e) => e,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
@@ -239,9 +241,24 @@ impl SyncLink for FolderLink {
         };
         let mut out = Vec::new();
         for entry in entries.flatten() {
-            let name = entry.file_name();
-            if name.to_str().is_some_and(is_account_folder) && entry.path().is_dir() {
-                out.push(self.open(&entry.path())?);
+            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            // Plain folders named like an account only; looking creates nothing in them, and
+            // one that cannot be opened does not hide the others (review A2 I4, M5).
+            let plain = entry
+                .file_type()
+                .is_ok_and(|t| t.is_dir() && !t.is_symlink());
+            if !is_account_folder(&name) || !plain {
+                continue;
+            }
+            if let Ok(t) =
+                FolderTransport::probe(&entry.path(), Some(&self.temp), self.availability.clone())
+            {
+                out.push((
+                    name,
+                    Box::new(t.with_round_budget(ROUND_BUDGET)) as BoxedTransport,
+                ));
             }
         }
         Ok(out)
@@ -349,6 +366,18 @@ mod tests {
         let place = base.path().join("Keyorra");
         let link = link(&place, &base.path().join("tmp"));
         assert!(link.join_candidates().unwrap().is_empty());
+        std::fs::create_dir_all(place.join("02".repeat(16))).unwrap();
+        let probed = link.join_candidates().unwrap();
+        assert_eq!(probed.len(), 1);
+        assert_eq!(probed[0].0, "02".repeat(16));
+        assert_eq!(
+            std::fs::read_dir(place.join("02".repeat(16)))
+                .unwrap()
+                .count(),
+            0,
+            "looking created nothing"
+        );
+        std::fs::remove_dir(place.join("02".repeat(16))).unwrap();
         let a = [1u8; 16];
         link.new_account_transport(&a).unwrap();
         assert!(place.join("01".repeat(16)).join("streams").is_dir());
@@ -383,6 +412,15 @@ mod tests {
         assert_eq!(err.to_string(), "disk full");
         assert_eq!(MacCloud.state(&file), FileState::Ready);
         assert_eq!(MacCloud.state(&dir.path().join("none")), FileState::Missing);
+    }
+
+    #[test]
+    fn a_panic_in_a_coordinated_access_is_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = MacCloud
+            .coordinate(dir.path(), Access::Read, &mut || panic!("boom"))
+            .unwrap_err();
+        assert!(err.to_string().contains("panicked"));
     }
 
     #[test]

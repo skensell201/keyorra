@@ -26,9 +26,10 @@ pub trait SyncLink: Send {
     fn new_account_transport(&self, account: &AccountId) -> Result<BoxedTransport, String> {
         self.transport(account)
     }
-    /// Every account folder in the sync place: joining picks the one whose header names the
-    /// Secret Key.
-    fn join_candidates(&self) -> Result<Vec<BoxedTransport>, String>;
+    /// Every account folder in the sync place, by folder name, opened read-only (nothing is
+    /// created in them): joining picks the one named after the account whose header names
+    /// the Secret Key.
+    fn join_candidates(&self) -> Result<Vec<(String, BoxedTransport)>, String>;
     fn device_keys(&self) -> Box<dyn DeviceKeyStore>;
     /// This Mac's name, shown to the other devices.
     fn device_name(&self) -> String;
@@ -123,17 +124,62 @@ fn open_transport(link: &dyn SyncLink, account: &AccountId) -> CmdResult<BoxedTr
     link.transport(account).map_err(folder_error)
 }
 
-/// The account folder to join with this Secret Key (its header names the key's id).
-fn join_transport(link: &dyn SyncLink, secret_key_id: &str) -> CmdResult<BoxedTransport> {
-    for candidate in link.join_candidates().map_err(folder_error)? {
-        if s::holds_account(&candidate, secret_key_id).unwrap_or(false) {
-            return Ok(candidate);
+/// The account folder to join (review A2 I4): among the folders of the sync place, those
+/// named after the account their header gives for this Secret Key id; each is tried with
+/// `open` (the password); exactly one must open. A folder that fails to be read does not stop
+/// the others; header files still downloading make a retryable error.
+pub(super) fn choose_join_folder<T: Transport>(
+    candidates: Vec<(String, T)>,
+    secret_key_id: &str,
+    mut open: impl FnMut(&T) -> keyorra_sync::Result<()>,
+) -> CmdResult<T> {
+    let mut downloading = false;
+    let mut last_error = None;
+    let mut opened = Vec::new();
+    for (name, folder) in candidates {
+        match s::find_account(&folder, secret_key_id) {
+            Ok(s::AccountMatch::Account(account))
+                if name == data_encoding::HEXLOWER.encode(&account) =>
+            {
+                match open(&folder) {
+                    Ok(()) => opened.push(folder),
+                    Err(e) => last_error = Some(e),
+                }
+            }
+            Ok(s::AccountMatch::Downloading) => downloading = true,
+            _ => {}
         }
     }
-    Err(CmdError::new(
-        ErrorKind::NotFound,
-        "No account for this Secret Key in the sync folder",
-    ))
+    match opened.len() {
+        1 => Ok(opened.pop().expect("one")),
+        0 => Err(match (last_error, downloading) {
+            (Some(e), _) => sync_error(e),
+            (None, true) => CmdError::new(
+                ErrorKind::Other,
+                "The account's files are still downloading to this Mac; try again in a moment",
+            ),
+            (None, false) => CmdError::new(
+                ErrorKind::NotFound,
+                "No account for this Secret Key in the sync folder",
+            ),
+        }),
+        _ => Err(CmdError::new(
+            ErrorKind::Invalid,
+            "More than one folder holds this account; keep one and try again",
+        )),
+    }
+}
+
+fn join_transport(
+    link: &dyn SyncLink,
+    password: &str,
+    (sk, sk_id): (&SecretKey, &str),
+    pin: Option<&keyorra_sync::account::RootPin>,
+) -> CmdResult<BoxedTransport> {
+    let candidates = link.join_candidates().map_err(folder_error)?;
+    choose_join_folder(candidates, sk_id, |t| {
+        s::opens(t, pin, |h: &Header| link.unlock_header(h, password, sk))
+    })
 }
 
 /// Where the old database goes when the vault joins another account (spec §7.3):
@@ -390,7 +436,7 @@ impl Session {
         now: u64,
     ) -> CmdResult<()> {
         let (transport, mut keys, name) = (
-            join_transport(link, sk_id)?,
+            join_transport(link, password, (sk, sk_id), pin.as_ref())?,
             link.device_keys(),
             link.device_name(),
         );
@@ -467,7 +513,7 @@ impl Session {
         now: u64,
     ) -> CmdResult<()> {
         let (transport, mut keys, name) = (
-            join_transport(link, sk_id)?,
+            join_transport(link, password, (sk, sk_id), pin.as_ref())?,
             link.device_keys(),
             link.device_name(),
         );
