@@ -332,12 +332,8 @@ fn after_a_restored_backup_everyone_continues_from_a_snapshot() {
         .restore(&store, device_id(1), c.clocks[1])
         .unwrap();
     c.devices[1].sync(&store, c.clocks[1]).unwrap();
-    // Device 2 never saw the lost segment: it is anchored by a snapshot and catches up.
+    // Device 2 never saw the lost segment: it gets it again (device 1 appended it anew).
     c.devices[2].sync(&store, c.clocks[2]).unwrap();
-    assert!(c.devices[2]
-        .take_events()
-        .iter()
-        .any(|e| matches!(e, Event::Anchored { .. })));
     for _ in 0..4 {
         for i in 0..3 {
             c.devices[i].sync(&store, c.clocks[i]).unwrap();

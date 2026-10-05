@@ -132,7 +132,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
 
     /// An accepted version as an envelope again (the body re-sealed with a fresh nonce under
     /// the vault's key: the version and its content are what count, not the ciphertext).
-    fn reseal(&mut self, a: &Accepted) -> Result<Envelope> {
+    pub(super) fn reseal(&mut self, a: &Accepted) -> Result<Envelope> {
         let mut envelope = Envelope {
             kind: a.kind,
             record_id: a.record_id,
@@ -178,8 +178,10 @@ impl<R: RngCore + CryptoRng> Engine<R> {
     }
 
     /// The streams a snapshot by `author` may vouch for.
-    fn vouches_for(&self, author: &DeviceId, stream: &DeviceId) -> bool {
-        *author == self.trust.root() || author == stream
+    fn vouches_for(&self, author: &DeviceId, _stream: &DeviceId) -> bool {
+        // Only the main device's word covers records of streams other readers rely on: a
+        // snapshot of another device could say anything about its own past (review S1).
+        *author == self.trust.root()
     }
 
     /// A device with nothing yet starts from the newest snapshot of the main device it can
@@ -382,9 +384,10 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         }
     }
 
-    /// "Restore from this Mac" after a rollback alarm about `stream`: writes a snapshot of
-    /// everything this device has, so the others can continue from it, and resumes. A
-    /// snapshot of the main device restores any stream; one of another device only its own.
+    /// "Restore from this Mac" after a rollback alarm about `stream`. The own stream is
+    /// restored by appending its lost segments again, byte for byte, so every reader checks
+    /// them like any other (signature, chain). Another device's stream is restored only by
+    /// the main device, with a snapshot (its word covers other devices' records).
     pub fn restore(
         &mut self,
         transport: &impl Transport,
@@ -401,20 +404,36 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                 "there is no rollback of that stream to restore".into(),
             ));
         };
-        if !self.vouches_for(&self.device, &stream) {
+        let Alarm::Rollback { stored, .. } = alarm else {
+            unreachable!("filtered above")
+        };
+        if stream == self.device {
+            let lost: Vec<Vec<u8>> = self
+                .own_segments
+                .range(stored + 1..)
+                .map(|(_, b)| b.clone())
+                .collect();
+            // Positions are segment ends: the first lost segment starts right after `stored`.
+            let have_all = self.own_segments.contains_key(&(stored + 1));
+            if !have_all {
+                return Err(Error::Refused(
+                    "this device no longer has its lost changes; restore on the main device".into(),
+                ));
+            }
+            for bytes in lost {
+                transport.append(&bytes)?;
+            }
+            self.alarms.retain(|a| *a != alarm);
+            self.push(transport);
+            return Ok(());
+        }
+        if !self.is_root() {
             return Err(Error::Refused(
                 "only the main device can restore another device's changes".into(),
             ));
         }
-        let Alarm::Rollback { stored, .. } = alarm else {
-            unreachable!("filtered above")
-        };
         self.alarms.retain(|a| *a != alarm);
-        if stream == self.device {
-            self.restored_own = Some(self.sent.seq);
-        } else {
-            self.acknowledged_rollbacks.insert((stream, stored));
-        }
+        self.acknowledged_rollbacks.insert((stream, stored));
         self.write_snapshot(transport, wall_ms)?;
         self.push(transport);
         Ok(())

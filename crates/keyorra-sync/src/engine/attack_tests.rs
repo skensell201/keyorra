@@ -878,3 +878,86 @@ fn review_k1_a_raised_stored_head_alone_retires_nobody() {
         .iter()
         .any(|e| matches!(e, Event::Retired { .. })));
 }
+
+#[test]
+fn review_s1_another_devices_snapshot_cannot_rewrite_its_history_for_newcomers() {
+    let (mut c, vault) = {
+        let mut c = Cluster::new(3, 1, Faults::NONE);
+        let vault = c.devices[0].create_vault("Personal", START_MS).unwrap();
+        c.heal();
+        (c, vault)
+    };
+    let first = Uuid::from_bytes([0x61; 16]);
+    for (id, t) in [(ITEM, "real"), (first, "real too")] {
+        let json = Cluster::item_json(id, t, &[]);
+        c.devices[1]
+            .save_item(vault, id, &json, c.clocks[1])
+            .unwrap();
+        c.sync(1).unwrap();
+    }
+    c.heal();
+    // Device 1 (stolen) signs a snapshot of its own stream whose versions say something else.
+    let mut forged = Vec::new();
+    let own: Vec<Accepted> = c.devices[1]
+        .fold()
+        .retained()
+        .filter(|a| a.stream == device_id(1) && a.kind == RecordKind::Item)
+        .cloned()
+        .collect();
+    for mut a in own {
+        if let Doc::Item(p) = &mut a.doc {
+            let json = Cluster::item_json(a.record_id, "forged", &[]);
+            p.item_json = Zeroizing::new(json);
+        }
+        let env = c.devices[1].reseal(&a).unwrap();
+        forged.push((a.stream, a.seq, env));
+    }
+    let mut frontier = Heads::new();
+    frontier.insert(device_id(1), c.devices[1].sent);
+    let body = crate::pack::SnapshotBody {
+        account_id: ACCOUNT_ID,
+        floors: [(device_id(1), c.devices[1].sent.seq)]
+            .into_iter()
+            .collect(),
+        frontier,
+        entries: Vec::new(),
+        versions: forged,
+    };
+    let bytes = crate::snapshot::seal_snapshot(
+        &c.devices[1].segment_key,
+        &signer(1),
+        device_id(1),
+        body.to_value(),
+        &mut rand::rngs::OsRng,
+    )
+    .unwrap();
+    c.store.put_snapshot(&bytes).unwrap();
+    // The store loses device 1's first segments (a gap before its later ones).
+    let first_seg = c
+        .store
+        .segments(&device_id(1), 0)
+        .unwrap()
+        .into_iter()
+        .filter_map(|f| match f {
+            Fetched::Ready(b) => SegmentHeader::parse(&b).ok().map(|h| h.first_seq),
+            _ => None,
+        })
+        .min()
+        .unwrap();
+    c.store.remove_segment(&device_id(1), first_seg);
+    let i = c.add_device(77);
+    c.sync(0).unwrap();
+    for _ in 0..3 {
+        let _ = c.sync(i);
+    }
+    let view = c.devices[i].view();
+    for (id, item) in &view.items {
+        if item.payload.is_some() {
+            assert_ne!(title(&view, *id), "forged");
+        }
+    }
+    assert!(!c.devices[i]
+        .take_events()
+        .iter()
+        .any(|e| matches!(e, Event::Anchored { by, .. } if *by == device_id(1))));
+}

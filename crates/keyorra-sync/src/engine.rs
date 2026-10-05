@@ -386,8 +386,9 @@ pub struct Engine<R> {
     entries_since_snapshot: u64,
     last_snapshot_ms: Option<u64>,
     revoked_since_snapshot: bool,
-    /// Own position at which this device restored its own rolled-back stream.
-    restored_own: Option<u64>,
+    /// Own confirmed segments, byte for byte, by first position: what "Restore from this
+    /// Mac" appends again after the store lost them (A1d persists them with the outbox).
+    own_segments: BTreeMap<u64, Vec<u8>>,
     bootstrap_tried: bool,
     /// The own head last written to the root head file (main device).
     root_head_written: u64,
@@ -502,7 +503,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             entries_since_snapshot: 0,
             last_snapshot_ms: None,
             revoked_since_snapshot: false,
-            restored_own: None,
+            own_segments: BTreeMap::new(),
             bootstrap_tried: false,
             root_head_written: 0,
             root_log: Vec::new(),
@@ -2085,7 +2086,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         match transport.head(&self.device) {
             Ok(stored) => {
                 let stored = stored.unwrap_or(0);
-                if stored < self.sent.seq && self.restored_own != Some(self.sent.seq) {
+                if stored < self.sent.seq {
                     self.raise(Alarm::Rollback {
                         stream: self.device,
                         received: self.sent.seq,
@@ -2134,6 +2135,8 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             let unsent = self.unsent.as_ref().expect("set above");
             match transport.append(&unsent.bytes) {
                 Ok(AppendOutcome::Appended | AppendOutcome::AlreadyThere) => {
+                    let first = self.sent.seq + 1;
+                    self.own_segments.insert(first, unsent.bytes.clone());
                     self.sent = Head {
                         seq: unsent.last_seq,
                         hash: unsent.last_hash,
