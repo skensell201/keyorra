@@ -3,6 +3,7 @@
 //! from the test vectors in `docs/sync-test-vectors/`.
 
 pub mod cbor;
+pub mod envelope;
 pub mod error;
 pub mod header;
 pub mod keys;
