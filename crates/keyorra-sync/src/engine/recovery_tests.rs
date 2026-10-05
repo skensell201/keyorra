@@ -220,10 +220,11 @@ fn a_new_device_joins_from_the_header_and_starts_from_the_roots_snapshot() {
     // The newcomer has only the store, the password and the Secret Key; the header gives the
     // main device and its key.
     let files = c.store.headers().unwrap();
-    let (file, account_key) =
-        unlock_join_with(&files, |h| unlock_test_header(h, PASSWORD)).unwrap();
+    let joined = unlock_join_with(&files, None, |h| unlock_test_header(h, PASSWORD)).unwrap();
+    assert!(!joined.roots_disagree);
+    let (file, account_key) = (joined.file, joined.account_key);
     assert_eq!(account_key.as_bytes(), &ACCOUNT_KEY);
-    assert!(unlock_join_with(&files, |h| unlock_test_header(h, "wrong")).is_err());
+    assert!(unlock_join_with(&files, None, |h| unlock_test_header(h, "wrong")).is_err());
     let header = &file.header;
     let mut fresh = Engine::join(
         device_id(5),

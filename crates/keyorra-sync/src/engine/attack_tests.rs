@@ -1066,3 +1066,35 @@ fn review_i1_a_frozen_root_head_file_is_noticed_while_others_move_on() {
     }
     assert!(warned, "the main device looks silent while others move on");
 }
+
+#[test]
+fn review_i2_existing_devices_alarm_on_a_header_naming_another_root() {
+    let mut c = Cluster::new(2, 1, Faults::NONE);
+    c.devices[0].create_vault("Personal", START_MS).unwrap();
+    c.devices[0]
+        .publish_header(
+            crate::testkit::test_header(1, crate::testkit::PASSWORD),
+            c.clocks[0],
+        )
+        .unwrap();
+    c.heal();
+    // Someone with the password and Secret Key publishes a newer header naming itself root.
+    let mut header = crate::testkit::test_header(5, "thief");
+    header.root_device = device_id(9);
+    header.root_key = signer(9).verifying_key().to_bytes();
+    let file = crate::header::HeaderFile::sign(header, device_id(9), &signer(9));
+    c.store
+        .put_header(&file.file_name(), &file.encode())
+        .unwrap();
+    for i in 0..2 {
+        c.sync(i).unwrap();
+        assert!(
+            c.devices[i].alarms().contains(&Alarm::ForeignHeader {
+                epoch: 5,
+                root: device_id(9)
+            }),
+            "device {i}: {:?}",
+            c.devices[i].alarms()
+        );
+    }
+}

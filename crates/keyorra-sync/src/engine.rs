@@ -123,6 +123,10 @@ pub enum Alarm {
     /// other devices are unconfirmed meanwhile ([`Engine::root_confirmed`]). Pauses nothing;
     /// resolves itself when the stream catches up.
     RootBehind { advertised: u64, received: u64 },
+    /// A header file in the store names another main device (review I2): someone with the
+    /// master password and Secret Key published it. Pauses nothing; devices joining with the
+    /// Emergency Kit alone would trust it, so the user should look (and rotate keys, C1).
+    ForeignHeader { epoch: u32, root: DeviceId },
     /// The main device approved this device's id with a key that is not this device's: the
     /// joining segment was replaced on the way. This device does not write.
     ApprovedWithAnotherKey,
@@ -140,7 +144,8 @@ impl Alarm {
             Alarm::Unapproved { .. }
             | Alarm::Disputed { .. }
             | Alarm::ApprovedWithAnotherKey
-            | Alarm::RootBehind { .. } => None,
+            | Alarm::RootBehind { .. }
+            | Alarm::ForeignHeader { .. } => None,
         }
     }
 }
@@ -170,6 +175,11 @@ impl fmt::Display for Alarm {
                 "{} claims another history of {} at {seq}",
                 short(by),
                 short(stream)
+            ),
+            Alarm::ForeignHeader { epoch, root } => write!(
+                f,
+                "an account header (epoch {epoch}) names another main device ({})",
+                short(root)
             ),
             Alarm::RootBehind {
                 advertised,
@@ -1297,6 +1307,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             self.retire(reason, wall_ms)?;
         }
         self.adopt_header(wall_ms);
+        self.check_header_files(transport);
         self.delete_old_headers(transport);
         if self.can_write() {
             self.materialize(wall_ms)?;

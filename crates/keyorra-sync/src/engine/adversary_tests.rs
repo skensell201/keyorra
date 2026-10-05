@@ -506,6 +506,7 @@ impl World {
                 }
                 Alarm::ApprovedWithAnotherKey => panic!("device {i}: {alarm}"),
                 Alarm::OwnStreamTampered { .. } => panic!("device {i}: {alarm}"),
+                Alarm::ForeignHeader { .. } => {}
                 // Computed from state; resolves itself.
                 Alarm::RootBehind { .. } => continue,
                 Alarm::Rollback { .. } | Alarm::Unapproved { .. } => {}

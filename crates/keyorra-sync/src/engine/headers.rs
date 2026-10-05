@@ -131,6 +131,43 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             .unwrap_or(0)
     }
 
+    /// Header files naming another main device raise an alarm (at most a few are listed).
+    pub(super) fn check_header_files(&mut self, transport: &impl Transport) {
+        const MAX_FOREIGN: usize = 8;
+        let Ok(files) = transport.headers() else {
+            return;
+        };
+        let root = self.trust.root();
+        let root_key = self.trust.root_key().to_bytes();
+        for (_, f) in files {
+            let Fetched::Ready(bytes) = f else { continue };
+            let Ok(file) = HeaderFile::decode(&bytes) else {
+                continue;
+            };
+            let h = &file.header;
+            if h.account_id != self.account_id || (h.root_device == root && h.root_key == root_key)
+            {
+                continue;
+            }
+            let alarm = Alarm::ForeignHeader {
+                epoch: h.epoch,
+                root: h.root_device,
+            };
+            let open = self
+                .alarms
+                .iter()
+                .filter(|a| matches!(a, Alarm::ForeignHeader { .. }))
+                .count();
+            if open < MAX_FOREIGN
+                && !self.alarms.contains(&alarm)
+                && !self.accepted_alarms.contains(&alarm)
+            {
+                self.events.push(Event::Alarm(alarm.clone()));
+                self.alarms.push(alarm);
+            }
+        }
+    }
+
     /// Deletes header files of epochs that every approved device has moved past.
     pub(super) fn delete_old_headers(&mut self, transport: &impl Transport) {
         let all = self.epoch_adopted_by_all();
