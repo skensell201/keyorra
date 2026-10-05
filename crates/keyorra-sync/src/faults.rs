@@ -142,6 +142,10 @@ impl<T: Transport> Transport for Faulty<T> {
         Ok(out)
     }
 
+    fn head(&self, stream: &DeviceId) -> Result<Option<u64>> {
+        self.inner.head(stream)
+    }
+
     fn append(&self, segment: &[u8]) -> Result<AppendOutcome> {
         let f = self.faults();
         if self.roll(f.fail_before_append) {
@@ -152,6 +156,86 @@ impl<T: Transport> Transport for Faulty<T> {
             return Err(Error::Transport("append outcome lost".into()));
         }
         Ok(outcome)
+    }
+}
+
+/// A store that went back in time for one stream: segments after `keep_through` are gone
+/// (a restored backup, a sync client that lost files). Appends still go through.
+pub struct Rollback<T> {
+    pub inner: T,
+    pub stream: DeviceId,
+    pub keep_through: u64,
+}
+
+impl<T: Transport> Transport for Rollback<T> {
+    fn streams(&self) -> Result<Vec<DeviceId>> {
+        self.inner.streams()
+    }
+
+    fn segments(&self, stream: &DeviceId, after_seq: u64) -> Result<Vec<Fetched<Vec<u8>>>> {
+        let all = self.inner.segments(stream, after_seq)?;
+        if *stream != self.stream {
+            return Ok(all);
+        }
+        Ok(all
+            .into_iter()
+            .filter(|f| match f {
+                Fetched::Ready(b) => crate::segment::SegmentHeader::parse(b)
+                    .is_ok_and(|h| h.last_seq <= self.keep_through),
+                _ => true,
+            })
+            .collect())
+    }
+
+    fn append(&self, segment: &[u8]) -> Result<AppendOutcome> {
+        self.inner.append(segment)
+    }
+
+    fn head(&self, stream: &DeviceId) -> Result<Option<u64>> {
+        let head = self.inner.head(stream)?;
+        Ok(if *stream == self.stream {
+            head.map(|h| h.min(self.keep_through)).filter(|h| *h > 0)
+        } else {
+            head
+        })
+    }
+}
+
+/// A store that shows one stream from another store: one side of a fork (two histories of
+/// one device, e.g. a cloned Mac), as a store that keeps devices partitioned would.
+pub struct Overlay<T, U> {
+    pub base: T,
+    pub overlay: U,
+    pub stream: DeviceId,
+}
+
+impl<T: Transport, U: Transport> Transport for Overlay<T, U> {
+    fn streams(&self) -> Result<Vec<DeviceId>> {
+        let mut streams = self.base.streams()?;
+        if !streams.contains(&self.stream) {
+            streams.push(self.stream);
+        }
+        Ok(streams)
+    }
+
+    fn segments(&self, stream: &DeviceId, after_seq: u64) -> Result<Vec<Fetched<Vec<u8>>>> {
+        if *stream == self.stream {
+            self.overlay.segments(stream, after_seq)
+        } else {
+            self.base.segments(stream, after_seq)
+        }
+    }
+
+    fn append(&self, segment: &[u8]) -> Result<AppendOutcome> {
+        self.base.append(segment)
+    }
+
+    fn head(&self, stream: &DeviceId) -> Result<Option<u64>> {
+        if *stream == self.stream {
+            self.overlay.head(stream)
+        } else {
+            self.base.head(stream)
+        }
     }
 }
 
@@ -227,6 +311,29 @@ mod tests {
             }
         }
         assert!(pending > 0 && damaged > 0 && duplicated > 0 && short > 0);
+    }
+
+    #[test]
+    fn rollback_hides_later_segments_and_lowers_the_head() {
+        let r = Rollback {
+            inner: store(5),
+            stream: D,
+            keep_through: 3,
+        };
+        assert_eq!(r.segments(&D, 0).unwrap().len(), 3);
+        assert_eq!(r.head(&D).unwrap(), Some(3));
+    }
+
+    #[test]
+    fn overlay_shows_one_stream_from_elsewhere() {
+        let o = Overlay {
+            base: MemoryTransport::new(),
+            overlay: store(2),
+            stream: D,
+        };
+        assert_eq!(o.streams().unwrap(), vec![D]);
+        assert_eq!(o.segments(&D, 0).unwrap().len(), 2);
+        assert_eq!(o.head(&D).unwrap(), Some(2));
     }
 
     #[test]

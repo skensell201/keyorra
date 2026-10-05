@@ -180,6 +180,10 @@ impl Transport for Upto<'_> {
             })
             .collect())
     }
+    fn head(&self, stream: &DeviceId) -> Result<Option<u64>> {
+        self.inner.head(stream)
+    }
+
     fn append(&self, segment: &[u8]) -> Result<AppendOutcome> {
         self.inner.append(segment)
     }
@@ -470,6 +474,10 @@ impl Transport for BrokenStream<'_> {
         }
         self.inner.segments(stream, after)
     }
+    fn head(&self, stream: &DeviceId) -> Result<Option<u64>> {
+        self.inner.head(stream)
+    }
+
     fn append(&self, segment: &[u8]) -> Result<AppendOutcome> {
         self.inner.append(segment)
     }

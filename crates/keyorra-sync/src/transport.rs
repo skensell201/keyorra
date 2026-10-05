@@ -34,6 +34,9 @@ pub trait Transport {
     fn segments(&self, stream: &DeviceId, after_seq: u64) -> Result<Vec<Fetched<Vec<u8>>>>;
     /// Stores a segment under its device and first sequence number (from its header).
     fn append(&self, segment: &[u8]) -> Result<AppendOutcome>;
+    /// The highest `last_seq` stored for `stream` (from file names or server metadata, without
+    /// reading segments): how a device notices that a stream went backwards (spec §4.5).
+    fn head(&self, stream: &DeviceId) -> Result<Option<u64>>;
 }
 
 /// One stream: segment bytes by first sequence number.
@@ -48,6 +51,13 @@ pub struct MemoryTransport {
 impl MemoryTransport {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// An independent copy of everything stored now (tests: one side of a fork).
+    pub fn deep_copy(&self) -> MemoryTransport {
+        MemoryTransport {
+            streams: Arc::new(Mutex::new(self.streams.lock().unwrap().clone())),
+        }
     }
 
     /// Every stored segment, for "what the transport sees" and for tests.
@@ -75,6 +85,15 @@ impl Transport for MemoryTransport {
                     .collect()
             })
             .unwrap_or_default())
+    }
+
+    fn head(&self, stream: &DeviceId) -> Result<Option<u64>> {
+        let streams = self.streams.lock().unwrap();
+        Ok(streams
+            .get(stream)
+            .and_then(|segs| segs.values().next_back())
+            .and_then(|b| SegmentHeader::parse(b).ok())
+            .map(|h| h.last_seq))
     }
 
     fn append(&self, segment: &[u8]) -> Result<AppendOutcome> {
@@ -137,6 +156,8 @@ mod tests {
         assert_eq!(t.segments(&a, 0).unwrap().len(), 2);
         assert_eq!(t.segments(&a, 1).unwrap().len(), 1);
         assert_eq!(t.segments(&[9; 16], 0).unwrap(), vec![]);
+        assert_eq!(t.head(&a).unwrap(), Some(2));
+        assert_eq!(t.head(&[9; 16]).unwrap(), None);
         assert_eq!(t.dump().len(), 3);
     }
 
@@ -151,6 +172,14 @@ mod tests {
             AppendOutcome::Conflict
         );
         assert!(t.append(b"junk").is_err());
+    }
+
+    #[test]
+    fn a_deep_copy_does_not_share_storage() {
+        let t = MemoryTransport::new();
+        let u = t.deep_copy();
+        t.append(&segment([1; 16], 1, 0)).unwrap();
+        assert!(u.streams().unwrap().is_empty());
     }
 
     #[test]
