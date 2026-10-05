@@ -35,7 +35,16 @@ impl Hibp {
 
     /// How many times the password appears in known breaches (0 = not found).
     pub fn breach_count(&self, password: &str) -> Result<u64> {
-        let hash = sha1_hex_upper(password);
+        self.breach_count_for_hash(&sha1_hex_upper(password))
+    }
+
+    /// Same, for a password the caller already hashed (40 hex characters of SHA-1). Only the
+    /// first five characters are sent.
+    pub fn breach_count_for_hash(&self, sha1_hex: &str) -> Result<u64> {
+        if sha1_hex.len() != 40 || !sha1_hex.bytes().all(|b| b.is_ascii_hexdigit()) {
+            return Err(Error::Invalid("expected a SHA-1 hex digest".into()));
+        }
+        let hash = sha1_hex.to_ascii_uppercase();
         let (prefix, suffix) = hash.split_at(5);
         let network = |e: &dyn std::fmt::Display| Error::Network(e.to_string());
         let body = self
@@ -130,6 +139,23 @@ mod tests {
         let hibp = Hibp::with_base_url(&server.url());
         assert_eq!(hibp.breach_count("password").unwrap(), 3861493);
         mock.assert();
+    }
+
+    #[test]
+    fn a_precomputed_hash_sends_only_its_prefix() {
+        let mut server = mockito::Server::new();
+        let mock = server
+            .mock("GET", "/range/5BAA6")
+            .with_body("1E4C9B93F3F0682250B6CF8331B7EE68FD8:42\r\n")
+            .create();
+        let hibp = Hibp::with_base_url(&server.url());
+        let lower = PASSWORD_SHA1.to_ascii_lowercase();
+        assert_eq!(hibp.breach_count_for_hash(&lower).unwrap(), 42);
+        mock.assert();
+        assert!(matches!(
+            hibp.breach_count_for_hash("5BAA6"),
+            Err(Error::Invalid(_))
+        ));
     }
 
     #[test]
