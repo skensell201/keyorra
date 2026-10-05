@@ -4,6 +4,7 @@
 
 pub mod cbor;
 pub mod chunk;
+pub mod clock;
 pub mod envelope;
 pub mod error;
 pub mod header;
