@@ -181,3 +181,14 @@ fn a_joining_device_creates_its_store_with_the_accounts_key() {
     store.unlock(PW).unwrap();
     assert_eq!(store.account_key().unwrap().as_bytes(), &[7; 32]);
 }
+
+#[test]
+fn the_meta_writer_writes_what_the_store_reads() {
+    let (_dir, _path, store) = new_store();
+    let writer = store.meta_writer().unwrap();
+    writer.set_sealed_meta("sync:outbox", b"state").unwrap();
+    assert_eq!(
+        &store.sealed_meta("sync:outbox").unwrap().unwrap()[..],
+        b"state"
+    );
+}

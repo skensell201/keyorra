@@ -11,7 +11,10 @@ use std::collections::BTreeMap;
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
 
-use super::{insert_vault, parse_id, upsert_item, vault_meta_aad, Store};
+use super::{
+    configure, insert_vault, parse_id, sealed_meta_aad, sealed_meta_key, upsert_item,
+    vault_meta_aad, Store,
+};
 use crate::crypto::{self, Key};
 use crate::model::{Item, VaultInfo};
 use crate::{Error, Result};
@@ -307,8 +310,42 @@ impl Store {
         Ok(())
     }
 
+    /// A second connection to the same database that writes sealed meta (the sync engine's
+    /// outbox is saved through it before every append, while the session holds the store).
+    pub fn meta_writer(&self) -> Result<MetaWriter> {
+        let path = self
+            .conn
+            .path()
+            .filter(|p| !p.is_empty())
+            .ok_or_else(|| Error::Invalid("the store has no file".into()))?;
+        let conn = Connection::open(path)?;
+        configure(&conn)?;
+        Ok(MetaWriter {
+            conn,
+            key: self.account_key()?.clone(),
+        })
+    }
+
     /// The account key itself, for the sync engine (which uses it as the account key `AK`).
     pub fn account_key_copy(&self) -> Result<Key> {
         Ok(self.account_key()?.clone())
+    }
+}
+
+/// Writes sealed meta of one store through its own connection ([`Store::meta_writer`]).
+pub struct MetaWriter {
+    conn: Connection,
+    key: Key,
+}
+
+impl MetaWriter {
+    pub fn set_sealed_meta(&self, name: &str, value: &[u8]) -> Result<()> {
+        let data = crypto::seal(&self.key, value, &sealed_meta_aad(name));
+        self.conn.execute(
+            "INSERT INTO meta (key, value) VALUES (?1, ?2)
+             ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            params![sealed_meta_key(name), data],
+        )?;
+        Ok(())
     }
 }
