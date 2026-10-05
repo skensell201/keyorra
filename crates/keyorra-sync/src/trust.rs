@@ -112,6 +112,9 @@ pub struct Trust {
     unapproved: BTreeMap<DeviceId, Unapproved>,
     /// This device, if it self-joined: its own writes count for itself while pending.
     pending_self: Option<DeviceId>,
+    /// Streams that broke the protocol: nothing from this position on counts (local, not a
+    /// trust decision; every reader finds the same first violation).
+    invalid_from: BTreeMap<DeviceId, u64>,
 }
 
 impl Trust {
@@ -133,6 +136,7 @@ impl Trust {
             removed: BTreeSet::new(),
             unapproved: BTreeMap::new(),
             pending_self: None,
+            invalid_from: BTreeMap::new(),
         }
     }
 
@@ -166,6 +170,18 @@ impl Trust {
     /// Removed before it was approved: nothing of it ever counts.
     pub fn is_removed(&self, device: &DeviceId) -> bool {
         self.removed.contains(device)
+    }
+
+    /// `device`'s entry at `seq` broke the protocol: from there on nothing of it counts.
+    /// Returns whether that changed anything.
+    pub fn invalidate_from(&mut self, device: DeviceId, seq: u64) -> bool {
+        let e = self.invalid_from.entry(device).or_insert(u64::MAX);
+        if seq < *e {
+            *e = seq;
+            true
+        } else {
+            false
+        }
     }
 
     /// This device self-joined: its own writes count for itself until the root decides.
@@ -284,6 +300,13 @@ impl Trust {
 
 impl Admission for Trust {
     fn admits(&self, stream: &DeviceId, seq: u64) -> bool {
+        if self
+            .invalid_from
+            .get(stream)
+            .is_some_and(|from| seq >= *from)
+        {
+            return false;
+        }
         if let Some(d) = self.devices.get(stream) {
             return d.cut.is_none_or(|c| seq <= c);
         }
@@ -291,7 +314,9 @@ impl Admission for Trust {
     }
 
     fn is_cut(&self, device: &DeviceId) -> bool {
-        self.removed.contains(device) || self.devices.get(device).is_some_and(|d| d.cut.is_some())
+        self.removed.contains(device)
+            || self.invalid_from.contains_key(device)
+            || self.devices.get(device).is_some_and(|d| d.cut.is_some())
     }
 }
 

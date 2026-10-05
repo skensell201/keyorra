@@ -1200,3 +1200,54 @@ fn review_w2_claims_of_a_device_removed_before_them_are_dropped() {
     c.sync(3).unwrap();
     assert!(c.devices[3].claims.is_empty());
 }
+
+#[test]
+fn review_w1_a_withheld_root_tail_is_noticed_against_the_advertised_head() {
+    // Root, one honest device and a stolen one. The root removes the stolen device, but the
+    // store hides the root's newest segment from device 1.
+    let (mut c, _) = shared(3);
+    let before = c.devices[0].sent.seq;
+    c.devices[0].revoke(device_id(2), c.clocks[0]).unwrap();
+    c.sync(0).unwrap();
+    let hiding = Upto {
+        inner: &c.store,
+        stream: device_id(0),
+        last_seq: before,
+    };
+    c.devices[1].sync(&hiding, c.clocks[1]).unwrap();
+    assert!(
+        c.devices[1].root_confirmed(),
+        "nothing advertised yet: nothing to compare"
+    );
+    // The account header / setup code carries the root's current head.
+    let advertised = c.devices[0].root_head();
+    c.devices[1].set_root_head(advertised);
+    c.devices[1].sync(&hiding, c.clocks[1]).unwrap();
+    assert!(!c.devices[1].root_confirmed());
+    assert_eq!(
+        c.devices[1].alarms(),
+        vec![Alarm::RootBehind {
+            advertised: advertised.seq,
+            received: before
+        }]
+    );
+    c.devices[1].sync(&c.store, c.clocks[1]).unwrap();
+    assert!(c.devices[1].root_confirmed());
+    assert!(c.devices[1].alarms().is_empty());
+    assert!(c.devices[1]
+        .trust()
+        .device(&device_id(2))
+        .unwrap()
+        .cut
+        .is_some());
+    // An advertised head with another hash than the root's stream is a fork of the root.
+    c.devices[1].set_root_head(Head {
+        seq: advertised.seq,
+        hash: [9; 32],
+    });
+    c.devices[1].sync(&c.store, c.clocks[1]).unwrap();
+    assert!(c.devices[1].alarms().contains(&Alarm::Fork {
+        stream: device_id(0),
+        seq: advertised.seq
+    }));
+}

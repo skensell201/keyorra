@@ -553,3 +553,32 @@ fn review_a_purge_past_a_cut_that_another_device_built_on_is_a_purge() {
         }
     }
 }
+
+#[test]
+fn review_device_3_built_on_a_purge_past_device_2s_cut() {
+    // The second review's counterexample (CHAOS, seed 3328909560891880317): device 3 wrote
+    // on top of device 2's purge, which fell past device 2's cut.
+    let ops = vec![
+        Op::Save { dev: 3, item: 0 },
+        Op::Save { dev: 2, item: 0 },
+        Op::Trash { dev: 2, item: 0 },
+        Op::Sync { dev: 2 },
+        Op::RenameVault { dev: 0 },
+        Op::Sync { dev: 0 },
+        Op::RenameVault { dev: 0 },
+        Op::Sync { dev: 0 },
+        Op::Purge { dev: 2, item: 0 },
+        Op::Save { dev: 1, item: 0 },
+        Op::Sync { dev: 2 },
+        Op::Sync { dev: 1 },
+        Op::Sync { dev: 3 },
+        Op::Revoke { dev: 0, target: 2 },
+    ];
+    let (c, _) = run_skewed(4, 3328909560891880317, Faults::CHAOS, &ops, &[0, 0, 0, 0]);
+    c.assert_converged();
+    let all = written(&c.devices.iter().collect::<Vec<_>>());
+    for d in &c.devices {
+        assert_no_lost_edit(d.fold(), &d.view(), d.trust(), &all);
+        assert_cut_versions_hidden(d.fold(), d.trust());
+    }
+}

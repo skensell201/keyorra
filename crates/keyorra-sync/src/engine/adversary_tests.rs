@@ -87,6 +87,11 @@ enum Op {
     },
     /// After its removal: a new vault key.
     StolenVaultKey,
+    /// While still approved: an "earliest" version of the vault with a garbage or a valid
+    /// foreign key (review V1).
+    StolenEarliestVault {
+        garbage: bool,
+    },
     /// After its removal: a forged conflict copy.
     StolenCopy {
         item: usize,
@@ -96,6 +101,9 @@ enum Op {
         dev: usize,
     },
     SelfJoin,
+    /// Before the thief joins, someone else puts a SelfJoin with another key under the
+    /// thief's id (review W3): the code the thief shows no longer matches.
+    SwapSelfJoin,
     ThiefSave {
         item: usize,
     },
@@ -122,6 +130,8 @@ fn op() -> impl Strategy<Value = Op> {
         2 => (0..=STOLEN, any::<u8>()).prop_map(|(target, at)| Op::StolenRevoke { target, at: at % 8 }),
         1 => (0..=STOLEN, any::<u8>()).prop_map(|(target, seq)| Op::StolenCheckpoint { target, seq: seq % 40 }),
         1 => Just(Op::StolenVaultKey),
+        1 => any::<bool>().prop_map(|garbage| Op::StolenEarliestVault { garbage }),
+        1 => Just(Op::SwapSelfJoin),
         1 => i.clone().prop_map(|item| Op::StolenCopy { item }),
         1 => d.clone().prop_map(|dev| Op::StolenFork { dev }),
         1 => Just(Op::SelfJoin),
@@ -140,6 +150,7 @@ struct World {
     thief: Option<Engine<StdRng>>,
     stolen_removed: bool,
     thief_approved: bool,
+    swapped: bool,
     seed: u64,
 }
 
@@ -165,6 +176,7 @@ fn setup(seed: u64) -> World {
         thief: None,
         stolen_removed: false,
         thief_approved: false,
+        swapped: false,
         seed,
     }
 }
@@ -278,10 +290,12 @@ impl World {
             }),
             Op::StolenCheckpoint { target, seq } => {
                 let mut heads = Heads::new();
+                // Some claims are absurd (review W2).
+                let seq = if seq >= 35 { 1 << 40 } else { u64::from(seq) };
                 heads.insert(
                     device_id(target),
                     Head {
-                        seq: u64::from(seq),
+                        seq,
                         hash: [0xee; 32],
                     },
                 );
@@ -367,6 +381,54 @@ impl World {
                 );
             }
             Op::StolenVaultKey | Op::StolenCopy { .. } | Op::StolenFork { .. } => {}
+            Op::StolenEarliestVault { garbage } => {
+                let wrapped_key = if garbage {
+                    vec![0xab; 72]
+                } else {
+                    crypto::wrap_vault_key(
+                        &Key::from_bytes(ACCOUNT_KEY),
+                        vault,
+                        &Key::from_bytes([step as u8 | 1; 32]),
+                    )
+                };
+                let doc = Doc::Vault(VaultPayload {
+                    name: format!("evil{step}"),
+                    wrapped_key,
+                    deleted: false,
+                });
+                self.forge(Entry::Put(Envelope {
+                    kind: RecordKind::Vault,
+                    record_id: vault,
+                    vault_id: None,
+                    schema: SCHEMA_VERSION,
+                    version: crate::envelope::Version {
+                        vector: [(device_id(STOLEN), 1)].into_iter().collect(),
+                        hlc: 1,
+                        author: device_id(STOLEN),
+                    },
+                    tombstone: false,
+                    body: Some(doc.encode().to_vec()),
+                }));
+            }
+            Op::SwapSelfJoin => {
+                if self.thief.is_some() || self.swapped {
+                    return;
+                }
+                let mut impostor = Engine::join(
+                    THIEF,
+                    signer(6),
+                    "Thief",
+                    ACCOUNT_ID,
+                    Key::from_bytes(ACCOUNT_KEY),
+                    device_id(0),
+                    signer(0).verifying_key(),
+                    StdRng::seed_from_u64(self.seed ^ 6),
+                );
+                impostor.self_join(clock).unwrap();
+                let store = self.c.store.clone();
+                impostor.push(&store);
+                self.swapped = true;
+            }
             Op::SelfJoin => {
                 if self.thief.is_some() {
                     return;
@@ -443,6 +505,8 @@ impl World {
                     );
                 }
                 Alarm::ApprovedWithAnotherKey => panic!("device {i}: {alarm}"),
+                // Computed from state; resolves itself.
+                Alarm::RootBehind { .. } => continue,
                 Alarm::Rollback { .. } | Alarm::Unapproved { .. } => {}
             }
             assert!(self.c.devices[i].accept_alarm(&alarm));
@@ -473,7 +537,10 @@ impl World {
                 );
             }
             self.c.tick(1_000);
-            let views: Vec<View> = (0..HONEST).map(|i| self.c.devices[i].view()).collect();
+            let mut views: Vec<View> = (0..HONEST).map(|i| self.c.devices[i].view()).collect();
+            if let Some(e) = extra {
+                views.push(e.view());
+            }
             let quiet = (0..HONEST).all(|i| {
                 self.c.devices[i].is_idle()
                     && self.c.devices[i]
@@ -498,6 +565,15 @@ fn check(seed: u64, ops: &[Op]) {
     // The stolen device is removed in the end, whatever happened.
     w.run(ops.len(), &Op::RemoveStolen);
     w.heal(&mut None);
+    // Every honest device can still write into the vault (review V1).
+    for i in 0..HONEST {
+        let id = Uuid::from_bytes([0x5a; 16]);
+        let json = Cluster::item_json(id, &format!("final{i}"), &[]);
+        w.c.devices[i]
+            .save_item(w.vault, id, &json, w.c.clocks[i])
+            .unwrap_or_else(|e| panic!("device {i} cannot write: {e}"));
+    }
+    w.heal(&mut None);
     // A device that joins now, approved by the root, must see what the others see.
     let late = Engine::join(
         device_id(9),
@@ -513,6 +589,23 @@ fn check(seed: u64, ops: &[Op]) {
     w.c.devices[0]
         .endorse(device_id(9), &key, &device_name(9), w.c.clocks[0])
         .unwrap();
+    w.c.sync(0).unwrap();
+    // The setup code carries the root's head; the store first hides the root's tail
+    // (review W1): the late device notices and treats other devices' records as unconfirmed.
+    let mut late = late;
+    late.set_root_head(w.c.devices[0].root_head());
+    let root_seq = w.c.devices[0].sent.seq;
+    let hiding = Rollback {
+        inner: w.c.store.clone(),
+        stream: device_id(0),
+        keep_through: root_seq - 1,
+    };
+    let _ = late.sync(&hiding, w.c.clocks[0]);
+    assert!(!late.root_confirmed());
+    assert!(late
+        .alarms()
+        .iter()
+        .any(|a| matches!(a, Alarm::RootBehind { .. })));
     let mut extra = Some(late);
     w.heal(&mut extra);
     let late = extra.unwrap();
@@ -526,6 +619,7 @@ fn check(seed: u64, ops: &[Op]) {
         );
     }
     assert_eq!(late.view(), first, "the late device differs");
+    assert!(late.root_confirmed());
     assert!(!first.owes_copies());
     let mut honest: Vec<&Engine<StdRng>> = w.c.devices[..HONEST].iter().collect();
     honest.push(&late);
@@ -550,6 +644,9 @@ fn check(seed: u64, ops: &[Op]) {
                     "an unapproved device's content shows"
                 );
             }
+        }
+        if w.swapped {
+            assert!(!w.thief_approved, "a swapped join was approved");
         }
         assert_nothing_unaccounted(d.fold(), &view);
         assert_no_lost_edit(d.fold(), &view, trust, &all);

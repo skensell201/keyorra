@@ -312,14 +312,30 @@ trust is the root's stream applied in order.
 2. In any other stream, `endorse`, `revoke` and `genesis` are ignored (reported).
    `self_join` as entry 1 of a stream marks its device as **awaiting approval** if its
    signature and the segment verify with the key it carries; that key is used for nothing
-   else (the root may approve the device with it).
+   else. The root approves it only after the user confirmed the key's code
+   `key_code = hex(SHA-256("keyorra/sync/v1/key-fingerprint\0" ‖ key)[0..6])`, written
+   `xxxx-xxxx-xxxx`, as shown on the joining device. At most 64 devices await approval.
 3. A stream position `(device, seq)` **counts** (is admitted) iff the device is the root, or
    approved and `seq` is not after its cut. On a device that self-joined, its own entries
    count for itself until the root decides. The fold (§9.4) builds sibling sets from
    admitted versions only and is rebuilt whenever trust changes.
 
 A device that is not approved can read but does not write (after `self_join`: writes
-pending). A device whose cut is set or that was removed does not write any more.
+pending). A device whose cut is set or that was removed does not write any more, nor does a
+device approved with a key that is not its own (an alarm).
+
+**Advertised root head.** The account header and the setup code carry the root's head
+`(seq, hash)` (bound in plan A1c-2). A device compares it with the root's stream as
+received: if behind, other devices' records are **unconfirmed** and an alarm says so
+(pausing nothing) until the stream catches up; a different hash at that position is a fork
+of the root. The advertised head only moves forward.
+
+**Vault keys.** `vault_id = UUIDv8(SHA-256("keyorra/sync/v1/vault-id\0" ‖ creator ‖
+vault_key)[0..16])`. A vault's key is the one an admitted version carries whose unwrapped key
+satisfies this for the author of some admitted version of the vault (else, for older vaults,
+the earliest admitted version whose key unwraps, ordered by the sum of its vector, its hlc,
+then its author). New records are sealed with it and new vault versions carry it. A key
+that does not unwrap never counts.
 
 ### 10.3 Reading streams
 
@@ -329,8 +345,11 @@ next one, verified with the stream's key from §10.2 (the root's, or one the roo
 streams without such a key are not read (except entry 1, for a `self_join`), and streams of
 removed devices not at all. A segment that does not open is retried later. A received
 segment whose `prev_hash` is not the known hash, or an entry whose chain hash differs from
-one already known for its position, is a **fork**. A `put` whose author is not the stream's
-device rejects the stream; trust entries never do.
+one already known for its position, is a **fork**. A protocol violation (a `put` whose author
+is not the stream's device, a version that breaks §9.3) rejects the stream from that
+position: it is not read further, and nothing of it from that position on counts, including
+records of other lanes already applied, so every reader keeps the same prefix. Trust entries
+never reject a stream.
 
 Past a stream's cut, `put` entries are not applied (only their record ids are noted,
 §10.4); a cut never moves.
@@ -353,8 +372,9 @@ position of this device's own stream that it wrote with another hash or never wr
 than exactly the segment whose append outcome was lost, which then counts as confirmed),
 or a claimed position that later arrives with another hash, is a **fork** if the checkpoint
 is the root's, and a **dispute** naming the checkpoint's device otherwise. A listed position
-not received yet is a **claim**; when the oldest unmet claim of a stream is 24 hours old the
-stream is reported as withheld (a warning), once until its claims are met. A root `revoke`
+not received yet is a **claim** (ignored if more than 100 000 positions past what was
+received; at most 64 unmet claims per claimant; dropped if the checkpoint's position stops
+counting); each claim unmet for 24 hours is reported once as withheld (a warning). A root `revoke`
 whose `last_valid_hash` differs from the received chain hash at `last_valid_seq` is a fork.
 Forks and disputes at positions after the stream's cut raise nothing.
 

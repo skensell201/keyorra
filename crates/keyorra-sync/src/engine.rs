@@ -83,6 +83,11 @@ pub enum Alarm {
         seq: u64,
         by: DeviceId,
     },
+    /// The main device's stream, as received, is behind the head the account header (or the
+    /// setup code) advertises: its newest decisions (a removal) may be withheld. Records of
+    /// other devices are unconfirmed meanwhile ([`Engine::root_confirmed`]). Pauses nothing;
+    /// resolves itself when the stream catches up.
+    RootBehind { advertised: u64, received: u64 },
     /// The main device approved this device's id with a key that is not this device's: the
     /// joining segment was replaced on the way. This device does not write.
     ApprovedWithAnotherKey,
@@ -96,9 +101,10 @@ impl Alarm {
     pub fn stream(&self) -> Option<DeviceId> {
         match self {
             Alarm::Rollback { stream, .. } | Alarm::Fork { stream, .. } => Some(*stream),
-            Alarm::Unapproved { .. } | Alarm::Disputed { .. } | Alarm::ApprovedWithAnotherKey => {
-                None
-            }
+            Alarm::Unapproved { .. }
+            | Alarm::Disputed { .. }
+            | Alarm::ApprovedWithAnotherKey
+            | Alarm::RootBehind { .. } => None,
         }
     }
 }
@@ -124,6 +130,14 @@ impl fmt::Display for Alarm {
                 "{} claims another history of {} at {seq}",
                 short(by),
                 short(stream)
+            ),
+            Alarm::RootBehind {
+                advertised,
+                received,
+            } => write!(
+                f,
+                "the main device's changes are not all here (up to {received} of {advertised}); \
+                 other devices' changes are unconfirmed"
             ),
             Alarm::ApprovedWithAnotherKey => f.write_str(
                 "the main device approved this device with another key: its joining request \
@@ -294,6 +308,8 @@ pub struct Engine<R> {
     alarms: Vec<Alarm>,
     accepted_alarms: BTreeSet<Alarm>,
     acknowledged_rollbacks: BTreeSet<(DeviceId, u64)>,
+    /// The main device's head as advertised by the account header or the setup code.
+    root_head_advertised: Option<Head>,
     /// How many unapproved devices the user has already seen in an alarm.
     unapproved_seen: usize,
     removed_reported: bool,
@@ -392,6 +408,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             accepted_alarms: BTreeSet::new(),
             acknowledged_rollbacks: BTreeSet::new(),
             unapproved_seen: 0,
+            root_head_advertised: None,
             removed_reported: false,
             halted: false,
             #[cfg(test)]
@@ -436,6 +453,15 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         let mut alarms = self.alarms.clone();
         if self.approved_with_another_key() {
             alarms.push(Alarm::ApprovedWithAnotherKey);
+        }
+        if let Some(advertised) = self.root_head_advertised {
+            let received = self.root_received().seq;
+            if advertised.seq > received {
+                alarms.push(Alarm::RootBehind {
+                    advertised: advertised.seq,
+                    received,
+                });
+            }
         }
         let count = self.trust.unapproved().len();
         if count > self.unapproved_seen {
@@ -489,6 +515,57 @@ impl<R: RngCore + CryptoRng> Engine<R> {
     /// ([`crate::trust::key_fingerprint`]).
     pub fn key_fingerprint(&self) -> String {
         crate::trust::key_fingerprint(&self.signer.verifying_key())
+    }
+
+    /// The main device's own head, for it to advertise in the account header (A1c-2) and the
+    /// setup code.
+    pub fn root_head(&self) -> Head {
+        self.root_received()
+    }
+
+    /// The main device's head from the account header or the setup code (only moves
+    /// forward). Compared with the main device's stream as received.
+    pub fn set_root_head(&mut self, head: Head) {
+        if self.root_head_advertised.is_none_or(|h| head.seq >= h.seq) {
+            self.root_head_advertised = Some(head);
+        }
+        self.check_root_head();
+    }
+
+    /// Whether the main device's stream is received up to its advertised head. Until then
+    /// other devices' records are shown as unconfirmed: a removal could still be withheld.
+    pub fn root_confirmed(&self) -> bool {
+        self.root_head_advertised
+            .is_none_or(|h| h.seq <= self.root_received().seq)
+    }
+
+    fn root_received(&self) -> Head {
+        if self.is_root() {
+            return self.sent;
+        }
+        let root = self.trust.root();
+        self.heads.get(&root).copied().unwrap_or(Head {
+            seq: 0,
+            hash: chain_genesis(&self.account_id, &root),
+        })
+    }
+
+    /// The advertised head against the received chain: another hash there is a fork.
+    fn check_root_head(&mut self) {
+        let Some(h) = self.root_head_advertised else {
+            return;
+        };
+        if self.is_root() || h.seq == 0 {
+            return;
+        }
+        let root = self.trust.root();
+        let known = self.hashes.get(&root).and_then(|x| x.get(&h.seq));
+        if known.is_some_and(|k| *k != h.hash) {
+            self.raise(Alarm::Fork {
+                stream: root,
+                seq: h.seq,
+            });
+        }
     }
 
     /// Whether this is the main device, the one that approves and removes devices.
@@ -1129,6 +1206,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             }
         }
         self.report_withheld(wall_ms);
+        self.check_root_head();
         Ok(())
     }
 
@@ -1669,9 +1747,29 @@ impl<R: RngCore + CryptoRng> Engine<R> {
     }
 
     /// A protocol violation (not a trust question): the stream is no longer read.
+    /// The stream is valid only up to `first_seq - 1`: whatever was applied of it from there
+    /// on (records of other lanes) stops counting, so every reader ends with the same prefix.
     fn reject(&mut self, stream: &DeviceId, first_seq: u64, reason: String) {
         self.blocked.insert(*stream);
-        self.drop_pending(stream);
+        for queue in self
+            .lanes
+            .iter_mut()
+            .filter(|((s, _), _)| s == stream)
+            .map(|(_, q)| q)
+        {
+            queue.retain(|p| p.seq < first_seq);
+        }
+        self.lanes.retain(|_, q| !q.is_empty());
+        let left = self
+            .lanes
+            .iter()
+            .filter(|((s, _), _)| s == stream)
+            .map(|(_, q)| q.len())
+            .sum();
+        self.pending_count.insert(*stream, left);
+        if self.trust.invalidate_from(*stream, first_seq) {
+            self.trust_changed();
+        }
         self.events.push(Event::Rejected {
             from: *stream,
             first_seq,
