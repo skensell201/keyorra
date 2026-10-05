@@ -47,6 +47,27 @@ public func ks_enclave_create(
     return OK
 }
 
+/// New enclave key for sealing sync device keys: usable without a prompt once the Mac was
+/// unlocked after boot, and only on this Mac (it never leaves the Secure Enclave), so a
+/// keychain restored elsewhere cannot open what it sealed. Never prompts.
+@_cdecl("ks_device_enclave_create")
+public func ks_device_enclave_create(
+    _ blobOut: UnsafeMutablePointer<UInt8>, _ blobCap: Int, _ blobLen: UnsafeMutablePointer<Int>,
+    _ publicOut: UnsafeMutablePointer<UInt8>
+) -> Int32 {
+    guard SecureEnclave.isAvailable else { return UNAVAILABLE }
+    guard let access = SecAccessControlCreateWithFlags(
+        nil, kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly, [.privateKeyUsage], nil)
+    else { return FAILED }
+    guard let key = try? SecureEnclave.P256.KeyAgreement.PrivateKey(accessControl: access) else { return FAILED }
+    let blob = key.dataRepresentation
+    guard blob.count <= blobCap else { return FAILED }
+    blob.copyBytes(to: blobOut, count: blob.count)
+    blobLen.pointee = blob.count
+    key.publicKey.x963Representation.copyBytes(to: publicOut, count: 65)
+    return OK
+}
+
 /// ECDH between the enclave key and `peer` (65-byte X9.63). Shows the Touch ID prompt with
 /// `reason`; blocks until the user answers. Writes the 32-byte shared secret.
 @_cdecl("ks_enclave_agree")
