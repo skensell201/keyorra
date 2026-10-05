@@ -10,13 +10,14 @@ use std::collections::BTreeMap;
 
 use rusqlite::{params, Connection, OptionalExtension};
 use uuid::Uuid;
+use zeroize::Zeroizing;
 
 use super::{
     configure, insert_vault, parse_id, reencrypt_attachments, sealed_meta_aad, sealed_meta_key,
     upsert_item, vault_meta_aad, Store,
 };
 use crate::crypto::{self, Key};
-use crate::model::{Item, VaultInfo};
+use crate::model::{Item, VaultInfo, SCHEMA_VERSION};
 use crate::{Error, Result};
 
 const TRACKING_KEY: &str = "sync_tracking";
@@ -251,6 +252,103 @@ impl Store {
         Ok(())
     }
 
+    /// An attachment row as the sync layer needs it, without decrypting: its item and
+    /// whether it is live (`None` when there is no row).
+    pub fn attachment_state(&self, id: Uuid) -> Result<Option<AttachmentState>> {
+        self.account_key()?;
+        let row: Option<(String, i64, i64)> = self
+            .conn
+            .query_row(
+                "SELECT item_id, deleted, length(data) FROM attachments WHERE id = ?1",
+                [id.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        Ok(match row {
+            None => None,
+            Some((item_id, deleted, len)) => Some(AttachmentState {
+                item_id: parse_id(&item_id)?,
+                live: deleted == 0 && len > 0,
+            }),
+        })
+    }
+
+    /// The content of a live attachment row, whatever state its item is in.
+    pub fn attachment_content(&self, id: Uuid) -> Result<Zeroizing<Vec<u8>>> {
+        self.account_key()?;
+        let row: Option<(Vec<u8>, String, String)> = self
+            .conn
+            .query_row(
+                "SELECT a.data, a.item_id, i.vault_id FROM attachments a
+                 JOIN items i ON i.id = a.item_id
+                 WHERE a.id = ?1 AND a.deleted = 0 AND length(a.data) > 0",
+                [id.to_string()],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .optional()?;
+        let (data, item_id, vault_id) =
+            row.ok_or_else(|| Error::NotFound(format!("attachment {id}")))?;
+        let (item_id, vault_id) = (parse_id(&item_id)?, parse_id(&vault_id)?);
+        crypto::open(
+            self.vault_key(vault_id)?,
+            &data,
+            &crypto::attachment_aad(vault_id, item_id, id),
+        )
+    }
+
+    /// Ids of the live attachment rows.
+    pub fn attachment_ids(&self) -> Result<Vec<Uuid>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM attachments WHERE deleted = 0 AND length(data) > 0 ORDER BY rowid",
+        )?;
+        let rows = stmt.query_map([], |r| r.get::<_, String>(0))?;
+        rows.map(|r| parse_id(&r?)).collect()
+    }
+
+    /// An attachment's content from sync, for an item the store has. Records nothing;
+    /// writes nothing when the same content is there.
+    pub fn apply_remote_attachment(&mut self, id: Uuid, item_id: Uuid, bytes: &[u8]) -> Result<()> {
+        if let Some(state) = self.attachment_state(id)? {
+            // Attachments never change content: a live row of that item is the same.
+            if state.item_id == item_id && state.live {
+                return Ok(());
+            }
+        }
+        let vault_id: String = self
+            .conn
+            .query_row(
+                "SELECT vault_id FROM items WHERE id = ?1",
+                [item_id.to_string()],
+                |r| r.get(0),
+            )
+            .optional()?
+            .ok_or_else(|| Error::NotFound(format!("item {item_id}")))?;
+        let vault_id = parse_id(&vault_id)?;
+        let data = crypto::seal(
+            self.vault_key(vault_id)?,
+            bytes,
+            &crypto::attachment_aad(vault_id, item_id, id),
+        );
+        self.conn.execute(
+            "INSERT INTO attachments (id, item_id, data, schema) VALUES (?1, ?2, ?3, ?4)
+             ON CONFLICT(id) DO UPDATE SET item_id = excluded.item_id, data = excluded.data,
+                 deleted = 0, revision = attachments.revision + 1",
+            params![id.to_string(), item_id.to_string(), data, SCHEMA_VERSION],
+        )?;
+        Ok(())
+    }
+
+    /// An attachment sync shows as removed. Records nothing.
+    pub fn apply_remote_attachment_removed(&mut self, id: Uuid) -> Result<()> {
+        self.account_key()?;
+        self.conn.execute(
+            "UPDATE attachments SET data = X'', deleted = 1, revision = revision + 1
+             WHERE id = ?1 AND deleted = 0",
+            [id.to_string()],
+        )?;
+        Ok(())
+    }
+
     /// An item the sync engine shows as purged: its data goes, the row stays a tombstone.
     pub fn apply_remote_purge(&mut self, id: Uuid) -> Result<()> {
         self.account_key()?;
@@ -418,4 +516,12 @@ impl MetaWriter {
         )?;
         Ok(())
     }
+}
+
+/// What [`Store::attachment_state`] returns.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct AttachmentState {
+    pub item_id: Uuid,
+    /// `false`: removed.
+    pub live: bool,
 }

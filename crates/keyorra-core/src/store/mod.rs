@@ -21,7 +21,7 @@ mod sync_tests;
 mod tests;
 
 use sync::record_change;
-pub use sync::{Change, ChangeKind, MetaWriter};
+pub use sync::{AttachmentState, Change, ChangeKind, MetaWriter};
 
 const DB_VERSION: i64 = MIGRATIONS.len() as i64;
 // Format label from the Lockbox days; kept so existing vaults and pairings stay readable.

@@ -398,3 +398,42 @@ fn rotation_stops_on_an_unreadable_item_and_changes_nothing() {
     store.unlock(PW).unwrap();
     assert_eq!(store.get_item(good.id).unwrap().title, "good");
 }
+
+/// Plan A2-2: attachment contents from sync, and what the sync layer reads of local ones.
+#[test]
+fn attachments_from_sync_are_stored_and_removed() {
+    let (_dir, _path, mut store) = new_store();
+    store.set_sync_tracking(true).unwrap();
+    let v = store.create_vault("Personal").unwrap();
+    let mut item = Item::new(v.id, ItemKind::Login, "x", 1);
+    store.save_item(&item).unwrap();
+    store.clear_changes(&changes(&store)).unwrap();
+    let att = Uuid::from_bytes([9; 16]);
+    item.attachments.push(crate::model::AttachmentRef {
+        id: att,
+        name: "a.txt".into(),
+        size: 5,
+        extra: Default::default(),
+    });
+    store.apply_remote_item(&item, None).unwrap();
+    assert_eq!(store.attachment_state(att).unwrap(), None);
+    store
+        .apply_remote_attachment(att, item.id, b"bytes")
+        .unwrap();
+    store
+        .apply_remote_attachment(att, item.id, b"bytes")
+        .unwrap();
+    assert_eq!(&store.get_attachment(att).unwrap()[..], b"bytes");
+    let state = store.attachment_state(att).unwrap().unwrap();
+    assert_eq!((state.item_id, state.live), (item.id, true));
+    assert_eq!(&store.attachment_content(att).unwrap()[..], b"bytes");
+    assert_eq!(store.attachment_ids().unwrap(), vec![att]);
+    store.apply_remote_attachment_removed(att).unwrap();
+    assert!(store.get_attachment(att).is_err());
+    assert!(!store.attachment_state(att).unwrap().unwrap().live);
+    assert!(store.attachment_ids().unwrap().is_empty());
+    assert!(changes(&store).is_empty(), "nothing recorded");
+    // A local attachment reads the same way.
+    let local = store.add_attachment(item.id, "b.txt", b"local", 3).unwrap();
+    assert_eq!(&store.attachment_content(local.id).unwrap()[..], b"local");
+}
