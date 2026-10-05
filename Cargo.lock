@@ -2302,6 +2302,8 @@ dependencies = [
  "ed25519-dalek",
  "keyorra-core",
  "keyorra-session",
+ "keyorra-sync",
+ "keyorra-sync-fs",
  "serde",
  "serde_json",
  "tauri",
@@ -2309,6 +2311,7 @@ dependencies = [
  "tauri-plugin-clipboard-manager",
  "tauri-plugin-dialog",
  "tauri-plugin-global-shortcut",
+ "tempfile",
  "uuid",
  "zeroize",
 ]

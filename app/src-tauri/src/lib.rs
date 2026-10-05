@@ -3,10 +3,12 @@ mod commands;
 pub mod native_host;
 mod quick;
 mod screen;
+mod syncfolder;
 mod touchid;
 mod tray;
 
-use std::sync::{Mutex, MutexGuard};
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use keyorra_core::crypto::KdfParams;
@@ -39,6 +41,24 @@ pub fn run() {
             let path = app.path().app_data_dir()?.join("keyorra.db");
             let mut session = Session::new(path, KdfParams::DEFAULT, now());
             session.set_keyring(Box::new(touchid::MacKeyring));
+            // Sync over iCloud Drive (plan A2; A3 lets the user pick another synced folder).
+            let changed = Arc::new(AtomicBool::new(false));
+            let mut watcher = None;
+            if let Some(place) = syncfolder::icloud_place() {
+                let temp = app.path().app_data_dir()?.join("sync-tmp");
+                // Nothing is created in iCloud Drive before sync is turned on; once the
+                // folder exists, changes are noticed from the next launch (and polled).
+                if place.is_dir() {
+                    watcher = syncfolder::Watcher::start(&place, changed.clone());
+                }
+                session.set_sync_link(Box::new(syncfolder::FolderLink::new(
+                    place,
+                    temp,
+                    Arc::new(syncfolder::MacCloud),
+                    Box::new(|| Box::new(touchid::device_keys())),
+                    syncfolder::computer_name(),
+                )));
+            }
             app.manage(AppState(Mutex::new(session)));
             // After `manage`: both call commands that need the session. Neither is essential;
             // without them Keyorra still works from its main window.
@@ -49,7 +69,7 @@ pub fn run() {
                 eprintln!("keyorra: quick search unavailable: {e}");
             }
             let handle = app.handle().clone();
-            std::thread::spawn(move || housekeeping(handle));
+            std::thread::spawn(move || housekeeping(handle, changed, watcher));
             if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
                 let socket = keyorra_session::bridge::wire::socket_path(&home);
                 let bridge_app = app.handle().clone();
@@ -121,9 +141,10 @@ pub fn run() {
 
 /// Every two seconds: lock when idle (and tell the window), clear the clipboard once our copy
 /// has expired — but only if it still holds our copy.
-fn housekeeping(app: AppHandle) {
+fn housekeeping(app: AppHandle, changed: Arc<AtomicBool>, _watcher: Option<syncfolder::Watcher>) {
     // `Instant` does not advance while the Mac sleeps (CLOCK_UPTIME_RAW), unlike wall time.
     let start = Instant::now();
+    let mut schedule = syncfolder::Schedule::new(changed);
     loop {
         std::thread::sleep(Duration::from_secs(2));
         let state = app.state::<AppState>();
@@ -142,9 +163,20 @@ fn housekeeping(app: AppHandle) {
                 let _ = app.clipboard().clear();
             }
         }
+        // Sync while unlocked: on a change in the folder, and every minute.
+        let mut synced = false;
+        if session.status() == keyorra_session::session::Status::Unlocked
+            && session.sync_status().is_ok_and(|s| s.enabled)
+            && schedule.due(t)
+        {
+            synced = session.sync_now(t).is_ok();
+        }
         drop(session);
         if locked {
             let _ = app.emit("locked", ());
+        }
+        if synced {
+            let _ = app.emit("synced", ());
         }
     }
 }

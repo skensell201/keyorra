@@ -258,9 +258,7 @@ impl keyorra_session::sync::Enclave for MacEnclave {
     }
 }
 
-/// Sync device keys sealed to this Mac (plan A1d; the app hands them to sync with the
-/// transport in plan A2).
-#[allow(dead_code)]
+/// Sync device keys sealed to this Mac (plan A1d), handed to sync by the folder link.
 pub fn device_keys() -> keyorra_session::sync::EnclaveDeviceKeys {
     keyorra_session::sync::EnclaveDeviceKeys::new(
         std::sync::Arc::new(DeviceKeysKeyring),
