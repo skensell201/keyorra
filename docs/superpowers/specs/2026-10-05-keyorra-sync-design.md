@@ -399,9 +399,14 @@ would shift the sequence numbers already given to the entries). `header_epoch` a
 ### 4.2 Device identity, and cloned or restored Macs
 
 A device has a random `device_id` and an Ed25519 key pair. The private key lives in the
-macOS Keychain with `kSecAttrAccessibleWhenUnlockedThisDeviceOnly` (through the existing
-`Keyring` abstraction), so it does not travel with Time Machine restores, Migration
-Assistant or a copied home directory, while the SQLite database does.
+sealed to a Secure Enclave key of this Mac (created with
+`kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly` and no user presence, so sync never
+prompts), and the sealed record is kept in a login-keychain item. The data-protection
+keychain, which offers `…ThisDeviceOnly` items directly, needs a provisioning profile the
+app does not have (the same reason as Touch ID). An enclave key never leaves its Mac, so
+the device key does not travel with Time Machine restores, Migration Assistant or a
+copied home directory, while the SQLite database does. Macs without a Secure Enclave
+cannot turn sync on.
 
 Before **every** append the device compares its local head of its own stream with the
 remote head:
@@ -925,8 +930,12 @@ The Ed25519 device key is in the Keychain (§4.2). The Secret Key is sealed unde
 ### 7.3 Joining (another Mac)
 
 1. "Join a synced account": pick the folder or enter the server URL, then paste the
-   **setup code** (`KY1-<account_id>-<secret key>-<main device id>-<main device key code>-<main device head seq>[-<pin>]`)
-   shown by a device that is already set up (it pins the main device and its current head),
+   **setup code** (`KEYORRA-SETUP-1-` followed by base32 (no padding) of: Secret Key id (4
+   ASCII), Secret Key (16 bytes), main device id (16), main device key code (6 bytes),
+   check (first 2 bytes of SHA-256 of `keyorra-setup-code-v1` and the rest). Spaces and
+   case are ignored. It pins the main device; it does not carry the account id (the header
+   names it) or the main device's head (A3 may add a version 2 that does))
+   shown by a device that is already set up,
    or type account id and Secret Key from the Emergency Kit (then the newest header is
    trusted, with a warning if headers disagree about the main device).
 2. Master password → `KEK_sync` → AK from the highest-epoch header (§4.7).
@@ -936,22 +945,32 @@ The Ed25519 device key is in the Keychain (§4.2). The Secret Key is sealed unde
 4. Local data:
    - no local vault → build it from the fold; a local header is created from the same
      master password with a fresh salt;
-   - a local vault of a **different** account → **Merge** (default: re-encrypted under the
-     synced keys as new records; Watchtower's duplicate check helps afterwards) or
-     **Replace**;
-   - a local vault of the **same** account (it left sync earlier, or is rejoining after
-     retirement) → merged **by record id**: a record with the same content as the fold
-     writes nothing; one that differs is written as a new version by the new device
-     (concurrent with the remote ones, so it shows up as a conflict copy if it really
-     differs). No duplicates.
-   Either way the old database is kept as `keyorra.db.pre-sync-YYYYMMDD` until the user
-   deletes it in Settings.
+   - a local vault of a **different** account → its live items are **carried over** as new
+     records into a new vault store for the account (vaults of the same names; trashed
+     items stay behind in the old file);
+   - a local vault of the **same** account (it left sync earlier) → merged **by record id**:
+     when sync was turned off, a fingerprint of every record was kept; a record unchanged
+     here since then takes what the account has; one changed only here is written by the
+     new device; one changed here **and** in the account becomes a conflict copy here (so
+     neither edit is lost). No duplicates. (A version written by the new device after it
+     read the account is not concurrent with what it read, so without the fingerprints a
+     local change would silently replace a remote one.)
+   The old database is kept as `keyorra.db.pre-sync-YYYYMMDD` until the user deletes it in
+   Settings (only when the file is replaced, i.e. another account).
 
 ### 7.4 Leaving
 
 - **Turn off sync on this Mac**: stops syncing (the main device removes the id; a device
   cannot remove itself), keeps the local vault as a normal local vault, drops the sync tables except the record ids (so a later rejoin merges by
-  id).
+  id). The main device cannot turn sync off while other devices are approved (they would
+  be left without a main device): it removes them first or starts a new account. What is
+  kept for a later rejoin is a fingerprint per record (`sync-base`), not the sync tables.
+- **Start a new account from this Mac**: when the main device must start over (§4.2) or
+  the user chooses it. Sync is turned off, every key of the local vault is replaced (new
+  account key and vault keys, everything re-encrypted), and sync is turned on again as a
+  new account with a new Secret Key. Other Macs join the new account; the old account's
+  files stay until deleted. This is not C1 key rotation: it makes a new account rather
+  than moving the existing one forward.
 - **Delete synced data**: offered only on the last live device, after typing the account
   id. Folder: removes the Keyorra folder contents. Server: deletes the account.
 
@@ -994,13 +1013,13 @@ secrets. Shown only after re-entering the master password.
 
 ### 8.1 Master password change
 
-On device A: re-wrap AK in the local header (as today), write header epoch `n+1` (new salt,
+On the main device: re-wrap AK in the local header (as today), write header epoch `n+1` (new salt,
 same AK and Secret Key) as a `Header` entry and file, and replace `SHA-256(AUTH)` on the
 server (§6.3). Device tokens stay valid. Other devices adopt the new header after checking
 its entry, keep accepting the old password locally until the user unlocks with the new one
 (the Sync screen says "Master password changed on MacBook Pro"), and then re-wrap their
 local header. Touch ID keeps working (AK did not change). Old header files are deleted per
-§4.7.
+§4.7. Other devices refuse a master password change while synced.
 
 Stated limit: a password change does not lock out someone who already has the old
 password, the Secret Key and a copy of the folder. That takes key rotation.
