@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { IconClose } from "./icons";
-import { api, errorMessage, isCmdError, type PairedBrowser, type Settings } from "../api";
+import { api, errorMessage, isCmdError, type PairedBrowser, type Settings, type TouchIdState } from "../api";
 import { applyTheme, loadTheme, THEMES, type Theme } from "../theme";
 
 const LOCK_MINUTES = [1, 5, 10, 30, 60, 240];
@@ -25,6 +25,24 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   const [browsers, setBrowsers] = useState<PairedBrowser[]>([]);
   const [browsersFailed, setBrowsersFailed] = useState(false);
   const [browsersNote, setBrowsersNote] = useState("");
+  const [touchId, setTouchId] = useState<TouchIdState | null>(null);
+  const [touchIdError, setTouchIdError] = useState<string | null>(null);
+  useEffect(() => {
+    api
+      .touchIdState()
+      .then(setTouchId)
+      .catch(() => setTouchId(null));
+  }, []);
+  async function toggleTouchId(on: boolean) {
+    setTouchIdError(null);
+    try {
+      if (on) await api.enableTouchId();
+      else await api.disableTouchId();
+      setTouchId(await api.touchIdState());
+    } catch (e) {
+      setTouchIdError(errorMessage(e));
+    }
+  }
   useEffect(() => {
     api
       .pairedBrowsers()
@@ -161,6 +179,25 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
           {settingsError && (
             <p className="error" role="alert">
               {settingsError}
+            </p>
+          )}
+        </section>
+
+        <section className="modal-section">
+          <h3>Touch ID</h3>
+          {touchId && !touchId.available && <p className="muted">Touch ID isn't available on this Mac.</p>}
+          {touchId?.available && (
+            <label className="check">
+              <input type="checkbox" checked={touchId.enabled} onChange={(e) => toggleTouchId(e.target.checked)} />
+              Unlock with Touch ID
+            </label>
+          )}
+          <p className="muted">
+            Keepsake still asks for your master password every 14 days and after your fingerprints change.
+          </p>
+          {touchIdError && (
+            <p className="error" role="alert">
+              {touchIdError}
             </p>
           )}
         </section>

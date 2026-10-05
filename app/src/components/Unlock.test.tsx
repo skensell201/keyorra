@@ -6,10 +6,16 @@ import { Unlock } from "./Unlock";
 
 vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
-  return { ...actual, api: { ...actual.api, unlock: vi.fn(), startOver: vi.fn() } };
+  return { ...actual, api: { ...actual.api, unlock: vi.fn(), startOver: vi.fn(), touchIdState: vi.fn(), unlockWithTouchId: vi.fn() } };
 });
 
+const touchOff = { available: true, enabled: false, passwordDue: false };
+const touchOn = { available: true, enabled: true, passwordDue: false };
+
 beforeEach(() => {
+  vi.restoreAllMocks();
+  vi.mocked(api.touchIdState).mockReset().mockResolvedValue(touchOff);
+  vi.mocked(api.unlockWithTouchId).mockReset().mockResolvedValue(undefined);
   vi.mocked(api.unlock).mockReset();
   vi.mocked(api.startOver).mockReset().mockResolvedValue("/x/keepsake.db.unreadable-1");
 });
@@ -82,4 +88,64 @@ test("an unreadable database offers to start over", async () => {
   await user.click(screen.getByRole("button", { name: "Move it aside and start over" }));
   expect(api.startOver).toHaveBeenCalled();
   await waitFor(() => expect(onStartOver).toHaveBeenCalled());
+});
+
+test("Touch ID unlocks right away when the window is in front", async () => {
+  vi.spyOn(document, "hasFocus").mockReturnValue(true);
+  vi.mocked(api.touchIdState).mockResolvedValue(touchOn);
+  const onUnlocked = vi.fn();
+  render(<Unlock onUnlocked={onUnlocked} onStartOver={vi.fn()} />);
+  await waitFor(() => expect(onUnlocked).toHaveBeenCalled());
+  expect(api.unlockWithTouchId).toHaveBeenCalledTimes(1);
+});
+
+test("Touch ID waits until the window comes to the front", async () => {
+  vi.spyOn(document, "hasFocus").mockReturnValue(false);
+  vi.mocked(api.touchIdState).mockResolvedValue(touchOn);
+  render(<Unlock onUnlocked={vi.fn()} onStartOver={vi.fn()} />);
+  expect(await screen.findByRole("button", { name: "Unlock with Touch ID" })).toBeInTheDocument();
+  expect(api.unlockWithTouchId).not.toHaveBeenCalled();
+  act(() => {
+    window.dispatchEvent(new Event("focus"));
+  });
+  await waitFor(() => expect(api.unlockWithTouchId).toHaveBeenCalledTimes(1));
+  act(() => {
+    window.dispatchEvent(new Event("focus"));
+  });
+  expect(api.unlockWithTouchId).toHaveBeenCalledTimes(1);
+});
+
+test("a dismissed prompt leaves the password form; the button tries again", async () => {
+  const user = userEvent.setup();
+  vi.spyOn(document, "hasFocus").mockReturnValue(true);
+  vi.mocked(api.touchIdState).mockResolvedValue(touchOn);
+  vi.mocked(api.unlockWithTouchId).mockRejectedValueOnce({ kind: "cancelled", message: "Cancelled" });
+  const onUnlocked = vi.fn();
+  render(<Unlock onUnlocked={onUnlocked} onStartOver={vi.fn()} />);
+  const button = await screen.findByRole("button", { name: "Unlock with Touch ID" });
+  await waitFor(() => expect(button).toBeEnabled());
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  await user.click(button);
+  await waitFor(() => expect(onUnlocked).toHaveBeenCalled());
+});
+
+test("when the password is required, Touch ID steps aside with the reason", async () => {
+  vi.spyOn(document, "hasFocus").mockReturnValue(true);
+  vi.mocked(api.touchIdState).mockResolvedValue(touchOn);
+  vi.mocked(api.unlockWithTouchId).mockRejectedValue({
+    kind: "passwordRequired",
+    message: "Your fingerprints changed. Unlock with your master password, then turn Touch ID on again in Settings.",
+  });
+  render(<Unlock onUnlocked={vi.fn()} onStartOver={vi.fn()} />);
+  expect(await screen.findByRole("alert")).toHaveTextContent("fingerprints changed");
+  expect(screen.queryByRole("button", { name: "Unlock with Touch ID" })).not.toBeInTheDocument();
+});
+
+test("every 14 days the password is asked for instead", async () => {
+  vi.spyOn(document, "hasFocus").mockReturnValue(true);
+  vi.mocked(api.touchIdState).mockResolvedValue({ ...touchOn, passwordDue: true });
+  render(<Unlock onUnlocked={vi.fn()} onStartOver={vi.fn()} />);
+  expect(await screen.findByText(/every 14 days/)).toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Unlock with Touch ID" })).not.toBeInTheDocument();
+  expect(api.unlockWithTouchId).not.toHaveBeenCalled();
 });

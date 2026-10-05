@@ -161,6 +161,14 @@ export interface PairedBrowser {
   createdAt: number;
 }
 
+export interface TouchIdState {
+  /** This Mac has Touch ID with enrolled fingers. */
+  available: boolean;
+  enabled: boolean;
+  /** 14 days since the master password was entered: Touch ID waits for it. */
+  passwordDue: boolean;
+}
+
 export const api = {
   status: () => invoke<Status>("status"),
   create: (password: string) => invoke<void>("create_vault_file", { password }),
@@ -203,5 +211,10 @@ export const api = {
   onQuickOpen: (callback: () => void): Promise<UnlistenFn> => listen("quick-open", () => callback()),
   quickCopy: (id: string, what: QuickCopy) => invoke<void>("quick_copy", { id, what }),
   quickHide: () => invoke<void>("quick_hide"),
+  touchIdState: () => invoke<TouchIdState>("touch_id_state"),
+  enableTouchId: () => invoke<void>("enable_touch_id"),
+  disableTouchId: () => invoke<void>("disable_touch_id"),
+  /** Shows the system Touch ID prompt; rejects with kind "cancelled" when dismissed. */
+  unlockWithTouchId: () => invoke<void>("unlock_with_touch_id"),
   onItemsChanged: (callback: () => void): Promise<UnlistenFn> => listen("items-changed", () => callback()),
 };

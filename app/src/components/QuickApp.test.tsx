@@ -12,6 +12,7 @@ vi.mock("../api", async (importOriginal) => {
       ...actual.api,
       status: vi.fn(),
       items: vi.fn(),
+      touchIdState: vi.fn().mockResolvedValue({ available: false, enabled: false, passwordDue: false }),
       quickHide: vi.fn(),
       onLocked: vi.fn(),
       onUnlocked: vi.fn(),

@@ -16,6 +16,9 @@ vi.mock("../api", async (importOriginal) => {
       connectBrowsers: vi.fn(),
       pairedBrowsers: vi.fn(),
       removePairedBrowser: vi.fn(),
+      touchIdState: vi.fn(),
+      enableTouchId: vi.fn(),
+      disableTouchId: vi.fn(),
     },
   };
 });
@@ -27,6 +30,9 @@ beforeEach(() => {
   vi.mocked(api.pairedBrowsers).mockReset().mockResolvedValue([{ clientId: "c1", name: "Chrome", createdAt: 1 }]);
   vi.mocked(api.connectBrowsers).mockReset().mockResolvedValue(["Chrome", "Opera"]);
   vi.mocked(api.removePairedBrowser).mockReset().mockResolvedValue(undefined);
+  vi.mocked(api.touchIdState).mockReset().mockResolvedValue({ available: true, enabled: false, passwordDue: false });
+  vi.mocked(api.enableTouchId).mockReset().mockResolvedValue(undefined);
+  vi.mocked(api.disableTouchId).mockReset().mockResolvedValue(undefined);
 });
 
 test("loads and saves timeouts", async () => {
@@ -158,4 +164,33 @@ test("tells how to add Safari when its app is missing", async () => {
       "Ready in Chrome. Load the Keepsake extension there and click Connect. Safari: install Keepsake for Safari.",
     ),
   ).toBeInTheDocument();
+});
+
+test("turns Touch ID on and off", async () => {
+  const user = userEvent.setup();
+  render(<SettingsDialog onClose={vi.fn()} />);
+  const box = await screen.findByLabelText("Unlock with Touch ID");
+  expect(box).not.toBeChecked();
+  vi.mocked(api.touchIdState).mockResolvedValue({ available: true, enabled: true, passwordDue: false });
+  await user.click(box);
+  expect(api.enableTouchId).toHaveBeenCalled();
+  await waitFor(() => expect(box).toBeChecked());
+  vi.mocked(api.touchIdState).mockResolvedValue({ available: true, enabled: false, passwordDue: false });
+  await user.click(box);
+  expect(api.disableTouchId).toHaveBeenCalled();
+  await waitFor(() => expect(box).not.toBeChecked());
+  expect(screen.getByText(/every 14 days/)).toBeInTheDocument();
+});
+
+test("Touch ID errors and Macs without it", async () => {
+  const user = userEvent.setup();
+  vi.mocked(api.enableTouchId).mockRejectedValue({ kind: "other", message: "Keychain: Failed" });
+  const { unmount } = render(<SettingsDialog onClose={vi.fn()} />);
+  await user.click(await screen.findByLabelText("Unlock with Touch ID"));
+  expect(await screen.findByRole("alert")).toHaveTextContent("Keychain: Failed");
+  unmount();
+  vi.mocked(api.touchIdState).mockResolvedValue({ available: false, enabled: false, passwordDue: false });
+  render(<SettingsDialog onClose={vi.fn()} />);
+  expect(await screen.findByText("Touch ID isn't available on this Mac.")).toBeInTheDocument();
+  expect(screen.queryByLabelText("Unlock with Touch ID")).not.toBeInTheDocument();
 });

@@ -1,6 +1,6 @@
 import { Keyhole } from "./Keyhole";
-import { useEffect, useState, type FormEvent } from "react";
-import { api, errorMessage, isCmdError } from "../api";
+import { useCallback, useEffect, useRef, useState, type FormEvent } from "react";
+import { api, errorMessage, isCmdError, type TouchIdState } from "../api";
 
 interface Props {
   onUnlocked: () => void;
@@ -14,6 +14,51 @@ export function Unlock({ onUnlocked, onStartOver }: Props) {
   const [wait, setWait] = useState(0);
   const [busy, setBusy] = useState(false);
   const [shakes, setShakes] = useState(0);
+  const [touchId, setTouchId] = useState<TouchIdState | null>(null);
+  const prompted = useRef(false);
+  const canTouch = Boolean(touchId?.available && touchId.enabled && !touchId.passwordDue);
+
+  useEffect(() => {
+    api
+      .touchIdState()
+      .then(setTouchId)
+      .catch(() => setTouchId(null));
+  }, []);
+
+  const touchUnlock = useCallback(async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.unlockWithTouchId();
+      onUnlocked();
+    } catch (err) {
+      if (isCmdError(err) && err.kind === "cancelled") {
+        // The user chose the password instead; nothing to say.
+      } else if (isCmdError(err) && err.kind === "passwordRequired") {
+        setTouchId(null);
+        setError(err.message);
+      } else if (isCmdError(err) && err.kind === "notADatabase") {
+        setUnreadable(true);
+      } else {
+        setError(errorMessage(err));
+      }
+    } finally {
+      setBusy(false);
+    }
+  }, [onUnlocked]);
+
+  // Ask once, as soon as this window is in front (not while the Mac sits idle behind it).
+  useEffect(() => {
+    if (!canTouch) return;
+    const attempt = () => {
+      if (prompted.current) return;
+      prompted.current = true;
+      void touchUnlock();
+    };
+    if (document.hasFocus()) attempt();
+    window.addEventListener("focus", attempt);
+    return () => window.removeEventListener("focus", attempt);
+  }, [canTouch, touchUnlock]);
   const [unreadable, setUnreadable] = useState(false);
   const [confirmStartOver, setConfirmStartOver] = useState(false);
 
@@ -110,6 +155,14 @@ export function Unlock({ onUnlocked, onStartOver }: Props) {
         <button className="primary" type="submit" disabled={busy || !password || wait > 0}>
           {busy ? "Unlocking…" : "Unlock"}
         </button>
+        {canTouch && (
+          <button type="button" onClick={touchUnlock} disabled={busy}>
+            Unlock with Touch ID
+          </button>
+        )}
+        {touchId?.enabled && touchId.passwordDue && (
+          <p className="muted">Enter your master password. Keepsake asks for it every 14 days, then Touch ID works again.</p>
+        )}
       </form>
     </div>
   );

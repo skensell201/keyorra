@@ -11,6 +11,7 @@ vi.mock("./api", async (importOriginal) => {
       ...actual.api,
       status: vi.fn(),
       lock: vi.fn(),
+      touchIdState: vi.fn().mockResolvedValue({ available: false, enabled: false, passwordDue: false }),
       vaults: vi.fn().mockResolvedValue([]),
       items: vi.fn().mockResolvedValue([]),
       watchtower: vi.fn().mockRejectedValue({ kind: "locked", message: "locked" }),
