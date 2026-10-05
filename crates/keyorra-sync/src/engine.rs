@@ -736,8 +736,12 @@ impl<R: RngCore + CryptoRng> Engine<R> {
     fn materialize_passes(&mut self, wall_ms: u64) -> Result<bool> {
         for _ in 0..4 {
             let view = self.fold.view();
-            if view.resolutions.is_empty() && view.attachment_copies.is_empty() {
+            if !view.owes_copies() {
                 return Ok(true);
+            }
+            for copy in view.orphan_copies {
+                let doc = Doc::Item(copy.payload);
+                self.write(RecordKind::Item, copy.copy_id, copy.vault_id, doc, wall_ms)?;
             }
             for r in view.resolutions {
                 for copy in &r.copies {
@@ -762,7 +766,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             }
         }
         let view = self.fold.view();
-        Ok(view.resolutions.is_empty() && view.attachment_copies.is_empty())
+        Ok(!view.owes_copies())
     }
 
     /// Item edits first write any conflict copies the fold owes, so an edit can never

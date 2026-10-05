@@ -171,9 +171,20 @@ pub struct View {
     pub attachments: BTreeMap<Uuid, AttachmentPayload>,
     pub resolutions: Vec<Resolution>,
     pub attachment_copies: Vec<AttachmentCopy>,
+    /// Conflict copies whose only versions no longer count (written by a device that was
+    /// revoked since), of a source version that still counts: written again by a device
+    /// that may write, so the copied content does not disappear with the revocation.
+    pub orphan_copies: Vec<PendingCopy>,
 }
 
 impl View {
+    /// Whether conflict copies or their attachment records are still owed.
+    pub fn owes_copies(&self) -> bool {
+        !self.resolutions.is_empty()
+            || !self.attachment_copies.is_empty()
+            || !self.orphan_copies.is_empty()
+    }
+
     /// Items that are conflict copies (live or in Recently Deleted).
     pub fn conflict_copies(&self) -> Vec<Uuid> {
         self.items
@@ -443,6 +454,29 @@ impl Fold {
                     }
                 }
             }
+        }
+        for ((kind, id), versions) in &self.retained {
+            if *kind != RecordKind::Item || self.sets.contains_key(&(*kind, *id)) {
+                continue;
+            }
+            let orphan = versions.iter().find_map(|(a, _)| {
+                let Doc::Item(p) = &a.doc else { return None };
+                if !p.content_from.is_empty() {
+                    return None;
+                }
+                let marker = crate::payload::conflict_marker(p)?;
+                let source_counts = self
+                    .retained
+                    .get(&(RecordKind::Item, marker.of))?
+                    .iter()
+                    .any(|(s, admitted)| *admitted && s.hash() == marker.version);
+                source_counts.then(|| PendingCopy {
+                    copy_id: *id,
+                    vault_id: a.vault_id,
+                    payload: p.clone(),
+                })
+            });
+            view.orphan_copies.extend(orphan);
         }
         for ((kind, id), set) in &self.sets {
             if *kind != RecordKind::Vault {
@@ -908,6 +942,47 @@ mod tests {
         let proposed = f.view().attachment_copies;
         assert_eq!(proposed.len(), 1);
         assert_eq!(proposed[0].payload.item_id, copy.copy_id);
+    }
+
+    #[test]
+    fn a_copy_written_only_by_a_removed_device_is_owed_again() {
+        struct CutB;
+        impl Admission for CutB {
+            fn admits(&self, stream: &DeviceId, seq: u64) -> bool {
+                *stream != B || seq <= 1
+            }
+        }
+        let mut f = Fold::default();
+        f.accept(item(A, 1, &[(A, 1)], 5, json("a", &[])), &CutB)
+            .unwrap();
+        f.accept(item(B, 1, &[(B, 1)], 9, json("b", &[])), &CutB)
+            .unwrap();
+        let copy = f.view().resolutions[0].copies[0].clone();
+        // B wrote the copy (of A's version) after its cut: it does not count.
+        f.accept(
+            Accepted {
+                stream: B,
+                seq: 2,
+                kind: RecordKind::Item,
+                record_id: copy.copy_id,
+                vault_id: copy.vault_id,
+                version: Version {
+                    vector: [(B, 1)].into_iter().collect(),
+                    hlc: 10,
+                    author: B,
+                },
+                doc: Doc::Item(copy.payload.clone()),
+            },
+            &CutB,
+        )
+        .unwrap();
+        let view = f.view();
+        assert_eq!(view.orphan_copies.len(), 1);
+        assert_eq!(view.orphan_copies[0].copy_id, copy.copy_id);
+        assert!(view.owes_copies());
+        // With B fully admitted the copy counts and nothing is owed for it.
+        f.refold(&AdmitAll);
+        assert!(f.view().orphan_copies.is_empty());
     }
 
     #[test]

@@ -98,10 +98,7 @@ impl Cluster {
         for (i, d) in self.devices.iter().enumerate().skip(1) {
             assert_eq!(d.view(), first, "device {i} differs from device 0");
         }
-        assert!(
-            first.resolutions.is_empty(),
-            "conflict copies left to materialise"
-        );
+        assert!(!first.owes_copies(), "conflict copies left to materialise");
     }
 
     /// A minimal item JSON, as the local store would write it.
