@@ -89,6 +89,7 @@ pub(crate) fn compute() -> BTreeMap<String, String> {
         epoch: 1,
         generation: 1,
         root_device: device_id,
+        root_key: device_key.verifying_key().to_bytes(),
         kdf: KDF,
         salt,
         secret_key_id: "A3K7".into(),

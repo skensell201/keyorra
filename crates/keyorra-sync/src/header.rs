@@ -27,18 +27,23 @@ pub struct Header {
     pub epoch: u32,
     pub generation: u32,
     pub root_device: DeviceId,
+    /// The main device's public key: how a joining device learns it (never from the store's
+    /// streams). Bound into the wrapped account key like every other field, so only someone
+    /// with the master password and Secret Key can change it.
+    pub root_key: [u8; 32],
     pub kdf: KdfParams,
     pub salt: [u8; 16],
     pub secret_key_id: String,
     pub wrapped_account_key: Vec<u8>,
 }
 
-const FIELDS: [&str; 9] = [
+const FIELDS: [&str; 10] = [
     "keyorra_sync",
     "account_id",
     "epoch",
     "generation",
     "root_device",
+    "root_key",
     "kdf",
     "salt",
     "secret_key_id",
@@ -129,6 +134,7 @@ impl Header {
             ("epoch", Value::Uint(self.epoch.into())),
             ("generation", Value::Uint(self.generation.into())),
             ("root_device", Value::bytes(self.root_device)),
+            ("root_key", Value::bytes(self.root_key)),
             (
                 "kdf",
                 Value::map(vec![
@@ -169,6 +175,7 @@ impl Header {
             epoch: f.get("epoch")?.as_u32()?,
             generation: f.get("generation")?.as_u32()?,
             root_device: f.get("root_device")?.as_array_of()?,
+            root_key: f.get("root_key")?.as_array_of()?,
             kdf: KdfParams {
                 m_kib: kdf.get("m_kib")?.as_u32()?,
                 t: kdf.get("t")?.as_u32()?,
@@ -240,8 +247,14 @@ impl HeaderFile {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// A valid header for other modules' tests.
+    #[allow(dead_code)] // used from Task 2 on
+    pub(crate) fn sample_header() -> Header {
+        header_for("pw", &Key::from_bytes([0x30; 32]), 1)
+    }
 
     const ACCOUNT: AccountId = [0x10; 16];
     const DEVICE: DeviceId = [0x40; 16];
@@ -259,6 +272,7 @@ mod tests {
             epoch,
             generation: 1,
             root_device: DEVICE,
+            root_key: [0x42; 32],
             kdf,
             salt: SALT,
             secret_key_id: "A3K7".into(),
@@ -331,6 +345,10 @@ mod tests {
             },
             Header {
                 root_device: [0x41; 16],
+                ..h.clone()
+            },
+            Header {
+                root_key: [0x43; 32],
                 ..h.clone()
             },
             Header {

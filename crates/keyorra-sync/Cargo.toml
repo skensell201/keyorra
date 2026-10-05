@@ -20,7 +20,7 @@ zeroize = "1"
 
 [features]
 # Exposes the fault-injecting transport and the simulated cluster to other crates' tests.
-test-utils = []
+test-utils = ["keyorra-core/test-utils"]
 
 [dev-dependencies]
 keyorra-core = { path = "../keyorra-core", features = ["test-utils"] }
