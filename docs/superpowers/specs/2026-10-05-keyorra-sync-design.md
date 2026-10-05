@@ -366,7 +366,7 @@ Checkpoint { heads: {DeviceId -> (seq, hash)} }              // before writes af
 Genesis    { account_id, device_pk, name }                   // root device only, seq 1
 Endorse    { device_id, device_pk, name, statement_sig }     // by a live device (§4.3)
 SelfJoin   { device_pk, name, statement_sig }                // Emergency-Kit join, own stream
-Revoke     { device_id, last_valid_seq }
+Revoke     { device_id, last_valid_seq, last_valid_hash }
 Retire     { }                                               // this device id is done (§4.2)
 Header     { header }                                        // account header (§4.7)
 Snapshot   { name, sha256, frontier }                        // chains snapshots into the log
@@ -429,20 +429,38 @@ the cut is accepted.
   approved (§6.4): server approval and log endorsement are one act.
 - **SelfJoin**: a device that joins with the Emergency Kit and no approver writes
   `SelfJoin` as the first entry of its own stream, signed by itself. It proves knowledge
-  of AK (the segment is sealed with `K_seg`) and nothing more. Every other live device
-  shows a red alarm: "New device 'MacBook Air' joined with the Emergency Kit and was not
-  approved by any of your devices. If this wasn't you: Remove it and rotate keys." The user
-  can mark it as expected, which writes an `Endorse` for it.
-- **Live**: a device is live if it is the root or has an accepted `Endorse`/`SelfJoin`,
-  and no accepted `Revoke` names it. An endorsement made before the endorser's revocation
-  cut stays valid (revoking one device does not cascade).
-- **Which revocations count** (made precise while planning A1c-1): a `Revoke` counts if the
-  revoker revokes itself, or is introduced without the revoked device (so a device endorsed
-  after its endorser's cut cannot revoke the endorser back), and if it was written before
-  the revoker's own cut, ignoring a cut that came from the device being revoked (so mutual
-  revocations both apply while a removed device cannot remove others afterwards). The
-  result is computed from all trust entries in `(stream, seq)` order, independent of
-  arrival order.
+  of AK (the segment is sealed with `K_seg`) and nothing more. Never valid in the root's
+  stream.
+- **Powers** (trust redesign after the A1c-1 review): only the root and devices endorsed by
+  a device with powers have **powers**: they may endorse and revoke others. A self-joined
+  device may read and write records but has no powers: its endorsements and its revocations
+  of others are ignored. Every other device **pauses with a red alarm** ("New device
+  'MacBook Air' joined with the Emergency Kit and was not approved by any of your devices")
+  until the user approves it (an `Endorse`, which gives it powers) or removes it; either
+  resolves the alarm on every device once the entry arrives. Powers are not retroactive:
+  an endorsement or revocation counts only if its author, by its own earlier checkpoints,
+  had already received an endorsement of itself (the root needs none).
+- **Key conflicts**: one id endorsed with two different keys, both by counting
+  endorsements, is **quarantined**: not introduced, alarm, no stream rejected. An
+  endorsement beats a `SelfJoin` of the same id with another key, in any arrival order (a
+  reader never verifies a stream with a self-certified key while any trust entry is still
+  waiting to be applied).
+- **Root pinning**: a device that joins by pairing learns the root's key from the pairing
+  (A1c-2 binds it in the account header); a `Genesis` with another key is ignored.
+- **Which revocations count**: a `Revoke` of another device counts if its author is
+  introduced, had powers when writing it (above), and wrote it at a position that counts
+  (not after its own cut). A self-revocation counts if written before any cut set by
+  others. Since cuts depend on which revocations count, the result is a deterministic
+  fixpoint over all trust entries: revocations that count even under every candidate cut
+  certainly count; the remaining ones (devices removing each other at the same time) are
+  decided by distance from the root along endorsements, closest first, so a device closer
+  to the root wins; equally close devices removing each other are both removed (fail-safe).
+  The result depends only on the set of trust entries, never on arrival order.
+- **Cuts** come only from revocations that count: a device's cut is the lowest one set by
+  others; a self-revocation cuts at the entry before it and only if nobody else cut the
+  device (it never lowers someone else's cut). A cut is never below the target's position
+  that the revoker had listed in its own checkpoints before the `Revoke`: a revocation cannot
+  erase history the revoker had seen.
 - A device that is not introduced yet reads but does not write; a removed device does not
   write any more.
 
@@ -457,31 +475,44 @@ An entry `e` at position `(D, seq)` is **accepted** iff:
 
 1. its segment verifies: shape, AEAD under `K_seg`, chain linkage from the previous
    accepted head (or a snapshot frontier, §4.8), Ed25519 signature with D's key;
-2. D's introduction (`Genesis`, `Endorse` or `SelfJoin`) is accepted;
-3. if D is revoked, `seq ≤ last_valid_seq` of the earliest accepted revocation of D;
-4. **causal delivery, per record** (revised while planning A1c-1): a received segment
-   advances its stream at once; each of its entries is then applied as soon as what it
-   needs is there: a `Put` waits for its vault's key and for the earlier versions of other
-   devices that its vector counts (§3.3); entries of one stream keep their order per
-   record (trust entries in one lane). Independent records keep flowing, so one waiting
-   record no longer holds back the stream (review I6). Checkpoints serve detection
-   (§4.5), not delivery;
+2. D is introduced (§4.3) and not quarantined;
+3. `seq` is not after D's cut;
+4. **causal delivery, per record**: a received segment advances its stream at once; each of
+   its entries is then applied as soon as what it needs is there: a `Put` waits for a vault
+   key that opens it and for the earlier versions of other devices that its vector counts
+   (§3.3); entries of one stream keep their order per record (trust entries in one lane).
+   Independent records keep flowing. Checkpoints serve detection (§4.5), not delivery;
 5. the validations of §3.3 pass for every `Put`.
 
-When a `Revoke` is accepted, the records with versions from the revoked stream after its
-cut are **re-folded** from the retained versions (§3.4). A checkpoint claim of a position
-that has not arrived for 24 h produces a warning naming the device whose changes are
-missing.
+**Only admitted positions affect anything** (trust redesign): checkpoints are evaluated
+only at positions that count; vault keys come only from admitted vault versions (a body that
+none of them opens waits, it never rejects the stream); a conflict copy written past a cut is
+never taken as content (§4.6). Trust questions never reject a stream: an invalid trust entry
+is ignored and reported.
+
+When trust changes, the records are **re-folded** from the retained versions (§3.4).
+Records written past a stream's cut are not read at all (their ids are noted, §4.6); trust
+entries and checkpoints past it are still read, and the records are read again if the cut
+moves. A checkpoint claim of a position that has not arrived for 24 h produces a warning
+naming the device whose changes are missing.
 
 ### 4.5 Rollback, fork and withholding detection
 
 For every stream a device stores the newest accepted `(seq, hash)` (`sync_heads`), the chain
-hash at the end of every received segment, and the heads that other devices' checkpoints
-claim to have seen. Rollback is noticed by comparing the store's head of a stream
-(`Transport::head`, from file names or server metadata) with the received head before
-reading, and the store's head of the own stream with the last confirmed own position before
-writing. While an alarm is raised, a sync round does nothing and reports the alarm as an
-error.
+hash of **every** received entry (so a rewrite inside a segment is noticed too), and the
+heads that other devices' checkpoints claim to have seen (every unmet claim is kept; the
+oldest one drives the withholding warning). Rollback is noticed by comparing the store's
+head of a stream (`Transport::head`, from file names or server metadata) with the received
+head before reading, and the store's head of the own stream with the last confirmed own
+position before writing; a head that cannot be read is reported, never silently taken as
+fine. A `Revoke` names the chain hash at its cut, checked like a checkpoint claim.
+
+Alarms (rollback, fork, self-joined device, key conflict) form a queue; each is decided
+separately. While any is open, records are not applied and nothing is materialised; trust
+entries are still applied (so approving or removing a device on one Mac resolves the alarm
+everywhere) and the user's own changes are still pushed, unless the alarm concerns this
+device's own stream. Two histories of a removed device past its cut raise nothing: neither
+counts.
 
 | Attack by folder/server | Detected by | Reaction |
 |---|---|---|
@@ -510,18 +541,23 @@ first honest crossing exposes it. Withholding cannot be prevented, only reported
 
 ### 4.6 Revocation
 
-`Revoke {device_id, last_valid_seq}` by any live device; `last_valid_seq` is the newest
-head of that device the revoker has seen. Entries after the cut are not accepted; affected
-records are re-folded.
+`Revoke {device_id, last_valid_seq, last_valid_hash}` by a device with powers (or by the
+device itself); `last_valid_seq` is the newest head of that device the revoker has seen, and
+`last_valid_hash` its chain hash (a mismatch with what a reader received is a fork). Entries
+after the cut are not accepted; affected records are re-folded. Which revocations count and
+where cuts fall: §4.3.
 
 Limit, found while planning A1c-1: devices that received the removed device's later
 versions *before* they heard of the revocation may have written on top of them (a
 collapse, an edit); those versions are theirs and keep counting, content included. What
 must not happen is that something disappears: a conflict copy that only the removed device
-had written, of a version that still counts, is written again by a device that may write
-(protocol §10.4). The server additionally disables the device's token. If two devices
-revoke each other concurrently, both revocations apply and the user gets an alarm pointing
-to key rotation (rare; deliberately not automated).
+had written, of a version that still counts, is written again by a device that may write.
+Only the copy's record id is taken from what the removed device wrote: it must be the copy
+id derived from an admitted version, and the content is made again from that version
+(protocol §10.4), so a removed device can at worst make old content reappear as a copy,
+never bring in its own. The server additionally disables the device's token. If two
+equally close devices revoke each other concurrently, both revocations apply (rare;
+deliberately not automated beyond that).
 
 ### 4.7 Account headers
 
@@ -1026,7 +1062,13 @@ TDD as in the MVP. In order of importance:
    devices with random delivery and faults. After full delivery: identical state on every
    device (convergence); the same state for any delivery order of the same accepted set;
    no written content lost (present as the item or a copy, unless superseded by a purge
-   or a revocation cut); every detectable attack detected.
+   or a revocation cut); every detectable attack detected. **With an adversary**: a removed
+   device that kept its keys writes arbitrary signed entries past its cut (records,
+   approvals, removals, checkpoints, a new vault key, forged copies, a second history), a
+   device self-joins with the Emergency Kit and tries to remove others, the store rolls
+   streams back; honest devices still converge, nobody honest is removed, nothing forged
+   shows, and a device that joins afterwards sees exactly the same state. Each attack from
+   the A1c-1 review is also a fixed regression test.
 7. **Folder transport**: on a temp dir; plus a macOS-only, ignored-by-default suite on a
    real iCloud Drive folder (eviction forced with `brctl evict`, in tests only); dataless
    File Provider files never opened; temp files never appear in the synced tree. Dropbox
