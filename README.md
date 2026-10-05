@@ -52,13 +52,13 @@ Safari loads web extensions only from inside a Mac app, so the extension ships i
 app's socket and starts Keepsake if it isn't running; no host manifest is involved.
 
 ```bash
-safari/build.sh                         # builds extension/dist/safari and the app, installs it to /Applications
-KEEPSAKE_TEAM=ABCDE12345 safari/build.sh  # same, signed with your Apple Developer team
+safari/build.sh                           # builds extension/dist/safari and the app, installs it to /Applications
+KEEPSAKE_TEAM=ABCDE12345 safari/build.sh  # same, signed with another Apple Developer team
 ```
 
-1. Without a team the build is signed ad hoc: in Safari, Settings… → Advanced → "Show features
-   for web developers", then Develop → **Allow Unsigned Extensions** (needed again after every
-   Safari restart).
+1. The build is signed with the team in `safari/Signing.xcconfig` (a free Apple ID's Personal
+   Team works; sign in once in Xcode → Settings → Accounts). Without any team, sign ad hoc and
+   enable Develop → **Allow Unsigned Extensions** in Safari after every restart.
 2. Open "Keepsake for Safari" → **Open Safari Extensions Settings** → turn on Keepsake and allow
    it on websites.
 3. Pair as above: Keepsake toolbar icon → **Connect**; the app shows the request as "Safari".

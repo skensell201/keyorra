@@ -1,11 +1,7 @@
-// Code signing for both targets.
-//
-// As committed: ad-hoc "Sign to Run Locally" (no Apple Developer team). Safari then loads the
-// extension only with Develop → Allow Unsigned Extensions, which resets when Safari quits.
-//
-// To sign with your team, either run `KEEPSAKE_TEAM=ABCDE12345 safari/build.sh` (it overrides
-// these settings), or put your 10-character Team ID below and switch the other two lines to
-// CODE_SIGN_STYLE = Automatic and CODE_SIGN_IDENTITY = Apple Development.
-DEVELOPMENT_TEAM =
-CODE_SIGN_STYLE = Manual
-CODE_SIGN_IDENTITY = -
+// Code signing for both targets: the owner's free Apple ID (Personal Team), so Safari keeps the
+// extension enabled across restarts. Building for another team: KEEPSAKE_TEAM=ABCDE12345
+// safari/build.sh overrides DEVELOPMENT_TEAM. Without any team, set CODE_SIGN_STYLE = Manual,
+// CODE_SIGN_IDENTITY = - and enable Develop → Allow Unsigned Extensions in Safari.
+DEVELOPMENT_TEAM = 4889865CU4
+CODE_SIGN_STYLE = Automatic
+CODE_SIGN_IDENTITY = Apple Development

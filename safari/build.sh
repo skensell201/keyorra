@@ -1,7 +1,6 @@
 #!/bin/sh
 # Builds the web extension, then "Keepsake for Safari.app" around it, and installs the app to
-# /Applications. Signs ad hoc ("Sign to Run Locally") unless KEEPSAKE_TEAM holds an Apple
-# Developer Team ID, e.g. KEEPSAKE_TEAM=ABCDE12345 safari/build.sh
+# /Applications. Signs with the team in Signing.xcconfig; KEEPSAKE_TEAM=ABCDE12345 overrides it.
 set -eu
 here=$(cd "$(dirname "$0")" && pwd)
 root=$(dirname "$here")
@@ -11,9 +10,9 @@ app="Keepsake for Safari.app"
 
 set -- -project "$here/Keepsake for Safari.xcodeproj" -scheme "Keepsake for Safari" \
   -configuration Release -derivedDataPath "$here/build"
+set -- "$@" -allowProvisioningUpdates
 if [ -n "${KEEPSAKE_TEAM:-}" ]; then
-  set -- "$@" -allowProvisioningUpdates DEVELOPMENT_TEAM="$KEEPSAKE_TEAM" \
-    CODE_SIGN_STYLE=Automatic CODE_SIGN_IDENTITY="Apple Development"
+  set -- "$@" DEVELOPMENT_TEAM="$KEEPSAKE_TEAM"
 fi
 xcodebuild "$@" build
 
