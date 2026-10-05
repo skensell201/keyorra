@@ -1,9 +1,30 @@
 //! The ⌘⇧Space quick-search window: small, floating, hidden when it loses focus.
 
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use tauri::{AppHandle, Emitter, Manager, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 use tauri_plugin_global_shortcut::{Code, GlobalShortcutExt, Modifiers, Shortcut, ShortcutState};
 
 pub const LABEL: &str = "quick";
+
+/// While set, losing focus does not hide the window (the Touch ID sheet takes focus).
+static HOLD: AtomicBool = AtomicBool::new(false);
+
+/// Keeps the quick window open while it lives.
+pub struct HoldOpen;
+
+impl HoldOpen {
+    pub fn new() -> Self {
+        HOLD.store(true, Ordering::SeqCst);
+        HoldOpen
+    }
+}
+
+impl Drop for HoldOpen {
+    fn drop(&mut self) {
+        HOLD.store(false, Ordering::SeqCst);
+    }
+}
 
 pub fn shortcut() -> Shortcut {
     Shortcut::new(Some(Modifiers::SUPER | Modifiers::SHIFT), Code::Space)
@@ -25,7 +46,9 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
     let handle = window.clone();
     window.on_window_event(move |event| {
         if let WindowEvent::Focused(false) = event {
-            let _ = handle.hide();
+            if !HOLD.load(Ordering::SeqCst) {
+                let _ = handle.hide();
+            }
         }
     });
     if let Err(e) = app.global_shortcut().register(shortcut()) {

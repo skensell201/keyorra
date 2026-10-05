@@ -7,6 +7,7 @@ use keepsake_core::watchtower::Hibp;
 use keepsake_session::dto::{
     GeneratorRequest, ImportPreview, ImportResult, ItemFilter, ItemSummary, TotpCode, VaultDto,
 };
+use keepsake_session::touchid::TouchIdState;
 use keepsake_session::watchtower::Report;
 use keepsake_session::{
     CmdError, CmdResult, ErrorKind, PairedBrowser, QuickCopy, Settings, Status,
@@ -263,4 +264,71 @@ pub fn check_breaches(state: State<'_, AppState>) -> CmdResult<Report> {
     let mut session = lock_session(&state);
     session.record_breaches(results);
     session.watchtower(now())
+}
+
+#[tauri::command(async)]
+pub fn touch_id_state(state: State<'_, AppState>) -> TouchIdState {
+    lock_session(&state).touch_id_state(crate::touchid::available(), now())
+}
+
+#[tauri::command(async)]
+pub fn enable_touch_id(state: State<'_, AppState>) -> CmdResult<()> {
+    if !crate::touchid::available() {
+        return Err(CmdError::new(
+            ErrorKind::Invalid,
+            "Touch ID isn't available on this Mac",
+        ));
+    }
+    let (blob, public) = crate::touchid::create_key()
+        .map_err(|e| CmdError::new(ErrorKind::Other, format!("Secure Enclave: {e:?}")))?;
+    lock_session(&state).enable_touch_id(blob, &public, now())
+}
+
+#[tauri::command(async)]
+pub fn disable_touch_id(state: State<'_, AppState>) {
+    lock_session(&state).disable_touch_id();
+}
+
+/// Shows the Touch ID prompt (blocking this worker thread, never the session) and unlocks.
+#[tauri::command(async)]
+pub fn unlock_with_touch_id(app: AppHandle, state: State<'_, AppState>) -> CmdResult<()> {
+    use crate::touchid::Failure;
+    let request = lock_session(&state).touch_id_request(now())?;
+    let peer: [u8; 65] = request
+        .ephemeral_public
+        .as_slice()
+        .try_into()
+        .map_err(|_| {
+            CmdError::new(
+                ErrorKind::PasswordRequired,
+                "Touch ID needs to be set up again",
+            )
+        })?;
+    let _hold = crate::quick::HoldOpen::new();
+    let shared = match crate::touchid::agree(&request.enclave_key, &peer, "unlock Keepsake") {
+        Ok(shared) => shared,
+        Err(Failure::Cancelled) => return Err(CmdError::new(ErrorKind::Cancelled, "Cancelled")),
+        Err(Failure::Lockout) => {
+            return Err(CmdError::new(
+                ErrorKind::PasswordRequired,
+                "Touch ID is locked after too many tries. Use your master password.",
+            ))
+        }
+        Err(Failure::Invalid) => {
+            lock_session(&state).disable_touch_id();
+            return Err(CmdError::new(
+                ErrorKind::PasswordRequired,
+                "Your fingerprints changed. Unlock with your master password, then turn Touch ID on again in Settings.",
+            ));
+        }
+        Err(_) => {
+            return Err(CmdError::new(
+                ErrorKind::PasswordRequired,
+                "Touch ID isn't available right now. Use your master password.",
+            ))
+        }
+    };
+    lock_session(&state).unlock_with_touch_id(&shared, now())?;
+    let _ = app.emit("unlocked", ());
+    Ok(())
 }

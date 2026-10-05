@@ -3,6 +3,7 @@ mod commands;
 pub mod native_host;
 mod quick;
 mod screen;
+mod touchid;
 mod tray;
 
 use std::sync::{Mutex, MutexGuard};
@@ -36,11 +37,9 @@ pub fn run() {
         .plugin(quick::plugin())
         .setup(|app| {
             let path = app.path().app_data_dir()?.join("keepsake.db");
-            app.manage(AppState(Mutex::new(Session::new(
-                path,
-                KdfParams::DEFAULT,
-                now(),
-            ))));
+            let mut session = Session::new(path, KdfParams::DEFAULT, now());
+            session.set_keyring(Box::new(touchid::MacKeyring));
+            app.manage(AppState(Mutex::new(session)));
             // After `manage`: both call commands that need the session. Neither is essential;
             // without them Keepsake still works from its main window.
             if let Err(e) = tray::install(app.handle()) {
@@ -72,6 +71,10 @@ pub fn run() {
             commands::check_breaches,
             commands::quick_copy,
             commands::quick_hide,
+            commands::touch_id_state,
+            commands::enable_touch_id,
+            commands::disable_touch_id,
+            commands::unlock_with_touch_id,
             commands::items,
             commands::item,
             commands::new_item,

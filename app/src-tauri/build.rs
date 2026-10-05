@@ -1,3 +1,54 @@
+use std::path::{Path, PathBuf};
+use std::process::Command;
+
 fn main() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos") {
+        build_touch_id();
+    }
     tauri_build::build()
+}
+
+/// Compiles swift/TouchId.swift into a static library and links the Swift runtime from the OS.
+fn build_touch_id() {
+    let source = "swift/TouchId.swift";
+    println!("cargo:rerun-if-changed={source}");
+    let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
+    let arch = match std::env::var("CARGO_CFG_TARGET_ARCH").unwrap().as_str() {
+        "aarch64" => "arm64",
+        other => other,
+    }
+    .to_owned();
+    let lib = out.join("libkeepsake_touchid.a");
+    let status = Command::new("xcrun")
+        .args([
+            "swiftc",
+            "-emit-library",
+            "-static",
+            "-O",
+            "-parse-as-library",
+        ])
+        .args(["-module-name", "KeepsakeTouchId", "-target"])
+        .arg(format!("{arch}-apple-macosx13.0"))
+        .arg(source)
+        .arg("-o")
+        .arg(&lib)
+        .status()
+        .expect("xcrun swiftc (install Xcode or the Command Line Tools)");
+    assert!(status.success(), "compiling {source} failed");
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-lib=static=keepsake_touchid");
+    let swiftc = xcrun(&["--find", "swiftc"]);
+    let toolchain = Path::new(&swiftc).parent().unwrap().parent().unwrap();
+    println!(
+        "cargo:rustc-link-search=native={}",
+        toolchain.join("lib/swift/macosx").display()
+    );
+    let sdk = xcrun(&["--sdk", "macosx", "--show-sdk-path"]);
+    println!("cargo:rustc-link-search=native={sdk}/usr/lib/swift");
+    println!("cargo:rustc-link-arg=-Wl,-rpath,/usr/lib/swift");
+}
+
+fn xcrun(args: &[&str]) -> String {
+    let out = Command::new("xcrun").args(args).output().expect("xcrun");
+    String::from_utf8(out.stdout).unwrap().trim().to_owned()
 }
