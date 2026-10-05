@@ -9,7 +9,7 @@ use uuid::Uuid;
 
 use crate::envelope::RecordKind;
 use crate::faults::Faults;
-use crate::fold::{AdmitAll, Fold, View};
+use crate::fold::{Admission, Fold, View};
 use crate::payload::{attachment_refs, Doc};
 use crate::present::{present_item, ItemState};
 use crate::testkit::{Cluster, START_MS};
@@ -26,6 +26,7 @@ enum Op {
     Detach { dev: usize, item: usize },
     RenameVault { dev: usize },
     DeleteVault { dev: usize },
+    Revoke { dev: usize, target: usize },
     Sync { dev: usize },
     Tick { ms: u16 },
 }
@@ -42,6 +43,7 @@ fn op(devices: usize) -> impl Strategy<Value = Op> {
         1 => (d.clone(), i.clone()).prop_map(|(dev, item)| Op::Detach { dev, item }),
         1 => d.clone().prop_map(|dev| Op::RenameVault { dev }),
         1 => d.clone().prop_map(|dev| Op::DeleteVault { dev }),
+        1 => (d.clone(), d.clone()).prop_map(|(dev, target)| Op::Revoke { dev, target }),
         5 => d.prop_map(|dev| Op::Sync { dev }),
         2 => (0u16..20_000).prop_map(|ms| Op::Tick { ms }),
     ]
@@ -115,14 +117,14 @@ fn run_skewed(
                 };
                 let mut refs = attachment_refs(live.payload.as_ref().unwrap());
                 let title = title_of(&view, id).unwrap_or_default();
-                let att = c.devices[dev]
-                    .add_attachment(vault, id, "file", 1, c.clocks[dev])
-                    .unwrap();
+                // Refused once this device is removed; skipped then.
+                let Ok(att) = c.devices[dev].add_attachment(vault, id, "file", 1, c.clocks[dev])
+                else {
+                    continue;
+                };
                 refs.push(att);
                 let json = Cluster::item_json(id, &title, &refs);
-                c.devices[dev]
-                    .save_item(vault, id, &json, c.clocks[dev])
-                    .unwrap();
+                let _ = c.devices[dev].save_item(vault, id, &json, c.clocks[dev]);
             }
             Op::Detach { dev, item } => {
                 let id = item_id(item);
@@ -135,15 +137,16 @@ fn run_skewed(
                 let title = title_of(&view, id).unwrap_or_default();
                 let _ = c.devices[dev].remove_attachment(att, c.clocks[dev]);
                 let json = Cluster::item_json(id, &title, &refs);
-                c.devices[dev]
-                    .save_item(vault, id, &json, c.clocks[dev])
-                    .unwrap();
+                let _ = c.devices[dev].save_item(vault, id, &json, c.clocks[dev]);
             }
             Op::RenameVault { dev } => {
                 let _ = c.devices[dev].rename_vault(vault, &format!("v{step}"), c.clocks[dev]);
             }
             Op::DeleteVault { dev } => {
                 let _ = c.devices[dev].delete_vault(vault, c.clocks[dev]);
+            }
+            Op::Revoke { dev, target } => {
+                let _ = c.devices[dev].revoke(crate::testkit::device_id(target), c.clocks[dev]);
             }
             Op::Sync { dev } => {
                 let _ = c.sync(dev);
@@ -157,6 +160,9 @@ fn run_skewed(
 
 /// Every non-stale sibling of every item is accounted for: shown, or present as a copy.
 fn assert_nothing_unaccounted(fold: &Fold, view: &View) {
+    if view.owes_copies() {
+        return; // only when no device may write any more (all were removed)
+    }
     for ((kind, id), set) in fold.sets() {
         if *kind != RecordKind::Item {
             continue;
@@ -191,7 +197,8 @@ proptest! {
         c.assert_converged();
         for d in &c.devices {
             assert_nothing_unaccounted(d.fold(), &d.view());
-            assert_no_lost_edit(d.fold(), &d.view());
+            assert_no_lost_edit(d.fold(), &d.view(), d.trust());
+            assert_cut_versions_hidden(d.fold(), d.trust());
         }
     }
 
@@ -203,7 +210,7 @@ proptest! {
         skew in offsets(),
     ) {
         let (c, _) = run_skewed(3, seed, Faults::NONE, &ops, &skew);
-        assert_no_lost_edit(c.devices[0].fold(), &c.devices[0].view());
+        assert_no_lost_edit(c.devices[0].fold(), &c.devices[0].view(), c.devices[0].trust());
         let reference = c.devices[0].view();
         // Replay every accepted version, interleaving the streams pseudo-randomly while keeping
         // each stream's own order.
@@ -232,7 +239,7 @@ proptest! {
             prop_assert!(!ready.is_empty(), "no stream can make progress");
             let pick = ready[(state >> 33) as usize % ready.len()];
             let next = streams[pick].remove(0);
-            fold.accept(next, &AdmitAll).unwrap();
+            fold.accept(next, c.devices[0].trust()).unwrap();
         }
         prop_assert_eq!(fold.view(), reference);
     }
@@ -281,6 +288,10 @@ fn clamp(op: Op, devices: usize) -> Op {
         Op::Detach { dev, item } => Op::Detach { dev: f(dev), item },
         Op::RenameVault { dev } => Op::RenameVault { dev: f(dev) },
         Op::DeleteVault { dev } => Op::DeleteVault { dev: f(dev) },
+        Op::Revoke { dev, target } => Op::Revoke {
+            dev: f(dev),
+            target: f(target),
+        },
         Op::Sync { dev } => Op::Sync { dev: f(dev) },
         Op::Tick { ms } => Op::Tick { ms },
     }
@@ -313,7 +324,28 @@ fn tombstones_and_vaults_survive_the_replay_too() {
 /// visible somewhere (as the item or as a conflict copy, live or in Recently Deleted).
 /// Refinement: an edit that a purge has seen (a tombstone dominates it) was deleted on purpose,
 /// even when a concurrent edit keeps the record itself alive.
-fn assert_no_lost_edit(fold: &Fold, view: &View) {
+/// Versions after a revocation's cut never reach a sibling set.
+fn assert_cut_versions_hidden(fold: &Fold, admission: &dyn Admission) {
+    for a in fold.retained() {
+        if admission.admits(&a.stream, a.seq) {
+            continue;
+        }
+        let hash = a.hash();
+        let shown = fold
+            .sets()
+            .any(|(_, set)| set.siblings().iter().any(|s| s.hash == hash));
+        assert!(
+            !shown,
+            "a version after its device's cut is in a sibling set"
+        );
+    }
+}
+
+/// Skipped while copies are still owed: when every device was removed, nobody can write them.
+fn assert_no_lost_edit(fold: &Fold, view: &View, admission: &dyn Admission) {
+    if view.owes_copies() {
+        return;
+    }
     let titles: BTreeSet<String> = view
         .items
         .keys()
@@ -333,6 +365,8 @@ fn assert_no_lost_edit(fold: &Fold, view: &View) {
         {
             continue;
         }
+        // Every edit, admitted or not, can supersede an earlier one (its author replaced it);
+        // only admitted edits must stay visible.
         let edits: Vec<_> = fold
             .retained()
             .filter(|a| a.kind == RecordKind::Item && a.record_id == record)
@@ -346,8 +380,12 @@ fn assert_no_lost_edit(fold: &Fold, view: &View) {
             .filter(|a| {
                 a.kind == RecordKind::Item && a.record_id == record && a.doc == Doc::Tombstone
             })
+            .filter(|a| admission.admits(&a.stream, a.seq))
             .collect();
         for (a, p) in &edits {
+            if !admission.admits(&a.stream, a.seq) {
+                continue;
+            }
             let purged = purges.iter().any(|t| {
                 crate::vv::compare(&a.version.vector, &t.version.vector)
                     == crate::vv::Causality::Before
@@ -388,6 +426,31 @@ fn review_counterexample_stale_rule_loses_an_edit() {
         let (c, _) = run(3, 16642519616933440452, faults, &ops);
         c.assert_converged();
         let view = c.devices[0].view();
-        assert_no_lost_edit(c.devices[0].fold(), &view);
+        assert_no_lost_edit(c.devices[0].fold(), &view, c.devices[0].trust());
     }
+}
+
+#[test]
+fn a_copy_written_by_a_device_removed_later_is_written_again() {
+    // Found by the revocation property: device 2 wrote the copy of "t0" before anyone knew it
+    // had been removed; the copy must not disappear with device 2's later changes.
+    let ops = vec![
+        Op::Save { dev: 1, item: 1 },
+        Op::Sync { dev: 1 },
+        Op::Revoke { dev: 1, target: 2 },
+        Op::Save { dev: 2, item: 1 },
+        Op::Sync { dev: 2 },
+        Op::Sync { dev: 0 },
+        Op::Trash { dev: 0, item: 1 },
+    ];
+    let (c, _) = run(3, 0, Faults::NONE, &ops);
+    c.assert_converged();
+    let view = c.devices[0].view();
+    assert_no_lost_edit(c.devices[0].fold(), &view, c.devices[0].trust());
+    let titles: BTreeSet<String> = view
+        .items
+        .keys()
+        .filter_map(|i| title_of(&view, *i))
+        .collect();
+    assert!(titles.contains("t0"), "{titles:?}");
 }
