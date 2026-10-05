@@ -6,6 +6,7 @@ import { Unlock } from "./components/Unlock";
 
 export function App() {
   const [status, setStatus] = useState<Status | null>(null);
+  const [justLocked, setJustLocked] = useState(false);
 
   useEffect(() => {
     api.status().then(setStatus);
@@ -21,6 +22,7 @@ export function App() {
 
   const lock = useCallback(async () => {
     await api.lock();
+    setJustLocked(true);
     setStatus("locked");
   }, []);
 
@@ -29,7 +31,16 @@ export function App() {
     <>
       <div className="drag-region" data-tauri-drag-region />
       {status === "new" && <Setup onDone={() => setStatus("unlocked")} />}
-      {status === "locked" && <Unlock onUnlocked={() => setStatus("unlocked")} onStartOver={() => setStatus("new")} />}
+      {status === "locked" && (
+        <Unlock
+          justLocked={justLocked}
+          onUnlocked={() => {
+            setJustLocked(false);
+            setStatus("unlocked");
+          }}
+          onStartOver={() => setStatus("new")}
+        />
+      )}
       {status === "unlocked" && <Main onLock={lock} />}
     </>
   );

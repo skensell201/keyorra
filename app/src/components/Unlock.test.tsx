@@ -162,3 +162,15 @@ test("every 14 days the password is asked for instead", async () => {
   expect(screen.queryByRole("button", { name: "Unlock with Touch ID" })).not.toBeInTheDocument();
   expect(api.unlockWithTouchId).not.toHaveBeenCalled();
 });
+
+test("after the user locks, Touch ID waits for the window to come back to the front", async () => {
+  vi.spyOn(document, "hasFocus").mockReturnValue(true);
+  vi.mocked(api.touchIdState).mockResolvedValue(touchOn);
+  render(<Unlock onUnlocked={vi.fn()} onStartOver={vi.fn()} justLocked />);
+  expect(await screen.findByRole("button", { name: "Unlock with Touch ID" })).toBeInTheDocument();
+  expect(api.unlockWithTouchId).not.toHaveBeenCalled();
+  act(() => {
+    window.dispatchEvent(new Event("focus"));
+  });
+  await waitFor(() => expect(api.unlockWithTouchId).toHaveBeenCalledTimes(1));
+});

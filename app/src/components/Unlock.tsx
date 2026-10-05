@@ -4,12 +4,14 @@ import { useCallback, useEffect, useRef, useState, type FormEvent } from "react"
 import { api, errorMessage, isCmdError, type TouchIdState } from "../api";
 
 interface Props {
+  /** The user just locked from this window: don't ask for Touch ID until it comes back to the front. */
+  justLocked?: boolean;
   onUnlocked: () => void;
   /** The database was moved aside: show first-run setup. */
   onStartOver: () => void;
 }
 
-export function Unlock({ onUnlocked, onStartOver }: Props) {
+export function Unlock({ onUnlocked, onStartOver, justLocked = false }: Props) {
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [wait, setWait] = useState(0);
@@ -56,10 +58,10 @@ export function Unlock({ onUnlocked, onStartOver }: Props) {
       prompted.current = true;
       void touchUnlock();
     };
-    if (document.hasFocus()) attempt();
+    if (document.hasFocus() && !justLocked) attempt();
     window.addEventListener("focus", attempt);
     return () => window.removeEventListener("focus", attempt);
-  }, [canTouch, touchUnlock]);
+  }, [canTouch, touchUnlock, justLocked]);
   const [unreadable, setUnreadable] = useState(false);
   const [confirmStartOver, setConfirmStartOver] = useState(false);
   /** Where the unreadable file went, shown before setup starts. */
