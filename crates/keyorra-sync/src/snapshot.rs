@@ -109,6 +109,31 @@ pub fn open_snapshot(
     author: &VerifyingKey,
     snapshot: &[u8],
 ) -> Result<(SnapshotHeader, Value)> {
+    decrypt_snapshot(segment_key, snapshot)?.verify(author)
+}
+
+/// A decrypted snapshot whose signature is not checked yet: the author's key may only be known
+/// from the trust entries inside it (bootstrap, plan A1c-2).
+#[derive(Clone, Debug)]
+pub struct UnverifiedSnapshot {
+    pub header: SnapshotHeader,
+    pub body: Value,
+    sig: [u8; 64],
+}
+
+impl UnverifiedSnapshot {
+    pub fn verify(self, author: &VerifyingKey) -> Result<(SnapshotHeader, Value)> {
+        author
+            .verify_strict(
+                &signed_message(&self.header.to_bytes(), &self.body),
+                &Signature::from_bytes(&self.sig),
+            )
+            .map_err(|_| Error::BadSignature)?;
+        Ok((self.header, self.body))
+    }
+}
+
+pub fn decrypt_snapshot(segment_key: &Key, snapshot: &[u8]) -> Result<UnverifiedSnapshot> {
     if snapshot.len() > max_snapshot_len() {
         return Err(malformed("snapshot larger than allowed"));
     }
@@ -127,15 +152,9 @@ pub fn open_snapshot(
     }
     let payload = cbor::decode(content)?;
     let f = payload.fields(&["body", "sig"])?;
-    let body = f.get("body")?;
+    let body = f.get("body")?.clone();
     let sig: [u8; 64] = f.get("sig")?.as_array_of()?;
-    author
-        .verify_strict(
-            &signed_message(&header_bytes, body),
-            &Signature::from_bytes(&sig),
-        )
-        .map_err(|_| Error::BadSignature)?;
-    Ok((header, body.clone()))
+    Ok(UnverifiedSnapshot { header, body, sig })
 }
 
 /// The file/blob name: lowercase hex SHA-256 of the snapshot bytes.
@@ -180,6 +199,21 @@ mod tests {
         assert_eq!(value, body());
         assert_eq!(SnapshotHeader::parse(&sealed()).unwrap(), header);
         assert_eq!(sealed().len(), HEADER_LEN + NONCE_LEN + 1024 + 16);
+    }
+
+    #[test]
+    fn decrypt_then_verify_equals_open() {
+        let unverified = decrypt_snapshot(&k_seg(), &sealed()).unwrap();
+        assert_eq!(unverified.body, body());
+        let other = SigningKey::from_bytes(&[0x42; 32]).verifying_key();
+        assert!(matches!(
+            unverified.clone().verify(&other),
+            Err(Error::BadSignature)
+        ));
+        assert_eq!(
+            unverified.verify(&signer().verifying_key()).unwrap(),
+            open_snapshot(&k_seg(), &signer().verifying_key(), &sealed()).unwrap()
+        );
     }
 
     #[test]
