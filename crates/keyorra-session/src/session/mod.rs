@@ -26,6 +26,7 @@ mod bridge_tests;
 #[cfg(test)]
 mod polish_tests;
 mod sync;
+mod sync_screen;
 #[cfg(test)]
 mod sync_tests;
 #[cfg(test)]
@@ -95,9 +96,14 @@ pub struct Session {
     sync_error: Option<String>,
     /// What the last round undid or could not show.
     sync_notices: Vec<String>,
+    /// The Sync log of this unlock (newest last, at most `SYNC_LOG_LINES`).
+    sync_log: std::collections::VecDeque<sync::LogLine>,
+    /// When the last round ran and whether it went through.
+    last_round: Option<(u64, bool)>,
 }
 
-pub use sync::{BoxedTransport, EmergencyKitDto, SyncLink, SyncStatusDto};
+pub use sync::{BoxedTransport, EmergencyKitDto, JoinOutcome, LogLine, SyncLink, SyncStatusDto};
+pub use sync_screen::{BackupFile, SyncScreenDto};
 
 impl Session {
     /// `kdf` is `KdfParams::DEFAULT` in the app; tests pass cheap parameters.
@@ -132,6 +138,8 @@ impl Session {
             synced: None,
             sync_error: None,
             sync_notices: Vec::new(),
+            sync_log: std::collections::VecDeque::new(),
+            last_round: None,
         }
     }
 
@@ -352,6 +360,8 @@ impl Session {
         // Sync runs only while unlocked; its state is in the store.
         self.synced = None;
         self.sync_notices.clear();
+        self.sync_log.clear();
+        self.last_round = None;
         self.store = None;
         self.breaches.clear();
         self.watchtower_count = None;

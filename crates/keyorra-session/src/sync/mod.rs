@@ -18,6 +18,7 @@
 mod enclave_keys;
 mod keys;
 mod merge;
+mod screen;
 mod setup;
 #[cfg(test)]
 mod tests;
@@ -46,6 +47,7 @@ use zeroize::Zeroizing;
 pub use enclave_keys::{Enclave, EnclaveDeviceKeys, EnclaveError};
 pub use keys::{DeviceKeyStore, MemoryDeviceKeys};
 pub use merge::{carry_over, disable, rejoin, start_new_account, CarryReport, Rejoined};
+pub use screen::{AlarmView, VerifyReport};
 pub use setup::SetupCode;
 
 const CONFIG: &str = "sync:config";
@@ -94,6 +96,9 @@ pub struct SyncStatus {
     pub key_code: String,
     pub devices: Vec<SyncDevice>,
     pub alarms: usize,
+    /// Other devices' changes are confirmed by the main Mac's newest decisions (false while
+    /// its newest changes are not all here).
+    pub root_confirmed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -104,6 +109,8 @@ pub struct SyncDevice {
     pub approved: bool,
     pub main: bool,
     pub this_device: bool,
+    /// Removed by the main Mac.
+    pub removed: bool,
 }
 
 /// What the user writes down when sync is enabled (spec §7.6). The location is the
@@ -1155,6 +1162,7 @@ impl<T: Transport> Synced<T> {
                 approved: true,
                 main: *id == trust.root(),
                 this_device: *id == self.engine.device(),
+                removed: d.cut.is_some(),
             })
             .collect();
         devices.extend(trust.unapproved().iter().map(|(id, d)| SyncDevice {
@@ -1163,6 +1171,7 @@ impl<T: Transport> Synced<T> {
             approved: false,
             main: false,
             this_device: *id == self.engine.device(),
+            removed: false,
         }));
         SyncStatus {
             main_device: self.engine.is_root(),
@@ -1170,6 +1179,7 @@ impl<T: Transport> Synced<T> {
             key_code: self.engine.key_fingerprint(),
             devices,
             alarms: self.engine.alarms().len(),
+            root_confirmed: self.engine.root_confirmed(),
         }
     }
 

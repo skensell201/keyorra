@@ -26,6 +26,11 @@ pub trait SyncLink: Send {
     fn new_account_transport(&self, account: &AccountId) -> Result<BoxedTransport, String> {
         self.transport(account)
     }
+    /// Where the account lives, for the Sync screen (a folder path).
+    fn location(&self, account: &AccountId) -> Option<String> {
+        let _ = account;
+        None
+    }
     /// Every account folder in the sync place, by folder name, opened read-only (nothing is
     /// created in them): joining picks the one named after the account whose header names
     /// the Secret Key.
@@ -54,6 +59,33 @@ pub struct EmergencyKitDto {
     pub setup_code: String,
 }
 
+/// One line of the Sync log.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LogLine {
+    pub at: u64,
+    pub text: String,
+}
+
+/// The Sync log keeps this many lines (in memory, until the vault locks).
+pub const SYNC_LOG_LINES: usize = 200;
+
+/// How joining went.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct JoinOutcome {
+    /// "new": a vault was made for the account; "rejoined": this vault joined its account
+    /// again; "carriedOver": this vault's items were copied into a new vault for the account.
+    pub mode: &'static str,
+    /// Compare it on the main Mac before it approves this Mac.
+    pub key_code: String,
+    pub copied: usize,
+    /// Items in Recently Deleted that stayed in the old file.
+    pub trashed_left: usize,
+    /// Items that could not be read and stayed in the old file.
+    pub damaged: usize,
+}
+
 /// The sync part of the settings screen.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -67,7 +99,7 @@ pub struct SyncStatusDto {
     pub notices: Vec<String>,
 }
 
-fn sync_error(e: keyorra_sync::Error) -> CmdError {
+pub(super) fn sync_error(e: keyorra_sync::Error) -> CmdError {
     match e {
         keyorra_sync::Error::Core(core) => core.into(),
         keyorra_sync::Error::WrongPassword => CmdError::new(
@@ -263,11 +295,22 @@ impl Session {
         }
     }
 
-    /// Keeps what the UI shows about the last round.
-    fn note_round(&mut self, round: keyorra_sync::Result<s::RoundReport>) {
+    /// Keeps what the UI shows about the last round, and its lines for the Sync log.
+    fn note_round(&mut self, round: keyorra_sync::Result<s::RoundReport>, now: u64) {
+        let mut lines = Vec::new();
         match round {
             Ok(report) => {
                 self.sync_error = None;
+                self.last_round = Some((now, true));
+                if let Some(synced) = self.synced.as_ref() {
+                    lines.extend(report.events.iter().filter_map(|e| synced.describe(e)));
+                }
+                lines.extend(
+                    report
+                        .reverted
+                        .iter()
+                        .map(|(_, why)| format!("Undone: {why}")),
+                );
                 self.sync_notices = report
                     .reverted
                     .iter()
@@ -275,7 +318,18 @@ impl Session {
                     .chain(report.failed.iter().map(|(id, why)| format!("{id}: {why}")))
                     .collect();
             }
-            Err(e) => self.sync_error = Some(sync_error(e).message),
+            Err(e) => {
+                let message = sync_error(e).message;
+                lines.push(format!("Sync failed: {message}"));
+                self.last_round = Some((now, false));
+                self.sync_error = Some(message);
+            }
+        }
+        for text in lines {
+            if self.sync_log.len() == SYNC_LOG_LINES {
+                self.sync_log.pop_front();
+            }
+            self.sync_log.push_back(LogLine { at: now, text });
         }
     }
 
@@ -300,7 +354,7 @@ impl Session {
         let store = self.store.as_mut().ok_or_else(locked)?;
         if let Some(synced) = self.synced.as_mut() {
             let round = synced.round(store, wall_ms(now));
-            self.note_round(round);
+            self.note_round(round, now);
             self.watchtower_count = None;
         }
         self.sync_status()
@@ -342,7 +396,7 @@ impl Session {
             setup_code: synced.setup_code().to_text().to_string(),
         };
         self.synced = Some(synced);
-        self.note_round(first_round);
+        self.note_round(first_round, now);
         Ok(dto)
     }
 
@@ -407,7 +461,7 @@ impl Session {
     ///   merge by id.
     /// - It belongs to another account: a vault is made for the account and this vault's
     ///   items are carried over into it; the old file is kept aside.
-    pub fn join_sync(&mut self, password: &str, code: &str, now: u64) -> CmdResult<()> {
+    pub fn join_sync(&mut self, password: &str, code: &str, now: u64) -> CmdResult<JoinOutcome> {
         self.touch(now);
         let (sk_id, sk, pin) = match SetupCode::parse(code) {
             Ok(c) => (c.secret_key_id, c.secret_key, Some(c.pin)),
@@ -434,13 +488,20 @@ impl Session {
         (sk, sk_id): (&SecretKey, &str),
         pin: Option<keyorra_sync::account::RootPin>,
         now: u64,
-    ) -> CmdResult<()> {
+    ) -> CmdResult<JoinOutcome> {
         let (transport, mut keys, name) = (
             join_transport(link, password, (sk, sk_id), pin.as_ref())?,
             link.device_keys(),
             link.device_name(),
         );
         let unlock = |h: &Header| link.unlock_header(h, password, sk);
+        let outcome = |mode: &'static str, synced: &Synced<BoxedTransport>| JoinOutcome {
+            mode,
+            key_code: synced.key_code(),
+            copied: 0,
+            trashed_left: 0,
+            damaged: 0,
+        };
         match self.status() {
             Status::Locked => Err(locked()),
             Status::New => {
@@ -466,12 +527,13 @@ impl Session {
                     wall_ms(now),
                 )
                 .map_err(sync_error)?;
+                let joined = outcome("new", &synced);
                 self.store = Some(store);
                 self.synced = Some(synced);
-                self.note_round(first_round);
+                self.note_round(first_round, now);
                 self.password_verified_at = Some(now);
                 self.keyring.delete();
-                Ok(())
+                Ok(joined)
             }
             Status::Unlocked => {
                 let store = self.store.as_mut().ok_or_else(locked)?;
@@ -491,9 +553,10 @@ impl Session {
                 );
                 match result {
                     Ok(rejoined) => {
+                        let joined = outcome("rejoined", &rejoined.synced);
                         self.synced = Some(rejoined.synced);
-                        self.note_round(rejoined.first_round);
-                        Ok(())
+                        self.note_round(rejoined.first_round, now);
+                        Ok(joined)
                     }
                     Err(keyorra_sync::Error::AnotherAccount) => {
                         self.join_carrying_over(link, password, (sk, sk_id), pin, now)
@@ -511,7 +574,7 @@ impl Session {
         (sk, sk_id): (&SecretKey, &str),
         pin: Option<keyorra_sync::account::RootPin>,
         now: u64,
-    ) -> CmdResult<()> {
+    ) -> CmdResult<JoinOutcome> {
         let (transport, mut keys, name) = (
             join_transport(link, password, (sk, sk_id), pin.as_ref())?,
             link.device_keys(),
@@ -537,6 +600,7 @@ impl Session {
             wall_ms(now),
         )
         .map_err(sync_error)?;
+        let key_code = synced.key_code();
         let old = self.store.take().ok_or_else(locked)?;
         let carried = s::carry_over(&old, &mut new_store);
         drop(new_store);
@@ -593,7 +657,13 @@ impl Session {
             Ok(synced) => self.synced = Some(synced),
             Err(e) => self.sync_error = Some(e.message),
         }
-        Ok(())
+        Ok(JoinOutcome {
+            mode: "carriedOver",
+            key_code,
+            copied: report.copied,
+            trashed_left: report.trashed_left,
+            damaged: report.damaged,
+        })
     }
 
     /// Turns sync off on this Mac; everything stays in the vault.
@@ -679,7 +749,7 @@ impl Session {
             setup_code: synced.setup_code().to_text().to_string(),
         };
         self.synced = Some(synced);
-        self.note_round(first_round);
+        self.note_round(first_round, now);
         Ok(dto)
     }
 

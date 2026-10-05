@@ -54,6 +54,9 @@ impl SyncLink for TestLink {
         self.place.0.lock().unwrap().insert(*account, t.clone());
         Ok(Box::new(t))
     }
+    fn location(&self, account: &keyorra_sync::AccountId) -> Option<String> {
+        Some(format!("place/{}", data_encoding::HEXLOWER.encode(account)))
+    }
     fn join_candidates(&self) -> Result<Vec<(String, BoxedTransport)>, String> {
         Ok(self
             .place
@@ -490,4 +493,152 @@ fn review_a2_i4_a_folder_still_downloading_says_so() {
         .err()
         .unwrap();
     assert!(err.message.contains("still downloading"), "{}", err.message);
+}
+
+// ---- the Sync screen (plan A3) ----
+
+/// The Sync screen in one call: location, last round, devices, log; joining tells what
+/// happened and the code to compare.
+#[test]
+fn the_sync_screen_shows_the_account() {
+    let (place, (_d1, mut main), _laptop) = two_macs();
+    let (_d3, mut third) = new_session();
+    link(&mut third, &place, "Third");
+    let kit = main.emergency_kit(None, 1_005).unwrap();
+    let joined = third.join_sync(PW, &kit.setup_code, 1_400).unwrap();
+    assert_eq!(joined.mode, "new");
+    assert_eq!(
+        joined.key_code,
+        third.sync_status().unwrap().status.unwrap().key_code
+    );
+    main.sync_now(1_401).unwrap();
+    let screen = main.sync_screen().unwrap();
+    assert!(screen.enabled && screen.running);
+    assert!(screen.location.unwrap().starts_with("place/"));
+    assert_eq!(screen.last_round_at, Some(1_401));
+    assert_eq!(screen.last_round_ok, Some(true));
+    let status = screen.status.unwrap();
+    assert!(status.main_device && status.root_confirmed);
+    assert!(status
+        .devices
+        .iter()
+        .any(|d| d.name == "Third" && !d.approved));
+    assert!(
+        screen.log.iter().any(|l| l.text.starts_with("Received")),
+        "{:?}",
+        screen.log
+    );
+    let files = main.sync_folder_files().unwrap();
+    assert!(files
+        .iter()
+        .any(|f| f.path.starts_with("streams/") && f.counted));
+    main.lock();
+    main.unlock(PW, 1_402).unwrap();
+    assert!(
+        main.sync_screen().unwrap().log.is_empty(),
+        "the log is per unlock"
+    );
+}
+
+/// An alarm with its explanation and the actions that fit; accepting clears it.
+#[test]
+fn an_alarm_is_explained_and_accepted() {
+    let (place, (_d1, mut main), (_d2, mut laptop)) = two_macs();
+    add(&mut main, "one more", 1_410);
+    rounds(&mut main, &mut laptop, 1_411);
+    // The folder loses the main Mac's newest changes.
+    let folder = place.0.lock().unwrap().values().next().unwrap().clone();
+    let main_id = main.synced.as_ref().unwrap().engine().device();
+    let newest = folder
+        .dump()
+        .into_iter()
+        .filter(|(d, _, _)| *d == main_id)
+        .map(|(_, seq, _)| seq)
+        .max()
+        .unwrap();
+    folder.remove_segment(&main_id, newest);
+    laptop.sync_now(1_420).unwrap();
+    let alarms = laptop.sync_screen().unwrap().alarms;
+    let rollback = alarms
+        .iter()
+        .find(|a| a.kind == "rollback")
+        .expect("an alarm");
+    assert!(rollback.title.contains("Main"), "{}", rollback.title);
+    assert_eq!(
+        rollback.actions,
+        vec!["accept"],
+        "only the main Mac restores"
+    );
+    assert_eq!(
+        laptop
+            .sync_alarm_action(&rollback.id, "restore", 1_421)
+            .unwrap_err()
+            .kind,
+        ErrorKind::Invalid
+    );
+    laptop
+        .sync_alarm_action(&rollback.id, "accept", 1_422)
+        .unwrap();
+    assert!(laptop
+        .sync_screen()
+        .unwrap()
+        .alarms
+        .iter()
+        .all(|a| a.id != rollback.id));
+}
+
+/// The main Mac removes a device; "Verify everything" checks the local copy.
+#[test]
+fn removing_a_device_and_verifying() {
+    let (_place, (_d1, mut main), (_d2, mut laptop)) = two_macs();
+    let report = laptop.verify_sync().unwrap();
+    assert_eq!(report.items, 1);
+    assert_eq!((report.damaged, report.missing), (0, 0));
+    assert!(report.differing.is_empty());
+    let laptop_id = laptop
+        .sync_status()
+        .unwrap()
+        .status
+        .unwrap()
+        .devices
+        .into_iter()
+        .find(|d| d.this_device)
+        .unwrap()
+        .id;
+    assert_eq!(
+        laptop
+            .remove_sync_device(&laptop_id, 1_430)
+            .unwrap_err()
+            .kind,
+        ErrorKind::Invalid,
+        "only the main Mac removes devices"
+    );
+    main.remove_sync_device(&laptop_id, 1_431).unwrap();
+    main.sync_now(1_432).unwrap();
+    let devices = main.sync_status().unwrap().status.unwrap().devices;
+    assert!(devices.iter().any(|d| d.id == laptop_id && d.removed));
+}
+
+/// The database's backup copies are listed and can be deleted; nothing else can.
+#[test]
+fn backup_copies_are_listed_and_deleted() {
+    let (dir, mut s) = unlocked_session();
+    let base = dir.path().join("Application Support");
+    std::fs::write(base.join("keyorra.db.bak-v1"), b"old").unwrap();
+    std::fs::write(base.join("keyorra.db.pre-sync-20261006"), b"older").unwrap();
+    std::fs::write(base.join("keyorra.db.pre-sync-20261006-journal"), b"x").unwrap();
+    std::fs::write(base.join("settings.json"), b"{}").unwrap();
+    let backups = s.backups().unwrap();
+    let names: Vec<&str> = backups.iter().map(|b| b.name.as_str()).collect();
+    assert_eq!(names, ["keyorra.db.bak-v1", "keyorra.db.pre-sync-20261006"]);
+    assert_eq!(backups[0].kind, "migration");
+    assert_eq!(backups[1].size, 5);
+    assert_eq!(
+        s.delete_backup("settings.json", 1_440).unwrap_err().kind,
+        ErrorKind::NotFound
+    );
+    s.delete_backup("keyorra.db.pre-sync-20261006", 1_441)
+        .unwrap();
+    assert!(!base.join("keyorra.db.pre-sync-20261006-journal").exists());
+    assert_eq!(s.backups().unwrap().len(), 1);
 }
