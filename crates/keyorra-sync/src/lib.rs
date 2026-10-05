@@ -35,4 +35,6 @@ pub type AccountId = [u8; 16];
 pub type DeviceId = [u8; 16];
 
 #[cfg(test)]
+mod convergence_tests;
+#[cfg(test)]
 mod vectors;
