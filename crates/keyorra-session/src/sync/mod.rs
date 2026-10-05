@@ -237,6 +237,18 @@ fn item_json(item: &Item) -> Result<Zeroizing<Vec<u8>>> {
         .map_err(|e| Error::Malformed(e.to_string()))
 }
 
+/// Every live attachment of the store, as changes (written unless sync has them).
+fn attachment_changes(store: &Store) -> Result<Vec<Change>> {
+    Ok(store
+        .attachment_ids()?
+        .into_iter()
+        .map(|id| Change {
+            kind: ChangeKind::Attachment,
+            id,
+        })
+        .collect())
+}
+
 /// Whether this store is the main device of its synced account (from its configuration, so
 /// also while sync is not running).
 pub fn is_main(store: &Store) -> Result<bool> {
@@ -334,6 +346,8 @@ pub fn enable<T: Transport>(
         caught_up: false,
     };
     synced.commit(store)?;
+    // Attachment contents go through the normal path (chunks first, then the record).
+    store.record_changes(&attachment_changes(store)?)?;
     let first_round = synced.round(store, wall_ms);
     Ok(Enabled {
         synced,
@@ -539,7 +553,8 @@ fn join_store<T: Transport>(
         };
         if let Some(base) = &synced.base {
             // What changed here while sync was off is written once the device may write.
-            let changed = merge::changed_since(store, base)?;
+            let mut changed = merge::changed_since(store, base)?;
+            changed.extend(attachment_changes(store)?);
             synced.commit(store)?;
             store.record_changes(&changed)?;
         } else {
@@ -700,6 +715,11 @@ impl<T: Transport> Synced<T> {
                     report.reverted.push((change, reason));
                 }
                 Err(Error::Refused(_)) => all = false,
+                // The store of files did not take a chunk: tried again next round.
+                Err(Error::Transport(reason)) => {
+                    all = false;
+                    report.failed.push((change.id, reason));
+                }
                 Err(Error::NotFound(reason)) => {
                     if still_here(store, change)? {
                         all = false;
@@ -825,8 +845,112 @@ impl<T: Transport> Synced<T> {
                 Ok(Outcome::Written)
             }
             // Attachment contents travel with the folder transport (plan A2).
-            ChangeKind::Attachment => Ok(Outcome::Written),
+            // Its content as chunks, stored before the record is written (spec §5.3).
+            // Attachments never change: an id sync has is the same content.
+            ChangeKind::Attachment => {
+                let Some(state) = store.attachment_state(change.id)? else {
+                    return Ok(Outcome::Written);
+                };
+                let in_sync = view.attachments.contains_key(&change.id);
+                if state.live && !in_sync {
+                    let Some((item, _)) = store.item_state(state.item_id)? else {
+                        return Ok(Outcome::Written);
+                    };
+                    let name = item
+                        .attachments
+                        .iter()
+                        .find(|a| a.id == change.id)
+                        .map(|a| a.name.clone())
+                        .unwrap_or_default();
+                    let bytes = store.attachment_content(change.id)?;
+                    let (payload, chunks) = self.engine.seal_attachment(
+                        change.id,
+                        item.id,
+                        &name,
+                        &bytes,
+                        keyorra_sync::chunk::MAX_CHUNK,
+                    )?;
+                    for chunk in &chunks {
+                        self.transport.put_chunk(chunk)?;
+                    }
+                    self.engine
+                        .write_attachment(item.vault_id, change.id, payload, wall_ms)?;
+                } else if !state.live && in_sync {
+                    self.engine.remove_attachment(change.id, wall_ms)?;
+                }
+                Ok(Outcome::Written)
+            }
         }
+    }
+
+    /// Attachment contents sync shows: fetched as chunks and stored; removed ones removed.
+    /// Content whose chunks are not here yet waits (reported), and is tried every round.
+    fn show_attachments(
+        &mut self,
+        store: &mut Store,
+        view: &View,
+        pending: &BTreeSet<Uuid>,
+    ) -> Result<Vec<(Uuid, String)>> {
+        let mut failed = Vec::new();
+        for (id, payload) in &view.attachments {
+            if pending.contains(id) {
+                continue;
+            }
+            let here = store.attachment_state(*id)?;
+            if here.is_some_and(|h| h.live && h.item_id == payload.item_id) {
+                continue;
+            }
+            if store.item_state(payload.item_id)?.is_none() {
+                continue;
+            }
+            let mut chunks = Vec::with_capacity(payload.chunks.len());
+            let mut waiting = false;
+            for name in &payload.chunks {
+                match self
+                    .transport
+                    .get_chunk(&data_encoding::HEXLOWER.encode(name))
+                {
+                    Ok(Fetched::Ready(bytes)) => chunks.push(bytes),
+                    Ok(_) => {
+                        waiting = true;
+                        break;
+                    }
+                    Err(e) => {
+                        failed.push((*id, e.to_string()));
+                        waiting = true;
+                        break;
+                    }
+                }
+            }
+            if waiting {
+                if !failed.iter().any(|(f, _)| f == id) {
+                    failed.push((*id, "waiting for the attachment's content".to_owned()));
+                }
+                continue;
+            }
+            match self.engine.open_attachment(payload, &chunks) {
+                Ok(bytes) => {
+                    if let Err(e) = store.apply_remote_attachment(*id, payload.item_id, &bytes) {
+                        failed.push((*id, e.to_string()));
+                    }
+                }
+                Err(e) => failed.push((*id, e.to_string())),
+            }
+        }
+        // Removed in sync: an attachment record the account has that is no longer live.
+        for id in store.attachment_ids()? {
+            if pending.contains(&id) || view.attachments.contains_key(&id) {
+                continue;
+            }
+            if self
+                .engine
+                .fold()
+                .contains(keyorra_sync::envelope::RecordKind::Attachment, id)
+            {
+                store.apply_remote_attachment_removed(id)?;
+            }
+        }
+        Ok(failed)
     }
 
     /// What sync shows, in the store. Records with local changes not yet written are left as
@@ -837,13 +961,15 @@ impl<T: Transport> Synced<T> {
         let pending: BTreeSet<Uuid> = store.pending_changes()?.into_iter().map(|c| c.id).collect();
         let view = self.engine.view();
         let engine = &self.engine;
-        Ok(show_view(
+        let mut failed = show_view(
             store,
             &view,
             &pending,
             |v| engine.vault_key(v),
             wall_ms / 1000,
-        ))
+        );
+        failed.extend(self.show_attachments(store, &view, &pending)?);
+        Ok(failed)
     }
     /// Everything the engine cannot read again from the streams.
     /// Sync is on: the configuration, the change tracking and the engine's state, saved.

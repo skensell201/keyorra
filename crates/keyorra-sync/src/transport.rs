@@ -156,6 +156,13 @@ impl MemoryTransport {
         }
     }
 
+    /// Removes and returns every attachment chunk (tests: chunks not arrived yet).
+    pub fn take_chunks(&self) -> Vec<Vec<u8>> {
+        std::mem::take(&mut self.files.lock().unwrap().chunks)
+            .into_values()
+            .collect()
+    }
+
     /// An independent copy of everything stored now (tests: one side of a fork).
     pub fn deep_copy(&self) -> MemoryTransport {
         MemoryTransport {

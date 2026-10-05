@@ -2349,6 +2349,7 @@ dependencies = [
  "ed25519-dalek",
  "keyorra-core",
  "keyorra-sync",
+ "keyorra-sync-fs",
  "p256",
  "psl",
  "rand 0.8.8",

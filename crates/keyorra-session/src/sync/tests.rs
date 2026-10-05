@@ -1086,3 +1086,175 @@ fn review_a1d2_i7_a_refused_new_account_changes_nothing() {
     }
     round(&mut main, NOW_MS + 161);
 }
+
+// ---- attachment contents (plan A2-2) ----
+
+#[test]
+fn attachment_contents_travel_and_removals_follow() {
+    let (_t, mut main, mut laptop) = pair();
+    let item = find(&laptop.store, "before sync");
+    let att = laptop
+        .store
+        .add_attachment(item.id, "scan.pdf", b"%PDF bytes", 200)
+        .unwrap();
+    for t in 200..204 {
+        round(&mut laptop, NOW_MS + t);
+        round(&mut main, NOW_MS + t);
+    }
+    assert_eq!(
+        &main.store.get_attachment(att.id).unwrap()[..],
+        b"%PDF bytes"
+    );
+    let shown = main.store.get_item(item.id).unwrap();
+    assert_eq!(shown.attachments.len(), 1);
+    main.store.remove_attachment(item.id, att.id, 210).unwrap();
+    for t in 210..214 {
+        round(&mut main, NOW_MS + t);
+        round(&mut laptop, NOW_MS + t);
+    }
+    assert!(laptop.store.get_attachment(att.id).is_err());
+    assert!(laptop
+        .store
+        .get_item(item.id)
+        .unwrap()
+        .attachments
+        .is_empty());
+}
+
+#[test]
+fn an_attachment_whose_chunks_are_not_there_yet_waits_and_is_reported() {
+    let (transport, mut main, mut laptop) = pair();
+    let item = find(&laptop.store, "before sync");
+    let att = laptop
+        .store
+        .add_attachment(item.id, "a.bin", b"payload", 220)
+        .unwrap();
+    round(&mut laptop, NOW_MS + 220);
+    // The chunks have not reached this store yet.
+    let chunks = transport.take_chunks();
+    assert!(!chunks.is_empty());
+    let report = main.synced.round(&mut main.store, NOW_MS + 221).unwrap();
+    assert!(
+        report.failed.iter().any(|(id, _)| *id == att.id),
+        "{report:?}"
+    );
+    assert!(main.store.get_attachment(att.id).is_err());
+    for c in chunks {
+        transport.put_chunk(&c).unwrap();
+    }
+    round(&mut main, NOW_MS + 222);
+    assert_eq!(&main.store.get_attachment(att.id).unwrap()[..], b"payload");
+}
+
+#[test]
+fn a_conflict_copy_keeps_the_attachment_content() {
+    let (_t, mut main, mut laptop) = pair();
+    let item = find(&laptop.store, "before sync");
+    let att = laptop
+        .store
+        .add_attachment(item.id, "a.txt", b"shared", 230)
+        .unwrap();
+    for t in 230..233 {
+        round(&mut laptop, NOW_MS + t);
+        round(&mut main, NOW_MS + t);
+    }
+    retitle(&mut main.store, "before sync", "edited on main");
+    retitle(&mut laptop.store, "before sync", "edited on laptop");
+    for t in 233..240 {
+        round(&mut main, NOW_MS + t);
+        round(&mut laptop, NOW_MS + t);
+    }
+    for store in [&main.store, &laptop.store] {
+        let copies: Vec<_> = store
+            .list_items(None)
+            .unwrap()
+            .into_iter()
+            .filter_map(|e| match e {
+                keyorra_core::store::ItemEntry::Ok(i) if i.conflict.is_some() => Some(i),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(copies.len(), 1);
+        let copy_att = copies[0].attachments[0].id;
+        assert_ne!(copy_att, att.id);
+        assert_eq!(&store.get_attachment(copy_att).unwrap()[..], b"shared");
+    }
+}
+
+/// Two vault stores sync through a real folder (plan A2): enable, join, approve, an item
+/// with an attachment, and an edit back.
+#[test]
+fn two_stores_sync_through_a_folder() {
+    use keyorra_sync_fs::{FolderTransport, LocalDisk};
+    let folder = tempfile::tempdir().unwrap();
+    let open =
+        || FolderTransport::open(folder.path(), None, std::sync::Arc::new(LocalDisk)).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let mut main_store =
+        Store::create(&dir.path().join("m.db"), PW, KdfParams::INSECURE_FAST).unwrap();
+    let vault = main_store.create_vault("Personal").unwrap();
+    let item = Item::new(vault.id, ItemKind::Login, "in the folder", 1);
+    main_store.save_item(&item).unwrap();
+    main_store
+        .add_attachment(item.id, "f.txt", b"file bytes", 2)
+        .unwrap();
+    let mut main_keys = MemoryDeviceKeys::default();
+    let Enabled {
+        mut synced, kit, ..
+    } = enable(
+        &mut main_store,
+        open(),
+        &mut main_keys,
+        "Main",
+        PW,
+        KdfParams::INSECURE_FAST,
+        NOW_MS,
+    )
+    .unwrap();
+    let (id, sk) = SecretKey::parse(&kit.secret_key).unwrap();
+    let mut laptop_keys = MemoryDeviceKeys::default();
+    let Joined {
+        store: mut laptop_store,
+        synced: mut laptop,
+        ..
+    } = join(
+        &dir.path().join("l.db"),
+        PW,
+        KdfParams::INSECURE_FAST,
+        &sk,
+        &id,
+        Some(&synced.root_pin()),
+        open(),
+        &mut laptop_keys,
+        "Laptop",
+        cheap_unlock(PW, *sk.as_bytes()),
+        NOW_MS,
+    )
+    .unwrap();
+    synced.round(&mut main_store, NOW_MS + 1).unwrap();
+    let code = laptop.key_code();
+    synced
+        .approve(laptop.engine().device(), &code, NOW_MS + 2)
+        .unwrap();
+    for t in 3..8 {
+        synced.round(&mut main_store, NOW_MS + t).unwrap();
+        laptop.round(&mut laptop_store, NOW_MS + t).unwrap();
+    }
+    let got = laptop_store.get_item(item.id).unwrap();
+    assert_eq!(got.title, "in the folder");
+    assert_eq!(
+        &laptop_store.get_attachment(got.attachments[0].id).unwrap()[..],
+        b"file bytes"
+    );
+    let mut edited = got;
+    edited.title = "edited on the laptop".into();
+    laptop_store.save_item(&edited).unwrap();
+    for t in 8..12 {
+        laptop.round(&mut laptop_store, NOW_MS + t).unwrap();
+        synced.round(&mut main_store, NOW_MS + t).unwrap();
+    }
+    assert_eq!(
+        main_store.get_item(item.id).unwrap().title,
+        "edited on the laptop"
+    );
+}

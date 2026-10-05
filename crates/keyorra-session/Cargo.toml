@@ -25,4 +25,5 @@ zeroize = { version = "1", features = ["serde"] }
 [dev-dependencies]
 keyorra-core = { path = "../keyorra-core", features = ["test-utils"] }
 keyorra-sync = { path = "../keyorra-sync", features = ["test-utils"] }
+keyorra-sync-fs = { path = "../keyorra-sync-fs" }
 tempfile = "3"
