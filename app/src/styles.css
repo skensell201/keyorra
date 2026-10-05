@@ -264,3 +264,7 @@ fieldset.fields .reveal { align-self: flex-start; }
 
 /* Plan 2c */
 .modal.confirm { width: 420px; }
+.vault-row { position: relative; }
+.vault-row .nav { width: 100%; }
+.vault-row .vault-actions { position: absolute; right: 34px; top: 50%; transform: translateY(-50%); display: flex; gap: 2px; }
+.vault-row .vault-actions button.icon { width: 24px; height: 24px; }

@@ -18,6 +18,8 @@ vi.mock("../api", async (importOriginal) => {
       newItem: vi.fn(),
       saveItem: vi.fn(),
       createVault: vi.fn(),
+      renameVault: vi.fn(),
+      deleteVault: vi.fn(),
       deletedItems: vi.fn(),
       restoreItem: vi.fn(),
       settings: vi.fn(),
@@ -60,6 +62,8 @@ beforeEach(() => {
   vi.mocked(api.newItem).mockReset().mockResolvedValue(loginItem({ id: "new", title: "" }));
   vi.mocked(api.saveItem).mockReset().mockImplementation(async (item) => item);
   vi.mocked(api.createVault).mockReset().mockResolvedValue({ id: "v3", name: "Home", itemCount: 0 });
+  vi.mocked(api.renameVault).mockReset().mockResolvedValue({ id: "v2", name: "Office", itemCount: 0 });
+  vi.mocked(api.deleteVault).mockReset().mockResolvedValue(undefined);
   vi.mocked(api.deletedItems).mockReset().mockResolvedValue([{ ...github, id: "d1", title: "Old forum" }]);
   vi.mocked(api.restoreItem).mockReset().mockResolvedValue(undefined);
   vi.mocked(api.settings).mockReset().mockResolvedValue({ autoLockMinutes: 10, clipboardSeconds: 90 });
@@ -169,4 +173,37 @@ test("reloads vaults and items when the browser extension saves something", asyn
   act(() => changedCallback!());
   expect(await screen.findByText("shop.example")).toBeInTheDocument();
   expect(vi.mocked(api.vaults).mock.calls.length).toBeGreaterThan(vaultCalls);
+});
+
+test("renames the selected vault", async () => {
+  const user = userEvent.setup();
+  render(<Main onLock={vi.fn()} />);
+  await user.click(await screen.findByRole("button", { name: /Work/ }));
+  await user.click(screen.getByRole("button", { name: "Rename Work" }));
+  await user.clear(screen.getByLabelText("New name for Work"));
+  await user.type(screen.getByLabelText("New name for Work"), "Office{Enter}");
+  expect(api.renameVault).toHaveBeenCalledWith("v2", "Office");
+  await waitFor(() => expect(api.vaults).toHaveBeenCalledTimes(2));
+});
+
+test("deletes an empty vault after confirming", async () => {
+  const user = userEvent.setup();
+  render(<Main onLock={vi.fn()} />);
+  await user.click(await screen.findByRole("button", { name: /Work/ }));
+  await user.click(screen.getByRole("button", { name: "Delete Work" }));
+  const dialog = screen.getByRole("alertdialog", { name: 'Delete vault "Work"?' });
+  expect(dialog).toHaveTextContent("Recently Deleted");
+  await user.click(screen.getByRole("button", { name: "Delete vault" }));
+  expect(api.deleteVault).toHaveBeenCalledWith("v2");
+  await waitFor(() => expect(lastFilter().vaultId).toBeNull());
+});
+
+test("a vault with items is not deleted", async () => {
+  const user = userEvent.setup();
+  render(<Main onLock={vi.fn()} />);
+  await user.click(await screen.findByRole("button", { name: /Personal/ }));
+  await user.click(screen.getByRole("button", { name: "Delete Personal" }));
+  expect(await screen.findByRole("alert")).toHaveTextContent('"Personal" still has 1 item. Delete them first.');
+  expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
+  expect(api.deleteVault).not.toHaveBeenCalled();
 });

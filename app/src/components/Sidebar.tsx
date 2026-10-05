@@ -1,4 +1,4 @@
-import { IconGrid, IconImport, IconLock, IconPlus, IconSettings, IconStar, IconTrash, IconVault } from "./icons";
+import { IconGrid, IconImport, IconLock, IconPencil, IconPlus, IconSettings, IconStar, IconTrash, IconVault } from "./icons";
 import { Keyhole } from "./Keyhole";
 import { useState, type FormEvent } from "react";
 import type { Vault } from "../api";
@@ -10,12 +10,17 @@ interface Props {
   selection: Selection;
   onSelect: (selection: Selection) => void;
   onNewVault: (name: string) => void;
+  onRenameVault: (id: string, name: string) => void;
+  onDeleteVault: (vault: Vault) => void;
   onImport: () => void;
   onLock: () => void;
   onSettings: () => void;
 }
 
-export function Sidebar({ vaults, selection, onSelect, onNewVault, onImport, onLock, onSettings }: Props) {
+export function Sidebar(props: Props) {
+  const { vaults, selection, onSelect, onNewVault, onRenameVault, onDeleteVault, onImport, onLock, onSettings } = props;
+  const [renaming, setRenaming] = useState<string | null>(null);
+  const [newName, setNewName] = useState("");
   const [naming, setNaming] = useState(false);
   const [name, setName] = useState("");
   const total = vaults.reduce((n, v) => n + v.itemCount, 0);
@@ -29,6 +34,13 @@ export function Sidebar({ vaults, selection, onSelect, onNewVault, onImport, onL
     onNewVault(trimmed);
     setName("");
     setNaming(false);
+  }
+
+  function submitRename(e: FormEvent, id: string) {
+    e.preventDefault();
+    const trimmed = newName.trim();
+    if (trimmed) onRenameVault(id, trimmed);
+    setRenaming(null);
   }
 
   return (
@@ -51,18 +63,50 @@ export function Sidebar({ vaults, selection, onSelect, onNewVault, onImport, onL
         Recently Deleted
       </button>
       <div className="heading">Vaults</div>
-      {vaults.map((v) => (
-        <button
-          key={v.id}
-          className="nav"
-          aria-current={isCurrent({ kind: "vault", id: v.id })}
-          onClick={() => onSelect({ kind: "vault", id: v.id })}
-        >
-          <IconVault />
-          <span>{v.name}</span>
-          <span className="count">{v.itemCount}</span>
-        </button>
-      ))}
+      {vaults.map((v) =>
+        renaming === v.id ? (
+          <form key={v.id} onSubmit={(e) => submitRename(e, v.id)}>
+            <input
+              aria-label={`New name for ${v.name}`}
+              autoFocus
+              value={newName}
+              onChange={(e) => setNewName(e.target.value)}
+              onKeyDown={(e) => e.key === "Escape" && setRenaming(null)}
+              onBlur={() => setRenaming(null)}
+            />
+          </form>
+        ) : (
+          <div key={v.id} className="vault-row">
+            <button
+              className="nav"
+              aria-current={isCurrent({ kind: "vault", id: v.id })}
+              onClick={() => onSelect({ kind: "vault", id: v.id })}
+            >
+              <IconVault />
+              <span>{v.name}</span>
+              <span className="count">{v.itemCount}</span>
+            </button>
+            {isCurrent({ kind: "vault", id: v.id }) && (
+              <span className="vault-actions">
+                <button
+                  className="icon"
+                  title="Rename"
+                  aria-label={`Rename ${v.name}`}
+                  onClick={() => {
+                    setNewName(v.name);
+                    setRenaming(v.id);
+                  }}
+                >
+                  <IconPencil />
+                </button>
+                <button className="icon" title="Delete" aria-label={`Delete ${v.name}`} onClick={() => onDeleteVault(v)}>
+                  <IconTrash />
+                </button>
+              </span>
+            )}
+          </div>
+        ),
+      )}
       {naming ? (
         <form onSubmit={submit}>
           <input

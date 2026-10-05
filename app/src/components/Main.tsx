@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api, errorMessage, type Item, type ItemKind, type ItemSummary, type PairingRequest, type Vault } from "../api";
+import { ConfirmDialog } from "./ConfirmDialog";
 import { ImportDialog } from "./ImportDialog";
 import { ItemDetail } from "./ItemDetail";
 import { ItemEditor } from "./ItemEditor";
@@ -21,6 +22,7 @@ export function Main({ onLock }: { onLock: () => void }) {
   const [showSettings, setShowSettings] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pairing, setPairing] = useState<PairingRequest | null>(null);
+  const [deletingVault, setDeletingVault] = useState<Vault | null>(null);
 
   const vaultsSeq = useRef(0);
   const itemsSeq = useRef(0);
@@ -104,6 +106,36 @@ export function Main({ onLock }: { onLock: () => void }) {
     }
   }
 
+  async function renameVault(id: string, name: string) {
+    try {
+      await api.renameVault(id, name);
+      await loadVaults();
+    } catch (e) {
+      setError(errorMessage(e));
+    }
+  }
+
+  function askDeleteVault(vault: Vault) {
+    if (vault.itemCount > 0) {
+      const s = vault.itemCount === 1 ? "" : "s";
+      setError(`"${vault.name}" still has ${vault.itemCount} item${s}. Delete them first.`);
+      return;
+    }
+    setDeletingVault(vault);
+  }
+
+  async function deleteVault(vault: Vault) {
+    setDeletingVault(null);
+    try {
+      await api.deleteVault(vault.id);
+      setSelection({ kind: "all" });
+      setPane({ mode: "empty" });
+      await refresh();
+    } catch (e) {
+      setError(errorMessage(e));
+    }
+  }
+
   return (
     <div className="app">
       <Sidebar
@@ -114,6 +146,8 @@ export function Main({ onLock }: { onLock: () => void }) {
           setPane({ mode: "empty" });
         }}
         onNewVault={newVault}
+        onRenameVault={renameVault}
+        onDeleteVault={askDeleteVault}
         onImport={() => setImporting(true)}
         onLock={onLock}
         onSettings={() => setShowSettings(true)}
@@ -171,6 +205,17 @@ export function Main({ onLock }: { onLock: () => void }) {
       </section>
       {importing && <ImportDialog onClose={() => setImporting(false)} onImported={refresh} />}
       {showSettings && <SettingsDialog onClose={() => setShowSettings(false)} />}
+      {deletingVault && (
+        <ConfirmDialog
+          title={`Delete vault "${deletingVault.name}"?`}
+          confirmLabel="Delete vault"
+          danger
+          onConfirm={() => deleteVault(deletingVault)}
+          onCancel={() => setDeletingVault(null)}
+        >
+          The vault is empty. Its items in Recently Deleted are removed for good.
+        </ConfirmDialog>
+      )}
       {pairing && <PairingDialog key={pairing.clientId} request={pairing} onDone={() => setPairing(null)} />}
     </div>
   );

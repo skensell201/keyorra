@@ -89,6 +89,7 @@ export const IconEyeOff = icon(
     <path d="M9.9 5.8A9.7 9.7 0 0112 5.5c6 0 9.5 6.5 9.5 6.5a16 16 0 01-2.7 3.4M6.4 7.4C3.9 9.1 2.5 12 2.5 12S6 18.5 12 18.5a9.4 9.4 0 004.2-1" />
   </>,
 );
+export const IconPencil = icon(<path d="M5 19l1-4.5L15.5 5a2.1 2.1 0 013 3L9 17.5zM13.5 7l3 3" />);
 export const IconClose = icon(<path d="M6 6l12 12M18 6L6 18" />);
 
 const KIND_ICON: Record<ItemKind, ReturnType<typeof icon>> = {
