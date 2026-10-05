@@ -335,16 +335,21 @@ device approved with a key that is not its own (an alarm).
 root's head `(seq, hash)`:
 
 ```
-root.head = canonical({ "account_id": bytes16, "seq": uint, "hash": bytes32, "at_ms": uint, "sig": bytes64 })
-sig       = Ed25519(root_sk, "keyorra/sync/v1/root-head\0" ‖ account_id ‖ seq:u64be ‖ hash ‖ at_ms:u64be)
+root.head = canonical({ "account_id": bytes16, "seq": uint, "hash": bytes32, "at_ms": uint,
+                        "devices": uint, "pending": [[seq, revoke entry], …], "sig": bytes64 })
+sig       = Ed25519(root_sk, "keyorra/sync/v1/root-head\0" ‖ canonical(root.head without "sig"))
 ```
 
 The root rewrites it after every confirmed append and at least daily while online (`at_ms`
 is its wall time). A device compares the head with the root's stream as received: if
 behind, other devices' records are **unconfirmed** and an alarm says so (pausing nothing)
 until the stream catches up; a different hash at that position is a fork of the root. The
-advertised head only moves forward. If `at_ms` has not advanced for 7 days while other
-streams advanced, the device warns that the root looks silent (a frozen or replayed file).
+advertised head only moves forward. If `at_ms` has not advanced for 7 days the device warns
+that the root looks silent (a frozen or replayed file, or the root is off). `pending` lists
+the root's `revoke` entries written but not yet confirmed, with their positions: a reader
+cuts each such approved device at once at its `last_valid_seq` (provisionally); the entry in
+the root's stream settles it. `devices` counts the approved devices other than the root; a
+join without a setup code is refused while it is not zero.
 
 **Snapshots** count only if the root wrote them: bootstrap and anchoring use root snapshots
 only. A device restores its own rolled-back stream by appending its original segments
@@ -398,12 +403,13 @@ counting); each claim unmet for 24 hours is reported once as withheld (a warning
 whose `last_valid_hash` differs from the received chain hash at `last_valid_seq` is a fork.
 Forks and disputes at positions after the stream's cut raise nothing.
 
-**Own stream occupied**: if the append at the next own position conflicts, or the stored
-head of the own stream is ahead, the device looks at what is there: only a segment that
-verifies with its own key (or the root's checkpoint) proves another copy of it and makes it
-retire; anything else raises an own-stream-tampered alarm, the id is kept and nothing is
-pushed until the user removes the file and retries, or leaves the id. The root never halts
-on unverified evidence.
+**Own stream occupied or lost**: every round a device makes the store hold its kept own
+segments byte for byte (appending a missing one again). If an append at an own position
+conflicts, or the stored head of the own stream is ahead, it looks at what is there: only a
+segment that verifies with its own key (or the root's checkpoint) proves another copy of it
+and makes it retire; anything else is deleted and the device goes on (an alarm only if the
+delete fails). It never appends over a gap. The root never halts on unverified evidence and
+cannot leave its id.
 
 **Rollback**: before reading, a device compares each stream's stored head (`Transport::head`)
 with its own received position, and before writing, the stored head of its own stream with

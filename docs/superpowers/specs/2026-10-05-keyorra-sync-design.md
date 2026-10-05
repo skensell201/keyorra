@@ -411,7 +411,8 @@ remote head:
 | equal | normal | append |
 | remote behind local | rollback of the store (§4.5) | alarm, offer restore |
 | remote ahead, or same seq with another hash, **and** a segment there verifies with this device's own key (or the main device's checkpoint says so) | another copy of this device (clone, restored backup) wrote to the stream | **retire**: never write with this id again |
-| remote ahead, or something else at the next position, that does **not** verify with the own key | a store or keyless folder writer tampered with the stream (review K1) | alarm "own stream tampered", keep the id, push nothing until the user removes the file (retry) or chooses to leave the id; the main device never halts on this |
+| remote ahead, or something else at an own position, that does **not** verify with the own key | a store or keyless folder writer (a squatter) tampered with the stream (reviews K1, F1) | the device deletes it and goes on by itself (an event); only if deleting fails is it an alarm; the id is kept and the main device never halts on this |
+| own segments missing from the store (a rollback, a partitioned view) | the store lost them | the device appends its kept segments again by itself (an event); an alarm only if it no longer has them and no snapshot of the main device covers them |
 | device key missing from the Keychain | database restored or copied to another Mac | **retire** |
 
 Retiring: local unsynced edits are kept; the device generates a new id and key and joins with `SelfJoin`, pending until the main device approves it (comparing the key code); its first entries are the queued edits as new versions. Only the main device removes the old id (A3 suggests it). **The main device never retires**: its id and key anchor the account. If another copy of it wrote, or its key is gone, it stops writing and the user is asked to start a new account from a device and carry the data over (A1d/A3 flow, §4.3).
@@ -455,13 +456,19 @@ other device's approvals or removals count; there is nothing to resolve between 
   has another hash there raises a fork alarm. The cut is never below the device's position
   in the root's own latest checkpoint before the `Revoke`, counted only where that position
   matches the reader's chain. Removing a device that was never approved means none of its
-  entries count. A cut is set once and never moves.
-- **The root's head is advertised** (review W1): a small file signed by the main device (`root.head`, rewritten after every confirmed append and at least daily while it is online, carrying its wall time) and the setup
+  entries count. A cut is set once and never moves. **Removals also travel in the root head
+  file** (below) while they are written but not yet confirmed in the main device's stream:
+  readers cut the device at once and the stream's entry settles it, so someone squatting the
+  main device's next position cannot keep a stolen device admitted (review F1). **Removing a
+  stolen Mac also means cutting its access to the store**: sign it out of iCloud or remove
+  it from the Apple ID (folder transport), or revoke its token (server, phase B); without
+  that it can still read, and disturb the store, though nothing it writes counts.
+- **The root's head is advertised** (review W1): a small file signed by the main device (`root.head`, rewritten after every confirmed append and at least daily while it is online, carrying its wall time, the number of approved devices and its pending removals) and the setup
   code carry the root's current head `(seq, hash)`; a reader only moves it forward. If the
-  main device's time in the file does not advance for a week while other devices' streams
-  move on, a device warns: the store may be freezing or replaying the file while hiding the
-  main device's newest entries (review I1). (The main device may also just be switched
-  off; hence a warning, not an alarm.) (The header itself cannot carry the head: it is bound into the wrapped account key and changes only with the password.) Every device compares it with the root's
+  main device's time in the file does not advance for a week, a device gives a mild
+  warning: the main device may be switched off, or the store may be freezing or replaying
+  the file while hiding its newest entries, also in a partitioned view where nothing else
+  moves (reviews I1, F3). (The header itself cannot carry the head: it is bound into the wrapped account key and changes only with the password.) Every device compares it with the root's
   stream as received: behind is an alarm ("the main device's changes are not all here")
   that pauses nothing but marks other devices' records as **unconfirmed** until the root's
   stream catches up (a removal could be withheld); another hash at that position is a fork
@@ -611,7 +618,13 @@ sig          = Ed25519(author_sk, "keyorra/sync/v1/header\0" ‖ author ‖ cano
 - **Joining with a setup code** from an existing device pins the main device (its id and key
   code): only headers naming it are considered, the highest such epoch first. **Joining with
   the Emergency Kit alone** trusts the newest header, whichever main device it names; if the
-  header files disagree about the main device, the app warns. Someone with the master
+  header files disagree about the main device, the app warns. Such a join is always flagged
+  (`unpinned`): the app asks the user to compare the main device's key code with an
+  existing device. While the root head file (signed by the header's main device) lists any
+  approved device, a join without a setup code is refused: use the setup code of one of
+  them (review F4). Someone with the password, the Secret Key and write access to the store
+  could still delete the genuine headers and head file and mislead an unpinned joiner;
+  that residual risk is stated in the threat model (C1 rotation). Someone with the master
   password and Secret Key can publish such a header (review I2); existing devices raise an
   alarm for any header file naming another main device. (C1 note: a replayed old header
   still opens with an old password until key rotation.)
