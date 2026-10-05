@@ -6,6 +6,7 @@ pub mod cbor;
 pub mod chunk;
 pub mod clock;
 pub mod engine;
+pub mod entry;
 pub mod envelope;
 pub mod error;
 #[cfg(any(test, feature = "test-utils"))]
