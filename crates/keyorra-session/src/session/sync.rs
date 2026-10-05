@@ -7,6 +7,7 @@ use keyorra_core::store::Store;
 use keyorra_sync::header::Header;
 use keyorra_sync::secret_key::SecretKey;
 use keyorra_sync::transport::Transport;
+use keyorra_sync::AccountId;
 use serde::Serialize;
 
 use super::{locked, move_aside, sibling, Session, Status, DB_SIBLINGS, MIN_PASSWORD_LEN};
@@ -18,14 +19,17 @@ pub type BoxedTransport = Box<dyn Transport + Send>;
 
 /// What the app gives the session for sync.
 pub trait SyncLink: Send {
-    /// The store of files the account lives in (opened per use).
-    fn transport(&self) -> Result<BoxedTransport, String>;
-    fn device_keys(&self) -> Box<dyn DeviceKeyStore>;
-    /// A location for a new account (each account has its own; plan A2 makes a new folder).
-    /// Turning sync on and starting a new account use it; it must hold no account yet.
-    fn fresh_transport(&self) -> Result<BoxedTransport, String> {
-        self.transport()
+    /// The folder of `account` (opened per use; plan A2: `<place>/Keyorra/<account hex>/`).
+    fn transport(&self, account: &AccountId) -> Result<BoxedTransport, String>;
+    /// Makes the folder of a new account (turning sync on, starting a new account); it must
+    /// hold no account yet.
+    fn new_account_transport(&self, account: &AccountId) -> Result<BoxedTransport, String> {
+        self.transport(account)
     }
+    /// Every account folder in the sync place: joining picks the one whose header names the
+    /// Secret Key.
+    fn join_candidates(&self) -> Result<Vec<BoxedTransport>, String>;
+    fn device_keys(&self) -> Box<dyn DeviceKeyStore>;
     /// This Mac's name, shown to the other devices.
     fn device_name(&self) -> String;
     /// Opens an account header with the master password and Secret Key (tests replace the
@@ -111,9 +115,25 @@ pub(super) fn recover_interrupted_join(path: &std::path::Path) {
     }
 }
 
-fn open_transport(link: &dyn SyncLink) -> CmdResult<BoxedTransport> {
-    link.transport()
-        .map_err(|e| CmdError::new(ErrorKind::Other, format!("Sync folder: {e}")))
+fn folder_error(e: String) -> CmdError {
+    CmdError::new(ErrorKind::Other, format!("Sync folder: {e}"))
+}
+
+fn open_transport(link: &dyn SyncLink, account: &AccountId) -> CmdResult<BoxedTransport> {
+    link.transport(account).map_err(folder_error)
+}
+
+/// The account folder to join with this Secret Key (its header names the key's id).
+fn join_transport(link: &dyn SyncLink, secret_key_id: &str) -> CmdResult<BoxedTransport> {
+    for candidate in link.join_candidates().map_err(folder_error)? {
+        if s::holds_account(&candidate, secret_key_id).unwrap_or(false) {
+            return Ok(candidate);
+        }
+    }
+    Err(CmdError::new(
+        ErrorKind::NotFound,
+        "No account for this Secret Key in the sync folder",
+    ))
 }
 
 /// Where the old database goes when the vault joins another account (spec §7.3):
@@ -158,8 +178,10 @@ impl Session {
         self.sync_link.as_deref().ok_or_else(no_link)
     }
 
+    /// The folder of the account this vault syncs with.
     fn transport(&self) -> CmdResult<BoxedTransport> {
-        open_transport(self.link()?)
+        let account = s::account_id(self.store()?).map_err(sync_error)?;
+        open_transport(self.link()?, &account)
     }
 
     /// Runs `f` with the link taken out of the session (so `f` may change the session).
@@ -244,9 +266,9 @@ impl Session {
         self.touch(now);
         self.check_password_throttled(password, now)?;
         let link = self.link()?;
+        let account = s::new_account_id();
         let (transport, mut keys, name) = (
-            link.fresh_transport()
-                .map_err(|e| CmdError::new(ErrorKind::Other, format!("Sync folder: {e}")))?,
+            link.new_account_transport(&account).map_err(folder_error)?,
             link.device_keys(),
             link.device_name(),
         );
@@ -259,6 +281,7 @@ impl Session {
             ..
         } = s::enable(
             store,
+            account,
             transport,
             keys.as_mut(),
             &name,
@@ -367,7 +390,7 @@ impl Session {
         now: u64,
     ) -> CmdResult<()> {
         let (transport, mut keys, name) = (
-            open_transport(link)?,
+            join_transport(link, sk_id)?,
             link.device_keys(),
             link.device_name(),
         );
@@ -444,7 +467,7 @@ impl Session {
         now: u64,
     ) -> CmdResult<()> {
         let (transport, mut keys, name) = (
-            open_transport(link)?,
+            join_transport(link, sk_id)?,
             link.device_keys(),
             link.device_name(),
         );
@@ -515,14 +538,14 @@ impl Session {
             )];
         }
         // The new vault is in place: sync that cannot start now starts on the next round.
-        let resumed = s::resume(
-            self.store.as_ref().ok_or_else(locked)?,
-            open_transport(link)?,
-            link.device_keys().as_ref(),
-        );
+        let store = self.store.as_ref().ok_or_else(locked)?;
+        let resumed = s::account_id(store)
+            .map_err(sync_error)
+            .and_then(|account| open_transport(link, &account))
+            .and_then(|t| s::resume(store, t, link.device_keys().as_ref()).map_err(sync_error));
         match resumed {
             Ok(synced) => self.synced = Some(synced),
-            Err(e) => self.sync_error = Some(sync_error(e).message),
+            Err(e) => self.sync_error = Some(e.message),
         }
         Ok(())
     }
@@ -566,9 +589,9 @@ impl Session {
         self.touch(now);
         self.check_password_throttled(password, now)?;
         let link = self.link()?;
+        let account = s::new_account_id();
         let (transport, mut keys, name) = (
-            link.fresh_transport()
-                .map_err(|e| CmdError::new(ErrorKind::Other, format!("Sync folder: {e}")))?,
+            link.new_account_transport(&account).map_err(folder_error)?,
             link.device_keys(),
             link.device_name(),
         );
@@ -577,6 +600,7 @@ impl Session {
         let before = store.account_key_copy()?;
         let started = s::start_new_account(
             store,
+            account,
             transport,
             keys.as_mut(),
             &name,

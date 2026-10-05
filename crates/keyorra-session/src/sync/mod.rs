@@ -237,6 +237,26 @@ fn item_json(item: &Item) -> Result<Zeroizing<Vec<u8>>> {
         .map_err(|e| Error::Malformed(e.to_string()))
 }
 
+/// A new account's id (its folder is named after it, plan A2).
+pub fn new_account_id() -> AccountId {
+    random_id()
+}
+
+/// The account this store syncs with.
+pub fn account_id(store: &Store) -> Result<AccountId> {
+    Ok(load_config(store)?.account_id)
+}
+
+/// Whether `transport` holds an account whose header names this Secret Key id (choosing the
+/// account folder to join without trying the password on each, plan A2).
+pub fn holds_account<T: Transport>(transport: &T, secret_key_id: &str) -> Result<bool> {
+    Ok(transport.headers()?.into_iter().any(|(_, f)| match f {
+        Fetched::Ready(bytes) => keyorra_sync::header::HeaderFile::decode(&bytes)
+            .is_ok_and(|h| h.header.secret_key_id == secret_key_id),
+        _ => false,
+    }))
+}
+
 /// Every live attachment of the store, as changes (written unless sync has them).
 fn attachment_changes(store: &Store) -> Result<Vec<Change>> {
     Ok(store
@@ -296,6 +316,7 @@ pub struct RoundReport {
 #[allow(clippy::too_many_arguments)]
 pub fn enable<T: Transport>(
     store: &mut Store,
+    account_id: AccountId,
     transport: T,
     keys: &mut dyn DeviceKeyStore,
     device_name: &str,
@@ -313,7 +334,6 @@ pub fn enable<T: Transport>(
             "this location already holds a Keyorra account; choose an empty one".into(),
         ));
     }
-    let account_id = random_id();
     let device = random_id();
     let signer = new_signer();
     keys.store(device, &signer).map_err(Error::Refused)?;

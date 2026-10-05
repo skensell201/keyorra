@@ -66,6 +66,7 @@ fn main_device(transport: &MemoryTransport) -> (Device, EmergencyKit) {
         ..
     } = enable(
         &mut store,
+        new_account_id(),
         transport.clone(),
         &mut keys,
         "Main",
@@ -490,6 +491,7 @@ fn review_a1d_i5_enable_succeeds_when_the_first_round_fails() {
     let mut keys = MemoryDeviceKeys::default();
     let enabled = enable(
         &mut store,
+        new_account_id(),
         faulty,
         &mut keys,
         "Main",
@@ -792,6 +794,7 @@ fn the_main_device_starts_a_new_account_with_new_keys() {
     let fresh = MemoryTransport::new();
     let Enabled { synced, kit, .. } = start_new_account(
         &mut main.store,
+        new_account_id(),
         fresh.clone(),
         &mut main.keys,
         "Main",
@@ -965,6 +968,7 @@ fn review_a1d2_i6_enabling_again_forgets_the_old_rejoin_base() {
     let fresh = MemoryTransport::new();
     let enabled = enable(
         &mut store,
+        new_account_id(),
         fresh.clone(),
         &mut keys,
         "Laptop",
@@ -1070,6 +1074,7 @@ fn review_a1d2_i7_a_refused_new_account_changes_nothing() {
     for (password, location) in [("wrong password!", MemoryTransport::new()), (PW, transport)] {
         assert!(start_new_account(
             &mut main.store,
+            new_account_id(),
             location,
             &mut main.keys,
             "Main",
@@ -1203,6 +1208,7 @@ fn two_stores_sync_through_a_folder() {
         mut synced, kit, ..
     } = enable(
         &mut main_store,
+        new_account_id(),
         open(),
         &mut main_keys,
         "Main",
@@ -1257,4 +1263,24 @@ fn two_stores_sync_through_a_folder() {
         main_store.get_item(item.id).unwrap().title,
         "edited on the laptop"
     );
+}
+
+/// Review A1d-2 I12: a folder that already holds an account is not used for a new one.
+#[test]
+fn enabling_refuses_a_folder_that_holds_an_account() {
+    let (transport, _main, _laptop) = pair();
+    let dir = tempfile::tempdir().unwrap();
+    let mut store = Store::create(&dir.path().join("o.db"), PW, KdfParams::INSECURE_FAST).unwrap();
+    let result = enable(
+        &mut store,
+        new_account_id(),
+        transport,
+        &mut MemoryDeviceKeys::default(),
+        "Other",
+        PW,
+        KdfParams::INSECURE_FAST,
+        NOW_MS + 300,
+    );
+    assert!(matches!(result, Err(Error::Refused(_))));
+    assert!(!is_enabled(&store).unwrap());
 }

@@ -5,16 +5,27 @@ use keyorra_core::model::ItemKind;
 use keyorra_sync::header::Header;
 use keyorra_sync::keys::derive_sync_keys;
 use keyorra_sync::secret_key::SecretKey;
+use std::collections::BTreeMap;
+use std::sync::{Arc, Mutex};
+
 use keyorra_sync::transport::MemoryTransport;
 
 use super::tests::{new_session, unlocked_session, PW};
 use super::*;
 use crate::sync::{DeviceKeyStore, MemoryDeviceKeys};
 
+/// The sync place the test Macs share: one folder (in memory) per account.
+#[derive(Clone, Default)]
+struct Place(Arc<Mutex<BTreeMap<keyorra_sync::AccountId, MemoryTransport>>>);
+
+impl Place {
+    fn folders(&self) -> usize {
+        self.0.lock().unwrap().len()
+    }
+}
+
 struct TestLink {
-    transport: MemoryTransport,
-    /// Where a new account goes (its own location).
-    fresh: MemoryTransport,
+    place: Place,
     keys: MemoryDeviceKeys,
     name: &'static str,
 }
@@ -25,14 +36,32 @@ thread_local! {
 }
 
 impl SyncLink for TestLink {
-    fn transport(&self) -> Result<BoxedTransport, String> {
+    fn transport(&self, account: &keyorra_sync::AccountId) -> Result<BoxedTransport, String> {
         if OFFLINE.get() {
             return Err("the folder is not available".into());
         }
-        Ok(Box::new(self.transport.clone()))
+        match self.place.0.lock().unwrap().get(account) {
+            Some(t) => Ok(Box::new(t.clone())),
+            None => Err("no folder for this account".into()),
+        }
     }
-    fn fresh_transport(&self) -> Result<BoxedTransport, String> {
-        Ok(Box::new(self.fresh.clone()))
+    fn new_account_transport(
+        &self,
+        account: &keyorra_sync::AccountId,
+    ) -> Result<BoxedTransport, String> {
+        let t = MemoryTransport::new();
+        self.place.0.lock().unwrap().insert(*account, t.clone());
+        Ok(Box::new(t))
+    }
+    fn join_candidates(&self) -> Result<Vec<BoxedTransport>, String> {
+        Ok(self
+            .place
+            .0
+            .lock()
+            .unwrap()
+            .values()
+            .map(|t| Box::new(t.clone()) as BoxedTransport)
+            .collect())
     }
     fn device_keys(&self) -> Box<dyn DeviceKeyStore> {
         Box::new(self.keys.clone())
@@ -58,10 +87,9 @@ impl SyncLink for TestLink {
     }
 }
 
-fn link(s: &mut Session, transport: &MemoryTransport, name: &'static str) {
+fn link(s: &mut Session, place: &Place, name: &'static str) {
     s.set_sync_link(Box::new(TestLink {
-        transport: transport.clone(),
-        fresh: transport.clone(),
+        place: place.clone(),
         keys: MemoryDeviceKeys::default(),
         name,
     }));
@@ -94,11 +122,11 @@ fn rounds(a: &mut Session, b: &mut Session, from: u64) {
 
 /// The main Mac with sync on, and a second Mac joined with the setup code and approved.
 fn two_macs() -> (
-    MemoryTransport,
+    Place,
     (tempfile::TempDir, Session),
     (tempfile::TempDir, Session),
 ) {
-    let transport = MemoryTransport::new();
+    let transport = Place::default();
     let (d1, mut main) = unlocked_session();
     link(&mut main, &transport, "Main");
     add(&mut main, "before sync", 1_000);
@@ -288,29 +316,22 @@ fn review_a1d2_i11_the_kit_needs_a_recent_password() {
     assert!(main.emergency_kit(Some(PW), 5_002).is_ok());
 }
 
-/// Review A1d-2 I12: a location that holds another account is not used for a new one.
+/// Review A1d-2 I12 with plan A2: each account gets its own folder; a vault of another
+/// account turning sync on does not touch the first account's folder.
 #[test]
-fn review_a1d2_i12_enable_refuses_a_location_with_an_account() {
-    let (transport, _main, _laptop) = two_macs();
+fn review_a1d2_i12_each_account_gets_its_own_folder() {
+    let (place, _main, _laptop) = two_macs();
     let (_d, mut other) = unlocked_session();
-    other.set_sync_link(Box::new(TestLink {
-        transport: transport.clone(),
-        fresh: transport.clone(),
-        keys: MemoryDeviceKeys::default(),
-        name: "Other",
-    }));
-    assert_eq!(
-        other.enable_sync(PW, 1_130).unwrap_err().kind,
-        ErrorKind::Invalid
-    );
-    assert!(!other.sync_status().unwrap().enabled);
+    link(&mut other, &place, "Other");
+    other.enable_sync(PW, 1_130).unwrap();
+    assert_eq!(place.folders(), 2);
 }
 
 /// Review A1d-2 I7: a wrong password leaves sync running on the old account; a right one
-/// moves to a new account in its own location and drops the Touch ID record.
+/// moves to a new account in its own folder.
 #[test]
 fn review_a1d2_i7_starting_a_new_account() {
-    let (t, (_d1, mut main), _laptop) = two_macs();
+    let (place, (_d1, mut main), _laptop) = two_macs();
     assert_eq!(
         main.start_new_sync_account("wrong password!", 1_140)
             .unwrap_err()
@@ -318,29 +339,18 @@ fn review_a1d2_i7_starting_a_new_account() {
         ErrorKind::WrongPassword
     );
     assert!(main.synced.is_some());
-    // The same location holds the old account: refused, nothing changes.
-    assert_eq!(
-        main.start_new_sync_account(PW, 1_141).unwrap_err().kind,
-        ErrorKind::Invalid
-    );
-    assert!(main.synced.is_some());
-    // A location of its own.
-    main.set_sync_link(Box::new(TestLink {
-        transport: t.clone(),
-        fresh: MemoryTransport::new(),
-        keys: MemoryDeviceKeys::default(),
-        name: "Main",
-    }));
+    assert_eq!(place.folders(), 1);
     let kit = main.start_new_sync_account(PW, 1_142).unwrap();
     assert!(kit.setup_code.starts_with("KEYORRA-SETUP-1-"));
     assert!(main.sync_status().unwrap().enabled);
+    assert_eq!(place.folders(), 2, "the old account's folder stays");
 }
 
 /// Wrong passwords given to turn sync on count towards the unlock throttle.
 #[test]
 fn wrong_passwords_for_sync_are_throttled() {
     let (_d, mut s) = unlocked_session();
-    link(&mut s, &MemoryTransport::new(), "Main");
+    link(&mut s, &Place::default(), "Main");
     let mut kinds = Vec::new();
     for t in 0..8 {
         kinds.push(

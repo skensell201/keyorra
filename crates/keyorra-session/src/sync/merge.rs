@@ -23,7 +23,7 @@ use keyorra_sync::fold::View;
 use keyorra_sync::header::Header;
 use keyorra_sync::secret_key::SecretKey;
 use keyorra_sync::transport::Transport;
-use keyorra_sync::{DeviceId, Error, Result};
+use keyorra_sync::{AccountId, DeviceId, Error, Result};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
@@ -356,6 +356,7 @@ pub fn carry_over(from: &Store, to: &mut Store) -> Result<CarryReport> {
 #[allow(clippy::too_many_arguments)]
 pub fn start_new_account<T: Transport>(
     store: &mut Store,
+    account_id: AccountId,
     transport: T,
     keys: &mut dyn DeviceKeyStore,
     device_name: &str,
@@ -375,5 +376,14 @@ pub fn start_new_account<T: Transport>(
     if let Some(device) = device {
         keys.forget(&device);
     }
-    enable(store, transport, keys, device_name, password, kdf, wall_ms)
+    enable(
+        store,
+        account_id,
+        transport,
+        keys,
+        device_name,
+        password,
+        kdf,
+        wall_ms,
+    )
 }
