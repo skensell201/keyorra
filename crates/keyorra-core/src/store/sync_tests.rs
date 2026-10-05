@@ -373,3 +373,28 @@ fn rotating_the_keys_keeps_every_record_and_drops_the_old_keys() {
         b"kept"
     );
 }
+
+/// Review A1d-2 I7: an item that cannot be read stops the rotation before anything changes.
+#[test]
+fn rotation_stops_on_an_unreadable_item_and_changes_nothing() {
+    let (_dir, path, mut store) = new_store();
+    let v = store.create_vault("Personal").unwrap();
+    let good = Item::new(v.id, ItemKind::Login, "good", 1);
+    store.save_item(&good).unwrap();
+    let bad = Item::new(v.id, ItemKind::Login, "bad", 1);
+    store.save_item(&bad).unwrap();
+    let account = store.account_key_copy().unwrap();
+    let conn = Connection::open(&path).unwrap();
+    conn.execute(
+        "UPDATE items SET data = X'00112233445566778899aabbccddeeff00112233445566778899' WHERE id = ?1",
+        [bad.id.to_string()],
+    )
+    .unwrap();
+    drop(conn);
+    assert!(store.rotate_keys(PW).is_err());
+    assert_eq!(store.account_key().unwrap().as_bytes(), account.as_bytes());
+    drop(store);
+    let mut store = Store::open(&path).unwrap();
+    store.unlock(PW).unwrap();
+    assert_eq!(store.get_item(good.id).unwrap().title, "good");
+}

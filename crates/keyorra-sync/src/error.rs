@@ -14,6 +14,10 @@ pub enum Error {
     BadSignature,
     #[error("incorrect password or secret key")]
     WrongPassword,
+    /// Rejoining with a vault whose account key is not the account's (it belongs to another
+    /// account: carry its items over instead).
+    #[error("this vault belongs to another account")]
+    AnotherAccount,
     /// A record the caller named does not exist (or is not in the needed state).
     #[error("not found: {0}")]
     NotFound(String),

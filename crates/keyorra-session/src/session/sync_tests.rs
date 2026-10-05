@@ -13,13 +13,26 @@ use crate::sync::{DeviceKeyStore, MemoryDeviceKeys};
 
 struct TestLink {
     transport: MemoryTransport,
+    /// Where a new account goes (its own location).
+    fresh: MemoryTransport,
     keys: MemoryDeviceKeys,
     name: &'static str,
 }
 
+thread_local! {
+    /// Takes every link's folder away (per test thread).
+    static OFFLINE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 impl SyncLink for TestLink {
     fn transport(&self) -> Result<BoxedTransport, String> {
+        if OFFLINE.get() {
+            return Err("the folder is not available".into());
+        }
         Ok(Box::new(self.transport.clone()))
+    }
+    fn fresh_transport(&self) -> Result<BoxedTransport, String> {
+        Ok(Box::new(self.fresh.clone()))
     }
     fn device_keys(&self) -> Box<dyn DeviceKeyStore> {
         Box::new(self.keys.clone())
@@ -48,6 +61,7 @@ impl SyncLink for TestLink {
 fn link(s: &mut Session, transport: &MemoryTransport, name: &'static str) {
     s.set_sync_link(Box::new(TestLink {
         transport: transport.clone(),
+        fresh: transport.clone(),
         keys: MemoryDeviceKeys::default(),
         name,
     }));
@@ -165,7 +179,7 @@ fn only_the_main_mac_changes_the_master_password() {
 #[test]
 fn turning_sync_off_and_joining_again_rejoins_the_same_vault() {
     let (_t, (_d1, mut main), (_d2, mut laptop)) = two_macs();
-    let kit = main.emergency_kit().unwrap();
+    let kit = main.emergency_kit(None, 1_005).unwrap();
     laptop.disable_sync(1_080).unwrap();
     assert!(!laptop.sync_status().unwrap().enabled);
     add(&mut laptop, "while sync was off", 1_081);
@@ -190,7 +204,7 @@ fn turning_sync_off_and_joining_again_rejoins_the_same_vault() {
 #[test]
 fn joining_from_a_vault_of_another_account_carries_it_over() {
     let (transport, (_d1, mut main), _laptop) = two_macs();
-    let kit = main.emergency_kit().unwrap();
+    let kit = main.emergency_kit(None, 1_005).unwrap();
     let (dir, mut other) = unlocked_session();
     link(&mut other, &transport, "Old Mac");
     add(&mut other, "old local item", 1_100);
@@ -216,4 +230,146 @@ fn joining_from_a_vault_of_another_account_carries_it_over() {
     rounds(&mut main, &mut other, 1_104);
     assert_eq!(titles(&mut main, 1_110), ["before sync", "old local item"]);
     assert_eq!(titles(&mut other, 1_110), ["before sync", "old local item"]);
+}
+
+// ---- review of A1d-2 ----
+
+const NEW_PW: &str = "another long password";
+
+/// Review A1d-2 C1: right after unlock (before the first round) the main Mac changes the
+/// password: sync publishes it, and nothing is left half done.
+#[test]
+fn review_a1d2_c1_the_main_mac_changes_the_password_right_after_unlock() {
+    let (_t, (_d1, mut main), (_d2, mut laptop)) = two_macs();
+    main.lock();
+    main.unlock(PW, 1_100).unwrap();
+    main.change_password(PW, NEW_PW, 1_101).unwrap();
+    rounds(&mut main, &mut laptop, 1_102);
+    assert_eq!(laptop.synced.as_ref().unwrap().engine().header_epoch(), 2);
+    main.lock();
+    main.unlock(NEW_PW, 1_110).unwrap();
+}
+
+/// Review A1d-2 I5 and I9: with sync on but not running, the password stays as it is; once
+/// the folder is back, the next round starts sync again.
+#[test]
+fn review_a1d2_i5_i9_no_password_change_while_sync_is_not_running() {
+    let (_t, (_d1, mut main), (_d2, _laptop)) = two_macs();
+    main.lock();
+    OFFLINE.set(true);
+    main.unlock(PW, 1_120).unwrap();
+    assert!(main.sync_status().unwrap().error.is_some());
+    assert_eq!(
+        main.change_password(PW, NEW_PW, 1_121).unwrap_err().kind,
+        ErrorKind::Invalid
+    );
+    main.lock();
+    main.unlock(PW, 1_122).unwrap();
+    OFFLINE.set(false);
+    let status = main.sync_now(1_123).unwrap();
+    assert!(status.status.is_some(), "{status:?}");
+}
+
+/// Review A1d-2 I11: the Emergency Kit needs a recent master password.
+#[test]
+fn review_a1d2_i11_the_kit_needs_a_recent_password() {
+    let (_t, (_d1, mut main), _laptop) = two_macs();
+    assert!(main.emergency_kit(None, 1_010).is_ok());
+    assert_eq!(
+        main.emergency_kit(None, 5_000).unwrap_err().kind,
+        ErrorKind::PasswordRequired
+    );
+    assert_eq!(
+        main.emergency_kit(Some("wrong password!"), 5_001)
+            .unwrap_err()
+            .kind,
+        ErrorKind::WrongPassword
+    );
+    assert!(main.emergency_kit(Some(PW), 5_002).is_ok());
+}
+
+/// Review A1d-2 I12: a location that holds another account is not used for a new one.
+#[test]
+fn review_a1d2_i12_enable_refuses_a_location_with_an_account() {
+    let (transport, _main, _laptop) = two_macs();
+    let (_d, mut other) = unlocked_session();
+    other.set_sync_link(Box::new(TestLink {
+        transport: transport.clone(),
+        fresh: transport.clone(),
+        keys: MemoryDeviceKeys::default(),
+        name: "Other",
+    }));
+    assert_eq!(
+        other.enable_sync(PW, 1_130).unwrap_err().kind,
+        ErrorKind::Invalid
+    );
+    assert!(!other.sync_status().unwrap().enabled);
+}
+
+/// Review A1d-2 I7: a wrong password leaves sync running on the old account; a right one
+/// moves to a new account in its own location and drops the Touch ID record.
+#[test]
+fn review_a1d2_i7_starting_a_new_account() {
+    let (t, (_d1, mut main), _laptop) = two_macs();
+    assert_eq!(
+        main.start_new_sync_account("wrong password!", 1_140)
+            .unwrap_err()
+            .kind,
+        ErrorKind::WrongPassword
+    );
+    assert!(main.synced.is_some());
+    // The same location holds the old account: refused, nothing changes.
+    assert_eq!(
+        main.start_new_sync_account(PW, 1_141).unwrap_err().kind,
+        ErrorKind::Invalid
+    );
+    assert!(main.synced.is_some());
+    // A location of its own.
+    main.set_sync_link(Box::new(TestLink {
+        transport: t.clone(),
+        fresh: MemoryTransport::new(),
+        keys: MemoryDeviceKeys::default(),
+        name: "Main",
+    }));
+    let kit = main.start_new_sync_account(PW, 1_142).unwrap();
+    assert!(kit.setup_code.starts_with("KEYORRA-SETUP-1-"));
+    assert!(main.sync_status().unwrap().enabled);
+}
+
+/// Wrong passwords given to turn sync on count towards the unlock throttle.
+#[test]
+fn wrong_passwords_for_sync_are_throttled() {
+    let (_d, mut s) = unlocked_session();
+    link(&mut s, &MemoryTransport::new(), "Main");
+    let mut kinds = Vec::new();
+    for t in 0..8 {
+        kinds.push(
+            s.enable_sync("wrong password!", 1_200 + t)
+                .unwrap_err()
+                .kind,
+        );
+    }
+    assert!(kinds.contains(&ErrorKind::Throttled), "{kinds:?}");
+}
+
+/// Review A1d-2 I8: a join that was moving the new vault into place when the app stopped
+/// is finished on the next start; an unfinished one is removed.
+#[test]
+fn review_a1d2_i8_an_interrupted_carry_over_is_finished_on_start() {
+    let (dir, s) = unlocked_session();
+    let path = s.path.clone();
+    drop(s);
+    let joining = path.with_extension("joining");
+    std::fs::rename(&path, &joining).unwrap();
+    let mut s = Session::new(path.clone(), KdfParams::INSECURE_FAST, 1_300);
+    assert_eq!(s.status(), Status::Locked);
+    assert!(!joining.exists());
+    s.unlock(PW, 1_301).unwrap();
+    // A left-over half-made joining file next to a vault is removed.
+    std::fs::write(&joining, b"half").unwrap();
+    drop(s);
+    let s = Session::new(path, KdfParams::INSECURE_FAST, 1_302);
+    assert_eq!(s.status(), Status::Locked);
+    assert!(!joining.exists());
+    drop(dir);
 }

@@ -45,7 +45,7 @@ use zeroize::Zeroizing;
 
 pub use enclave_keys::{Enclave, EnclaveDeviceKeys, EnclaveError};
 pub use keys::{DeviceKeyStore, MemoryDeviceKeys};
-pub use merge::{carry_over, disable, rejoin, start_new_account, Rejoined};
+pub use merge::{carry_over, disable, rejoin, start_new_account, CarryReport, Rejoined};
 pub use setup::SetupCode;
 
 const CONFIG: &str = "sync:config";
@@ -55,15 +55,32 @@ const MEMO: &str = "sync:memo";
 const BASE: &str = "sync-base";
 
 /// What this device knows about its synced account (sealed meta `sync:config`).
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct SyncConfig {
     account_id: AccountId,
     device: DeviceId,
     device_name: String,
     root: DeviceId,
     root_key: [u8; 32],
-    secret_key: [u8; 16],
+    /// Wiped when dropped, never printed (review A1d-2 I10).
+    secret_key: Zeroizing<[u8; 16]>,
     secret_key_id: String,
+}
+
+impl std::fmt::Debug for SyncConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SyncConfig")
+            .field(
+                "account_id",
+                &data_encoding::HEXLOWER.encode(&self.account_id),
+            )
+            .field("device", &data_encoding::HEXLOWER.encode(&self.device))
+            .field("device_name", &self.device_name)
+            .field("root", &data_encoding::HEXLOWER.encode(&self.root))
+            .field("secret_key", &"(redacted)")
+            .field("secret_key_id", &self.secret_key_id)
+            .finish()
+    }
 }
 
 /// Sync as the UI shows it.
@@ -220,6 +237,12 @@ fn item_json(item: &Item) -> Result<Zeroizing<Vec<u8>>> {
         .map_err(|e| Error::Malformed(e.to_string()))
 }
 
+/// Whether this store is the main device of its synced account (from its configuration, so
+/// also while sync is not running).
+pub fn is_main(store: &Store) -> Result<bool> {
+    Ok(is_enabled(store)? && load_config(store)?.root == load_config(store)?.device)
+}
+
 /// Whether sync is set up on this store.
 pub fn is_enabled(store: &Store) -> Result<bool> {
     Ok(store.sync_tracking()? && store.sealed_meta(CONFIG)?.is_some())
@@ -271,6 +294,13 @@ pub fn enable<T: Transport>(
     if is_enabled(store)? {
         return Err(Error::Refused("sync is already on".into()));
     }
+    // Each account has its own location: one that holds another account's files is not used
+    // (review A1d-2 I12).
+    if !transport.headers()?.is_empty() {
+        return Err(Error::Refused(
+            "this location already holds a Keyorra account; choose an empty one".into(),
+        ));
+    }
     let account_id = random_id();
     let device = random_id();
     let signer = new_signer();
@@ -294,6 +324,8 @@ pub fn enable<T: Transport>(
             return Err(e);
         }
     };
+    // What an earlier "off" kept for rejoining another account (review A1d-2 I6).
+    store.delete_sealed_meta(BASE)?;
     let mut synced = Synced {
         engine,
         transport,
@@ -384,7 +416,7 @@ fn start_account(
         device_name: device_name.to_owned(),
         root: device,
         root_key: root_key.to_bytes(),
-        secret_key: *secret_key.as_bytes(),
+        secret_key: Zeroizing::new(*secret_key.as_bytes()),
         secret_key_id: secret_key_id.clone(),
     };
     let kit = EmergencyKit {
@@ -495,7 +527,7 @@ fn join_store<T: Transport>(
             device_name: device_name.to_owned(),
             root: header.root_device,
             root_key: header.root_key,
-            secret_key: *secret_key.as_bytes(),
+            secret_key: Zeroizing::new(*secret_key.as_bytes()),
             secret_key_id: secret_key_id.to_owned(),
         };
         let mut synced = Synced {
@@ -835,11 +867,17 @@ impl<T: Transport> Synced<T> {
 
     /// The account id and Secret Key, for the Emergency Kit or a setup code.
     pub fn emergency_kit(&self) -> EmergencyKit {
-        let sk = SecretKey::from_bytes(self.config.secret_key);
+        let sk = SecretKey::from_bytes(*self.config.secret_key);
         EmergencyKit {
             account_id: data_encoding::HEXLOWER.encode(&self.config.account_id),
             secret_key: sk.display(&self.config.secret_key_id),
         }
+    }
+
+    /// Whether a new master password can be published now: the main device, writing, with
+    /// the account header read (after a restart it is known only after the first round).
+    pub fn ready_for_password_change(&self) -> bool {
+        self.engine.is_root() && self.engine.can_write() && self.engine.current_header().is_some()
     }
 
     /// A new master password for the account (main device only): a new header epoch.
@@ -863,7 +901,7 @@ impl<T: Transport> Synced<T> {
             .ok_or_else(|| Error::NotFound("account header".into()))?;
         let mut salt = [0u8; 16];
         OsRng.fill_bytes(&mut salt);
-        let sk = SecretKey::from_bytes(self.config.secret_key);
+        let sk = SecretKey::from_bytes(*self.config.secret_key);
         let keys = derive_sync_keys(password, &salt, kdf, &sk, &self.config.account_id)?;
         let mut header = Header {
             epoch: current.epoch + 1,
@@ -910,7 +948,7 @@ impl<T: Transport> Synced<T> {
     pub fn setup_code(&self) -> SetupCode {
         SetupCode {
             secret_key_id: self.config.secret_key_id.clone(),
-            secret_key: SecretKey::from_bytes(self.config.secret_key),
+            secret_key: SecretKey::from_bytes(*self.config.secret_key),
             pin: self.root_pin(),
         }
     }

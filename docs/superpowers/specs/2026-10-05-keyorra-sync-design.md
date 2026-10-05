@@ -689,6 +689,13 @@ Keyorra/
                                      deleted by the joining device when done or after 1 hour)
 ```
 
+**One folder per account.** The layout above is the root of one account:
+`<chosen place>/Keyorra/<account id hex>/` (iCloud Drive by default:
+`~/Library/Mobile Documents/com~apple~CloudDocs/Keyorra/<account id hex>/`). Turning sync on
+and "start a new account" always use a new, empty account folder; a folder that already
+holds account headers is refused (review A1d-2 I12). Joining picks an existing account
+folder.
+
 Readers count a file only if its name matches the exact pattern of its directory and its
 content verifies. Everything else is ignored and listed as "unknown files" on the Sync
 screen. Since every Keyorra file is write-once and written by one device, this makes the

@@ -21,6 +21,11 @@ pub trait SyncLink: Send {
     /// The store of files the account lives in (opened per use).
     fn transport(&self) -> Result<BoxedTransport, String>;
     fn device_keys(&self) -> Box<dyn DeviceKeyStore>;
+    /// A location for a new account (each account has its own; plan A2 makes a new folder).
+    /// Turning sync on and starting a new account use it; it must hold no account yet.
+    fn fresh_transport(&self) -> Result<BoxedTransport, String> {
+        self.transport()
+    }
     /// This Mac's name, shown to the other devices.
     fn device_name(&self) -> String;
     /// Opens an account header with the master password and Secret Key (tests replace the
@@ -72,6 +77,38 @@ fn sync_error(e: keyorra_sync::Error) -> CmdError {
 
 fn no_link() -> CmdError {
     CmdError::new(ErrorKind::Invalid, "Sync isn't available in this build")
+}
+
+/// How long after a master-password entry the Emergency Kit is shown without asking again.
+pub const KIT_PASSWORD_SECS: u64 = 5 * 60;
+
+/// Removes a database file and SQLite's companions.
+pub(super) fn remove_database(path: &std::path::Path) {
+    let _ = std::fs::remove_file(path);
+    for suffix in DB_SIBLINGS {
+        let _ = std::fs::remove_file(sibling(path, suffix));
+    }
+}
+
+/// The file a join that carries another account's vault over builds before moving it into
+/// place.
+pub(super) fn joining_path(path: &std::path::Path) -> std::path::PathBuf {
+    path.with_extension("joining")
+}
+
+/// On start: a join that stopped after moving the old vault aside and before moving the new
+/// one into place is finished; one that stopped earlier leaves an unfinished file, which goes
+/// (review A1d-2 I8).
+pub(super) fn recover_interrupted_join(path: &std::path::Path) {
+    let joining = joining_path(path);
+    if joining.symlink_metadata().is_err() {
+        return;
+    }
+    if path.symlink_metadata().is_err() {
+        let _ = move_aside(&joining, path, |from, to| std::fs::rename(from, to));
+    } else {
+        remove_database(&joining);
+    }
 }
 
 fn open_transport(link: &dyn SyncLink) -> CmdResult<BoxedTransport> {
@@ -185,7 +222,13 @@ impl Session {
     }
 
     /// One sync round (the app calls it on a timer and after every change while unlocked).
+    /// Sync that is on but not running (its folder was not there at unlock) is started again
+    /// first (review A1d-2 I9).
     pub fn sync_now(&mut self, now: u64) -> CmdResult<SyncStatusDto> {
+        let enabled = s::is_enabled(self.store()?).map_err(sync_error)?;
+        if enabled && self.synced.is_none() {
+            self.resume_sync();
+        }
         let store = self.store.as_mut().ok_or_else(locked)?;
         if let Some(synced) = self.synced.as_mut() {
             let round = synced.round(store, wall_ms(now));
@@ -199,12 +242,16 @@ impl Session {
     /// is asked again (it also protects the account header).
     pub fn enable_sync(&mut self, password: &str, now: u64) -> CmdResult<EmergencyKitDto> {
         self.touch(now);
+        self.check_password_throttled(password, now)?;
         let link = self.link()?;
-        let (transport, mut keys, name) =
-            (self.transport()?, link.device_keys(), link.device_name());
+        let (transport, mut keys, name) = (
+            link.fresh_transport()
+                .map_err(|e| CmdError::new(ErrorKind::Other, format!("Sync folder: {e}")))?,
+            link.device_keys(),
+            link.device_name(),
+        );
         let kdf = self.kdf;
         let store = self.store.as_mut().ok_or_else(locked)?;
-        store.check_password(password)?;
         let s::Enabled {
             synced,
             kit,
@@ -230,9 +277,47 @@ impl Session {
         Ok(dto)
     }
 
-    /// The Emergency Kit and setup code again (unlocked, sync on).
-    pub fn emergency_kit(&self) -> CmdResult<EmergencyKitDto> {
+    /// The master password, checked against the unlock throttle (wrong guesses count).
+    fn check_password_throttled(&mut self, password: &str, now: u64) -> CmdResult<()> {
         self.store()?;
+        self.throttle.check(now).map_err(CmdError::throttled)?;
+        match self.store()?.check_password(password) {
+            Ok(()) => {
+                self.throttle.record_success();
+                self.password_verified_at = Some(now);
+                Ok(())
+            }
+            Err(keyorra_core::Error::WrongPassword) => {
+                self.throttle.record_failure(now);
+                Err(keyorra_core::Error::WrongPassword.into())
+            }
+            Err(e) => Err(e.into()),
+        }
+    }
+
+    /// The Emergency Kit and setup code again (unlocked, sync on). They hold the Secret Key:
+    /// the master password is needed unless it was entered in the last few minutes (review
+    /// A1d-2 I11).
+    pub fn emergency_kit(
+        &mut self,
+        password: Option<&str>,
+        now: u64,
+    ) -> CmdResult<EmergencyKitDto> {
+        self.store()?;
+        match password {
+            Some(p) => self.check_password_throttled(p, now)?,
+            None => {
+                let recent = self
+                    .password_verified_at
+                    .is_some_and(|at| at <= now && now - at <= KIT_PASSWORD_SECS);
+                if !recent {
+                    return Err(CmdError::new(
+                        ErrorKind::PasswordRequired,
+                        "Enter your master password to see the Emergency Kit",
+                    ));
+                }
+            }
+        }
         let synced = self
             .synced
             .as_ref()
@@ -341,7 +426,7 @@ impl Session {
                         self.note_round(rejoined.first_round);
                         Ok(())
                     }
-                    Err(keyorra_sync::Error::Refused(m)) if m.contains("another account") => {
+                    Err(keyorra_sync::Error::AnotherAccount) => {
                         self.join_carrying_over(link, password, (sk, sk_id), pin, now)
                     }
                     Err(e) => Err(sync_error(e)),
@@ -363,8 +448,8 @@ impl Session {
             link.device_keys(),
             link.device_name(),
         );
-        let joining = self.path.with_extension("joining");
-        let _ = std::fs::remove_file(&joining);
+        let joining = joining_path(&self.path);
+        remove_database(&joining);
         let s::Joined {
             store: mut new_store,
             synced,
@@ -384,38 +469,68 @@ impl Session {
         )
         .map_err(sync_error)?;
         let old = self.store.take().ok_or_else(locked)?;
-        if let Err(e) = s::carry_over(&old, &mut new_store) {
-            self.store = Some(old);
-            drop(new_store);
-            let _ = std::fs::remove_file(&joining);
-            return Err(sync_error(e));
-        }
-        drop(old);
+        let carried = s::carry_over(&old, &mut new_store);
         drop(new_store);
         drop(synced);
+        let report = match carried {
+            Ok(r) => r,
+            Err(e) => {
+                self.store = Some(old);
+                remove_database(&joining);
+                return Err(sync_error(e));
+            }
+        };
+        drop(old);
         let aside = pre_sync_path(&self.path, now);
-        move_aside(&self.path, &aside, |from, to| std::fs::rename(from, to))
-            .and_then(|()| std::fs::rename(&joining, &self.path))
-            .map_err(|e| CmdError::new(ErrorKind::Other, format!("Can't move the file: {e}")))?;
+        let moved =
+            move_aside(&self.path, &aside, |from, to| std::fs::rename(from, to)).and_then(|()| {
+                move_aside(&joining, &self.path, |from, to| std::fs::rename(from, to)).inspect_err(
+                    |_| {
+                        // Put the old vault back where it was.
+                        let _ =
+                            move_aside(&aside, &self.path, |from, to| std::fs::rename(from, to));
+                    },
+                )
+            });
+        if let Err(e) = moved {
+            let mut store = Store::open(&self.path)?;
+            store.unlock(password)?;
+            self.store = Some(store);
+            remove_database(&joining);
+            return Err(CmdError::new(
+                ErrorKind::Other,
+                format!("Can't move the file: {e}"),
+            ));
+        }
         // The Touch ID record wraps the old vault's key.
         self.keyring.delete();
         let mut store = Store::open(&self.path)?;
         store.unlock(password)?;
         self.store = Some(store);
         self.password_verified_at = Some(now);
+        if report.trashed_left + report.damaged > 0 {
+            self.sync_notices = vec![format!(
+                "{} item(s) in Recently Deleted and {} unreadable item(s) stayed in the old file",
+                report.trashed_left, report.damaged
+            )];
+        }
+        // The new vault is in place: sync that cannot start now starts on the next round.
         let resumed = s::resume(
             self.store.as_ref().ok_or_else(locked)?,
             open_transport(link)?,
             link.device_keys().as_ref(),
-        )
-        .map_err(sync_error)?;
-        self.synced = Some(resumed);
+        );
+        match resumed {
+            Ok(synced) => self.synced = Some(synced),
+            Err(e) => self.sync_error = Some(sync_error(e).message),
+        }
         Ok(())
     }
 
     /// Turns sync off on this Mac; everything stays in the vault.
     pub fn disable_sync(&mut self, now: u64) -> CmdResult<()> {
         self.touch(now);
+        self.store()?;
         let mut keys = self.link()?.device_keys();
         let synced = self.synced.take();
         let store = self.store.as_mut().ok_or_else(locked)?;
@@ -449,30 +564,45 @@ impl Session {
         now: u64,
     ) -> CmdResult<EmergencyKitDto> {
         self.touch(now);
+        self.check_password_throttled(password, now)?;
         let link = self.link()?;
-        let (transport, mut keys, name) =
-            (self.transport()?, link.device_keys(), link.device_name());
+        let (transport, mut keys, name) = (
+            link.fresh_transport()
+                .map_err(|e| CmdError::new(ErrorKind::Other, format!("Sync folder: {e}")))?,
+            link.device_keys(),
+            link.device_name(),
+        );
         let kdf = self.kdf;
-        let old = self.synced.take();
         let store = self.store.as_mut().ok_or_else(locked)?;
-        let s::Enabled {
-            synced,
-            kit,
-            first_round,
-            ..
-        } = s::start_new_account(
+        let before = store.account_key_copy()?;
+        let started = s::start_new_account(
             store,
-            old,
             transport,
             keys.as_mut(),
             &name,
             password,
             kdf,
             wall_ms(now),
-        )
-        .map_err(sync_error)?;
-        // The Touch ID record wraps the replaced account key.
-        self.keyring.delete();
+        );
+        let rotated = store.account_key_copy()?.as_bytes() != before.as_bytes();
+        if rotated {
+            // The old engine and the Touch ID record belong to the replaced key (review
+            // A1d-2 I7), whatever happens next.
+            self.synced = None;
+            self.keyring.delete();
+        }
+        let s::Enabled {
+            synced,
+            kit,
+            first_round,
+            ..
+        } = started.map_err(|e| {
+            let e = sync_error(e);
+            if rotated {
+                self.sync_error = Some(e.message.clone());
+            }
+            e
+        })?;
         let dto = EmergencyKitDto {
             account_id: kit.account_id,
             secret_key: kit.secret_key.to_string(),
@@ -501,21 +631,64 @@ impl Session {
         )
     }
 
-    /// While synced, the master password is changed on the main device, which publishes it
-    /// for the account; other devices refuse.
-    pub(super) fn change_sync_password(&mut self, new: &str, now: u64) -> CmdResult<()> {
-        let Some(synced) = self.synced.as_mut() else {
-            return Ok(());
+    /// Before a master password change: whether sync must publish it. While sync is on, only
+    /// the main device changes it, and only with sync running and ready (after a restart the
+    /// account header is known after the first round, which runs here if needed). Decided
+    /// from the store's configuration, not from whether sync runs (review A1d-2 C1, I5).
+    pub(super) fn prepare_sync_password_change(&mut self, now: u64) -> CmdResult<bool> {
+        let store = self.store()?;
+        if !s::is_enabled(store).map_err(sync_error)? {
+            return Ok(false);
+        }
+        if !s::is_main(store).map_err(sync_error)? {
+            return Err(CmdError::new(
+                ErrorKind::Invalid,
+                "Change the master password on your main device",
+            ));
+        }
+        if self.synced.is_none() {
+            self.resume_sync();
+        }
+        let ready = |s: &Self| {
+            s.synced
+                .as_ref()
+                .is_some_and(|x| x.ready_for_password_change())
         };
-        let store = self.store.as_ref().ok_or_else(locked)?;
-        let account = store.account_key_copy()?;
-        synced
-            .change_password(&account, new, self.kdf, wall_ms(now))
-            .map_err(sync_error)
+        if self.synced.is_some() && !ready(self) {
+            let _ = self.sync_now(now);
+        }
+        if self.synced.is_none() {
+            return Err(CmdError::new(
+                ErrorKind::Invalid,
+                "Sync must be running to change the password",
+            ));
+        }
+        if !ready(self) {
+            return Err(CmdError::new(
+                ErrorKind::Invalid,
+                "Sync is still starting; try again in a moment",
+            ));
+        }
+        Ok(true)
     }
 
-    pub(super) fn sync_blocks_password_change(&self) -> bool {
-        self.synced.as_ref().is_some_and(|x| !x.engine().is_root())
+    /// After the local change: the main device publishes the new password for the account.
+    /// A failure here does not undo the local change; it is shown and retried by changing
+    /// the password again (A3).
+    pub(super) fn publish_sync_password(&mut self, new: &str, now: u64) {
+        let (Some(synced), Some(store)) = (self.synced.as_mut(), self.store.as_ref()) else {
+            return;
+        };
+        let published = store
+            .account_key_copy()
+            .map_err(keyorra_sync::Error::from)
+            .and_then(|account| synced.change_password(&account, new, self.kdf, wall_ms(now)));
+        if let Err(e) = published {
+            self.sync_error = Some(format!(
+                "The new master password was not sent to sync: {}",
+                sync_error(e).message
+            ));
+        }
     }
 }
 

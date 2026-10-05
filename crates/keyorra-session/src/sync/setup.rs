@@ -46,12 +46,10 @@ impl SetupCode {
     }
 
     pub fn parse(text: &str) -> Result<SetupCode> {
-        let compact: Zeroizing<String> = Zeroizing::new(
-            text.chars()
-                .filter(|c| !c.is_whitespace())
-                .collect::<String>()
-                .to_ascii_uppercase(),
-        );
+        // Built in place in a buffer that is wiped (no unwiped intermediate copies).
+        let mut compact: Zeroizing<String> = Zeroizing::new(String::with_capacity(text.len()));
+        compact.extend(text.chars().filter(|c| !c.is_whitespace()));
+        compact.make_ascii_uppercase();
         let rest = compact.strip_prefix(PREFIX).ok_or_else(bad)?;
         let body = Zeroizing::new(BASE32_NOPAD.decode(rest.as_bytes()).map_err(|_| bad())?);
         if body.len() != BODY + 2 || check(&body[..BODY]) != body[BODY..] {

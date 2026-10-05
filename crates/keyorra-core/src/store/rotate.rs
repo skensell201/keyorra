@@ -1,6 +1,11 @@
 //! New keys for everything (plan A1d: starting a new synced account from this device). The
 //! old account key and vault keys stop opening anything in this file; whoever kept them
 //! (devices of the old account) cannot read what the new account writes.
+//!
+//! Old ciphertext does not linger in the file: every connection runs with
+//! `PRAGMA secure_delete = ON` (`configure`), so SQLite overwrites the old pages as the rows
+//! are rewritten. Copies made before (Time Machine, the `.bak` of a migration) keep the old
+//! encryption; that is stated in the start-over dialog (A3).
 
 use std::collections::HashMap;
 

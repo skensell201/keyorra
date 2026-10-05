@@ -767,7 +767,7 @@ fn another_accounts_vault_is_carried_over_as_new_records() {
     let item = Item::new(v.id, ItemKind::SecureNote, "carried", 1);
     old.save_item(&item).unwrap();
     old.add_attachment(item.id, "a.txt", b"bytes", 2).unwrap();
-    assert_eq!(carry_over(&old, &mut laptop.store).unwrap(), 1);
+    assert_eq!(carry_over(&old, &mut laptop.store).unwrap().copied, 1);
     for t in 100..104 {
         round(&mut laptop, NOW_MS + t);
     }
@@ -790,13 +790,8 @@ fn the_main_device_starts_a_new_account_with_new_keys() {
     let (_t, mut main, _laptop) = pair();
     let old_account = main.store.account_key_copy().unwrap();
     let fresh = MemoryTransport::new();
-    let synced = std::mem::replace(
-        &mut main.synced,
-        main_device(&MemoryTransport::new()).0.synced,
-    );
     let Enabled { synced, kit, .. } = start_new_account(
         &mut main.store,
-        Some(synced),
         fresh.clone(),
         &mut main.keys,
         "Main",
@@ -941,4 +936,153 @@ fn review_a1d2_i3_an_unreadable_device_key_does_not_retire_the_id() {
     let mut store = Store::open(&path).unwrap();
     store.unlock(PW).unwrap();
     assert!(resume(&store, transport, &UnreadableKeys).is_err());
+}
+
+/// Review A1d-2 I4: the main device cannot turn sync off while sync is not running (it
+/// cannot tell whether it has other devices).
+#[test]
+fn review_a1d2_i4_the_main_device_needs_sync_running_to_turn_it_off() {
+    let (_t, mut main, _laptop) = pair();
+    let result = disable::<MemoryTransport>(&mut main.store, None, &mut main.keys);
+    assert!(matches!(result, Err(Error::Refused(_))), "{result:?}");
+    assert!(is_enabled(&main.store).unwrap());
+}
+
+/// Review A1d-2 I6: turning sync on again drops what an earlier "off" kept for a rejoin, so
+/// later edits are not taken for double edits.
+#[test]
+fn review_a1d2_i6_enabling_again_forgets_the_old_rejoin_base() {
+    let (_t, _main, laptop) = pair();
+    let Device {
+        _dir,
+        path,
+        mut store,
+        synced,
+        mut keys,
+    } = laptop;
+    disable(&mut store, Some(synced), &mut keys).unwrap();
+    assert!(store.sealed_meta("sync-base").unwrap().is_some());
+    let fresh = MemoryTransport::new();
+    let enabled = enable(
+        &mut store,
+        fresh.clone(),
+        &mut keys,
+        "Laptop",
+        PW,
+        KdfParams::INSECURE_FAST,
+        NOW_MS + 140,
+    )
+    .unwrap();
+    assert!(store.sealed_meta("sync-base").unwrap().is_none());
+    drop(enabled);
+    // After a restart.
+    let synced = resume(&store, fresh.clone(), &keys).unwrap();
+    let mut d = Device {
+        _dir,
+        path,
+        store,
+        synced,
+        keys,
+    };
+    round(&mut d, NOW_MS + 141);
+    retitle(&mut d.store, "before sync", "edited after enabling again");
+    round(&mut d, NOW_MS + 142);
+    let copies = d
+        .store
+        .list_items(None)
+        .unwrap()
+        .into_iter()
+        .filter(|e| matches!(e, keyorra_core::store::ItemEntry::Ok(i) if i.conflict.is_some()))
+        .count();
+    assert_eq!(copies, 0);
+}
+
+/// Review A1d-2 I10: the Secret Key never shows in debug output.
+#[test]
+fn review_a1d2_i10_the_config_debug_output_hides_the_secret_key() {
+    let (_t, main, _laptop) = pair();
+    let text = format!("{:?}", main.synced.config);
+    assert!(text.contains("redacted"), "{text}");
+    let hex = data_encoding::HEXLOWER.encode(&main.synced.config.secret_key[..]);
+    assert!(
+        !text.contains(&hex)
+            && !text.contains(&format!("{:?}", &main.synced.config.secret_key[..]))
+    );
+}
+
+/// A vault of another account is refused with its own error (not by its message).
+#[test]
+fn a_vault_of_another_account_is_told_apart() {
+    let (transport, main, _laptop) = pair();
+    let (other, _) = main_device(&MemoryTransport::new());
+    let Device {
+        mut store,
+        synced,
+        mut keys,
+        ..
+    } = other;
+    disable(&mut store, Some(synced), &mut keys).unwrap();
+    let kit = main.synced.emergency_kit();
+    let (id, sk) = SecretKey::parse(&kit.secret_key).unwrap();
+    let result = rejoin(
+        &mut store,
+        &sk,
+        &id,
+        Some(&main.synced.root_pin()),
+        transport,
+        &mut keys,
+        "Other",
+        cheap_unlock(PW, *sk.as_bytes()),
+        NOW_MS + 150,
+    );
+    assert!(
+        matches!(result, Err(Error::AnotherAccount)),
+        "{:?}",
+        result.as_ref().err()
+    );
+}
+
+/// Carrying over reports what stayed behind.
+#[test]
+fn carrying_over_reports_what_stays_behind() {
+    let (_t, _main, mut laptop) = pair();
+    let dir = tempfile::tempdir().unwrap();
+    let mut old = Store::create(&dir.path().join("old.db"), PW, KdfParams::INSECURE_FAST).unwrap();
+    let v = old.create_vault("Old Mac").unwrap();
+    old.save_item(&Item::new(v.id, ItemKind::SecureNote, "kept", 1))
+        .unwrap();
+    let trashed = Item::new(v.id, ItemKind::SecureNote, "trashed", 1);
+    old.save_item(&trashed).unwrap();
+    old.delete_item(trashed.id, 2).unwrap();
+    let report = carry_over(&old, &mut laptop.store).unwrap();
+    assert_eq!(
+        (report.copied, report.trashed_left, report.damaged),
+        (1, 1, 0)
+    );
+}
+
+/// Review A1d-2 I7: starting a new account with a wrong password, or on a location that holds
+/// another account, changes nothing.
+#[test]
+fn review_a1d2_i7_a_refused_new_account_changes_nothing() {
+    let (transport, mut main, _laptop) = pair();
+    let account = main.store.account_key_copy().unwrap();
+    for (password, location) in [("wrong password!", MemoryTransport::new()), (PW, transport)] {
+        assert!(start_new_account(
+            &mut main.store,
+            location,
+            &mut main.keys,
+            "Main",
+            password,
+            KdfParams::INSECURE_FAST,
+            NOW_MS + 160,
+        )
+        .is_err());
+        assert_eq!(
+            main.store.account_key().unwrap().as_bytes(),
+            account.as_bytes()
+        );
+        assert!(is_enabled(&main.store).unwrap());
+    }
+    round(&mut main, NOW_MS + 161);
 }

@@ -102,6 +102,7 @@ pub use sync::{BoxedTransport, EmergencyKitDto, SyncLink, SyncStatusDto};
 impl Session {
     /// `kdf` is `KdfParams::DEFAULT` in the app; tests pass cheap parameters.
     pub fn new(path: PathBuf, kdf: KdfParams, now: u64) -> Self {
+        sync::recover_interrupted_join(&path);
         let settings_path = path.with_file_name("settings.json");
         let settings = Settings::load(&settings_path);
         let guard_path = path.with_file_name(bridge::GUARD_FILE);
@@ -407,17 +408,14 @@ impl Session {
                 "The new password must be different",
             ));
         }
-        if self.sync_blocks_password_change() {
-            return Err(CmdError::new(
-                ErrorKind::Invalid,
-                "Change the master password on your main device",
-            ));
-        }
+        let publish = self.prepare_sync_password_change(now)?;
         let result = self.store_mut()?.change_password(current, new);
         match result {
             Ok(()) => {
                 self.throttle.record_success();
-                self.change_sync_password(new, now)?;
+                if publish {
+                    self.publish_sync_password(new, now);
+                }
                 self.password_verified_at = Some(now);
                 // Replace the Touch ID record, like 1Password does after a password change.
                 self.rearm_touch_id(now);

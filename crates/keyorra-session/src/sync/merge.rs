@@ -210,11 +210,21 @@ pub fn disable<T: Transport>(
     synced: Option<Synced<T>>,
     keys: &mut dyn DeviceKeyStore,
 ) -> Result<()> {
-    if let Some(s) = &synced {
-        if s.engine.is_root() && s.engine.trust().devices().len() > 1 {
-            return Err(Error::Refused(
-                "this Mac is the main device of other devices".into(),
-            ));
+    match &synced {
+        Some(s) => {
+            if s.engine.is_root() && s.engine.trust().devices().len() > 1 {
+                return Err(Error::Refused(
+                    "this Mac is the main device of other devices".into(),
+                ));
+            }
+        }
+        // Not running: whether other devices depend on it cannot be told (review A1d-2 I4).
+        None => {
+            if load_config(store).is_ok_and(|c| c.root == c.device) {
+                return Err(Error::Refused(
+                    "this Mac is the main device: sync must be running to turn it off".into(),
+                ));
+            }
         }
     }
     let device = match &synced {
@@ -274,9 +284,7 @@ pub fn rejoin<T: Transport>(
     }
     let (header, account_key) = open_account(&transport, pin, unlock)?;
     if account_key.as_bytes() != store.account_key()?.as_bytes() {
-        return Err(Error::Refused(
-            "this vault belongs to another account".into(),
-        ));
+        return Err(Error::AnotherAccount);
     }
     let base = load_base(store)?.unwrap_or_default();
     let (synced, first_round) = join_store(
@@ -296,14 +304,31 @@ pub fn rejoin<T: Transport>(
     })
 }
 
+/// What carrying over did.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct CarryReport {
+    pub copied: usize,
+    /// Items in Recently Deleted: they stay in the old file.
+    pub trashed_left: usize,
+    /// Items that could not be read: they stay in the old file.
+    pub damaged: usize,
+}
+
 /// Copies the live items of `from` (with attachments) into `to`, as new records in new
-/// vaults of the same names. Returns how many items were copied.
-pub fn carry_over(from: &Store, to: &mut Store) -> Result<usize> {
+/// vaults of the same names.
+pub fn carry_over(from: &Store, to: &mut Store) -> Result<CarryReport> {
     let mut plan = ImportPlan::default();
+    let mut report = CarryReport {
+        trashed_left: from.deleted_items()?.len(),
+        ..CarryReport::default()
+    };
     for vault in from.vaults()? {
         let mut items = Vec::new();
         for e in from.list_items(Some(vault.id))? {
-            let ItemEntry::Ok(item) = e else { continue };
+            let ItemEntry::Ok(item) = e else {
+                report.damaged += 1;
+                continue;
+            };
             let mut attachments = Vec::new();
             for a in &item.attachments {
                 attachments.push((a.name.clone(), from.get_attachment(a.id)?.to_vec()));
@@ -317,17 +342,20 @@ pub fn carry_over(from: &Store, to: &mut Store) -> Result<usize> {
             items,
         });
     }
-    let n = plan.item_count();
+    report.copied = plan.item_count();
     to.apply_import(&plan)?;
-    Ok(n)
+    Ok(report)
 }
 
 /// Leaves the current account (if any) and makes this device the main device of a new one,
-/// with every key of the store replaced first.
+/// with every key of the store replaced first. Replacing the keys is the step that can fail
+/// on the store's content (an item that cannot be read): it runs first, in one transaction,
+/// so on such a failure sync is as it was (review A1d-2 I7). The caller drops its old
+/// [`Synced`] only on success; the Touch ID record must go once the keys were replaced
+/// (the store's account key changed), whatever happens after.
 #[allow(clippy::too_many_arguments)]
-pub fn start_new_account<T: Transport, U: Transport>(
+pub fn start_new_account<T: Transport>(
     store: &mut Store,
-    old: Option<Synced<U>>,
     transport: T,
     keys: &mut dyn DeviceKeyStore,
     device_name: &str,
@@ -335,16 +363,17 @@ pub fn start_new_account<T: Transport, U: Transport>(
     kdf: KdfParams,
     wall_ms: u64,
 ) -> Result<Enabled<T>> {
-    let device = match &old {
-        Some(s) => Some(s.engine.device()),
-        None => load_config(store).ok().map(|c| c.device),
-    };
-    drop(old);
     store.check_password(password)?;
+    if !transport.headers()?.is_empty() {
+        return Err(Error::Refused(
+            "this location already holds a Keyorra account; choose an empty one".into(),
+        ));
+    }
+    let device = load_config(store).ok().map(|c| c.device);
+    store.rotate_keys(password)?;
     forget(store)?;
     if let Some(device) = device {
         keys.forget(&device);
     }
-    store.rotate_keys(password)?;
     enable(store, transport, keys, device_name, password, kdf, wall_ms)
 }
