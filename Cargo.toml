@@ -1,6 +1,17 @@
 [workspace]
-members = ["crates/keyorra-core", "crates/keyorra-session", "crates/keyorra-sync", "app/src-tauri"]
-default-members = ["crates/keyorra-core", "crates/keyorra-session", "crates/keyorra-sync"]
+members = [
+    "crates/keyorra-core",
+    "crates/keyorra-session",
+    "crates/keyorra-sync",
+    "crates/keyorra-sync-fs",
+    "app/src-tauri",
+]
+default-members = [
+    "crates/keyorra-core",
+    "crates/keyorra-session",
+    "crates/keyorra-sync",
+    "crates/keyorra-sync-fs",
+]
 resolver = "2"
 
 # Argon2 with 64 MiB is painfully slow unoptimized; keep debug builds usable.

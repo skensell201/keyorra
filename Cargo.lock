@@ -2380,6 +2380,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "keyorra-sync-fs"
+version = "0.1.0"
+dependencies = [
+ "data-encoding",
+ "keyorra-core",
+ "keyorra-sync",
+ "libc",
+ "rand 0.8.8",
+ "tempfile",
+ "uuid",
+]
+
+[[package]]
 name = "lazy_static"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"

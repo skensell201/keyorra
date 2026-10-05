@@ -1,0 +1,18 @@
+[package]
+name = "keyorra-sync-fs"
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+description = "Keyorra sync over a folder (iCloud Drive or any synced folder)"
+
+[dependencies]
+data-encoding = "2"
+keyorra-sync = { path = "../keyorra-sync" }
+libc = "0.2"
+rand = "0.8"
+
+[dev-dependencies]
+keyorra-core = { path = "../keyorra-core", features = ["test-utils"] }
+keyorra-sync = { path = "../keyorra-sync", features = ["test-utils"] }
+tempfile = "3"
+uuid = "1"
