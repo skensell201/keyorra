@@ -186,14 +186,16 @@ The opened body of an envelope (section 7) is the canonical CBOR of:
 item       = { "item": bytes, "deleted_at": uint | null, "content_from": { bytes16 → uint ≥ 1 } }
 vault      = { "name": text, "wrapped_key": bytes, "deleted": bool }
 attachment = { "item_id": bytes16, "name": text, "size": uint, "key": bytes32,
-               "chunk_size": uint, "chunks": [bytes32, …] }
+               "chunk_size": uint, "chunks": [bytes32, …], "chunks_for": bytes16 }
 ```
 
 `item` is the item's JSON object exactly as the local store serializes it; `deleted_at` is
 unix seconds (in Recently Deleted when set); `content_from` (never empty) is the version
 vector of the write that last changed `item`. `wrapped_key` is the vault key sealed by the
 account key (`keyorra-core` `wrap_vault_key`). `key` is the attachment's own key; `chunks`
-are chunk names (section 8). A tombstone envelope has no payload. Vaults are never
+are chunk names (section 8); `chunks_for` is the attachment id bound into every chunk's
+associated data (section 8): the record's own id, or for a conflict copy's attachment the
+original's. A tombstone envelope has no payload. Vaults are never
 tombstoned; they are deleted with `deleted = true`.
 
 ### 9.2 Clocks and new versions

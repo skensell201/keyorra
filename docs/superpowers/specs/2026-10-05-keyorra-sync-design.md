@@ -275,7 +275,8 @@ Its attachment references point to new ids `UUIDv8(SHA-256("keyorra/sync/v1/conf
 ‖ copy_id ‖ attachment_id)[0..16])` and keep `copied_from = attachment_id`; any device that
 knows the original attachment record writes the copy's attachment record (from the newest
 version with content, even if the original was removed since; same key and chunks,
-`item_id` = the copy), so a copy never waits for an attachment. Each copy derives
+`item_id` = the copy, and `chunks_for` = the original's (the id its chunks are sealed
+for)), so a copy never waits for an attachment. Each copy derives
 from its sibling's *own* version, so the result is the same on every device and there is no
 invented "join author".
 
@@ -712,7 +713,10 @@ torn files (treated as `Pending`, reported if still broken after 24 h), reorderi
   block for minutes): the transport calls `startDownloadingUbiquitousItemAtURL` (or the
   File Provider equivalent) and returns `Pending`. An iCloud placeholder `.X.icloud` means
   "X exists, Pending". No dependency on `brctl`.
-- Reads and writes in these folders go through `NSFileCoordinator` (via `objc2`).
+- Reads, writes and deletes of files go through `NSFileCoordinator` (a Swift helper;
+  directory listings are not coordinated). Download state:
+  `NSURLUbiquitousItemDownloadingStatusKey` (current or downloaded is ready), plus
+  `SF_DATALESS`.
 - The Sync screen recommends "Keep Downloaded" for the folder; it works without it.
 - The iPhone app (later) reaches the same folder through the Files picker and a
   security-scoped bookmark.
@@ -738,6 +742,11 @@ torn files (treated as `Pending`, reported if still broken after 24 h), reorderi
 FSEvents (`notify`) on the folder, debounced 2 s; plus a poll every 60 s while unlocked,
 and on unlock, wake and "Sync now". Streams are read from the known head; chunks are
 fetched by name; no directory is listed in full on every round.
+
+FSEvents on the account folders' parent (latency 2 s, started at launch if the folder
+exists; after sync is first turned on, polling covers it until the next launch); a round
+every 60 s while unlocked and on any change. A round runs on the app's housekeeping thread
+holding the session (10 s budget).
 
 Every sync round has a time budget (30 s by default; the app uses 10 s): once it is spent,
 the remaining file operations fail as transport errors and the round goes on next time. A
@@ -944,7 +953,7 @@ The Ed25519 device key is in the Keychain (§4.2). The Secret Key is sealed unde
 3. Generate `account_id`, Secret Key, Secret Key id, device id and key.
 4. Emergency Kit (§7.6). The user confirms by typing the last 4 characters of the Secret
    Key.
-5. Write `Genesis`, header epoch 1, every vault (with its existing id and key: `adopt_vault`; its id does not commit to its key, §4.4, so the earliest admitted version whose key unwraps decides) and every item as versions. Attachment contents travel with the folder transport (A2). A snapshot follows when due (§4.8).
+5. Write `Genesis`, header epoch 1, every vault (with its existing id and key: `adopt_vault`; its id does not commit to its key, §4.4, so the earliest admitted version whose key unwraps decides) and every item as versions. Attachment contents are written through the change path: chunks first, then the record; existing attachments when sync is turned on or a vault rejoins. A snapshot follows when due (§4.8).
 
 ### 7.3 Joining (another Mac)
 
@@ -956,7 +965,9 @@ The Ed25519 device key is in the Keychain (§4.2). The Secret Key is sealed unde
    names it) or the main device's head (A3 may add a version 2 that does))
    shown by a device that is already set up,
    or type account id and Secret Key from the Emergency Kit (then the newest header is
-   trusted, with a warning if headers disagree about the main device).
+   trusted, with a warning if headers disagree about the main device). Joining looks at every
+   account folder in the sync place and picks the one whose header names the Secret Key id
+   (setup code or Emergency Kit); none is an error.
 2. Master password → `KEK_sync` → AK from the highest-epoch header (§4.7).
 3. Approval: with the main device available, the commitment exchange of §6.4 runs through
    the transport (server) or through `join/` request files in the folder (same messages,
