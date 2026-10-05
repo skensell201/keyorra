@@ -2,7 +2,7 @@
 
 A personal password manager for macOS with a Chrome extension: local encrypted vault, 1Password import, TOTP, Touch ID and Watchtower.
 
-Design: [docs/superpowers/specs/2026-10-02-keepsake-mvp-design.md](docs/superpowers/specs/2026-10-02-keepsake-mvp-design.md)
+Design: [docs/superpowers/specs/2026-10-02-lockbox-mvp-design.md](docs/superpowers/specs/2026-10-02-lockbox-mvp-design.md)
 
 ## Layout
 
@@ -20,8 +20,15 @@ Design: [docs/superpowers/specs/2026-10-02-keepsake-mvp-design.md](docs/superpow
 cargo test                          # core + session
 cd app && pnpm install && pnpm test # UI
 cd app && pnpm tauri dev            # run the app (vault in ~/Library/Application Support/app.keepsake.mac)
-cd app && pnpm tauri build --bundles app
+app/scripts/sign.sh                 # signed build (Personal Team), installs /Applications/Keepsake.app
 ```
+
+### Touch ID
+
+Touch ID needs a signed build (`app/scripts/sign.sh`): the keychain item that holds the wrapped
+account key only opens for the app's stable team signature. Dev builds (`pnpm tauri dev`) are
+signed ad hoc and keep their own item. Turn it on in Settings → Touch ID. Keepsake still asks
+for the master password every 14 days and after your fingerprints change.
 
 ## Browser extension
 
