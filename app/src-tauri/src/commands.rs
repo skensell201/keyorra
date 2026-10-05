@@ -3,9 +3,11 @@
 use std::path::PathBuf;
 
 use keepsake_core::model::{Item, ItemKind};
+use keepsake_core::watchtower::Hibp;
 use keepsake_session::dto::{
     GeneratorRequest, ImportPreview, ImportResult, ItemFilter, ItemSummary, TotpCode, VaultDto,
 };
+use keepsake_session::watchtower::Report;
 use keepsake_session::{CmdError, CmdResult, ErrorKind, PairedBrowser, Settings, Status};
 use tauri::{AppHandle, State};
 use tauri_plugin_clipboard_manager::ClipboardExt;
@@ -206,4 +208,34 @@ pub fn rename_vault(state: State<'_, AppState>, id: Uuid, name: String) -> CmdRe
 #[tauri::command(async)]
 pub fn delete_vault(state: State<'_, AppState>, id: Uuid) -> CmdResult<()> {
     lock_session(&state).delete_vault(id, now())
+}
+
+#[tauri::command(async)]
+pub fn watchtower(state: State<'_, AppState>) -> CmdResult<Report> {
+    lock_session(&state).watchtower(now())
+}
+
+/// Asks Have I Been Pwned about every unchecked password, without holding the session: only
+/// the first five hex characters of each SHA-1 leave the Mac.
+#[tauri::command(async)]
+pub fn check_breaches(state: State<'_, AppState>) -> CmdResult<Report> {
+    let hashes = lock_session(&state).breach_hashes_to_check(now())?;
+    let hibp = Hibp::default();
+    let mut results = Vec::with_capacity(hashes.len());
+    for hash in hashes {
+        match hibp.breach_count_for_hash(&hash) {
+            Ok(count) => results.push((hash, count)),
+            Err(e) => {
+                // Keep what we learned; the next check continues from there.
+                lock_session(&state).record_breaches(results);
+                return Err(CmdError::new(
+                    ErrorKind::Other,
+                    format!("Couldn't reach Have I Been Pwned: {e}"),
+                ));
+            }
+        }
+    }
+    let mut session = lock_session(&state);
+    session.record_breaches(results);
+    session.watchtower(now())
 }

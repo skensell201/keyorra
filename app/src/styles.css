@@ -268,3 +268,11 @@ fieldset.fields .reveal { align-self: flex-start; }
 .vault-row .nav { width: 100%; }
 .vault-row .vault-actions { position: absolute; right: 34px; top: 50%; transform: translateY(-50%); display: flex; gap: 2px; }
 .vault-row .vault-actions button.icon { width: 24px; height: 24px; }
+
+.watchtower h2 { margin: 6px 4px 0; font-size: 20px; }
+.watchtower .categories { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; padding: 0 14px 12px; }
+.watchtower .categories button { flex-direction: column; align-items: flex-start; gap: 2px; border-radius: 14px; padding: 10px 12px; background: var(--surface-2); border-color: transparent; font-weight: 600; }
+.watchtower .categories button[aria-selected="true"] { background: var(--surface); box-shadow: var(--shadow); }
+.watchtower .categories .count { font-family: var(--mono); font-size: 20px; font-weight: 700; }
+.watchtower .breach-check { margin: 0 14px 12px; padding: 12px; border-radius: 14px; background: var(--surface); display: flex; flex-direction: column; gap: 10px; font-size: 13px; }
+.watchtower .breach-check p { margin: 0; color: var(--muted); }

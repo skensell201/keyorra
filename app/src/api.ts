@@ -115,6 +115,26 @@ export interface Settings {
   clipboardSeconds: number;
 }
 
+export interface WatchtowerFinding {
+  item: ItemSummary;
+  detail: string;
+}
+
+export interface WatchtowerReport {
+  breached: WatchtowerFinding[];
+  reused: WatchtowerFinding[];
+  weak: WatchtowerFinding[];
+  missingTwoFactor: WatchtowerFinding[];
+  breachesChecked: boolean;
+  uncheckedPasswords: number;
+}
+
+/** Items with at least one Watchtower finding. */
+export function watchtowerCount(report: WatchtowerReport): number {
+  const lists = [report.breached, report.reused, report.weak, report.missingTwoFactor];
+  return new Set(lists.flatMap((list) => list.map((f) => f.item.id))).size;
+}
+
 export interface ImportPreview {
   vaults: { name: string; items: number }[];
   skipped: { title: string; reason: string }[];
@@ -150,6 +170,8 @@ export const api = {
   deleteVault: (id: string) => invoke<void>("delete_vault", { id }),
   /** Moves an unreadable database aside; returns where it went. */
   startOver: () => invoke<string>("start_over"),
+  watchtower: () => invoke<WatchtowerReport>("watchtower"),
+  checkBreaches: () => invoke<WatchtowerReport>("check_breaches"),
   items: (filter: ItemFilter) => invoke<ItemSummary[]>("items", { filter }),
   item: (id: string) => invoke<Item>("item", { id }),
   newItem: (vaultId: string, kind: ItemKind) => invoke<Item>("new_item", { vaultId, kind }),

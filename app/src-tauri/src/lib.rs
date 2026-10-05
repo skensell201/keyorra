@@ -57,6 +57,8 @@ pub fn run() {
             commands::start_over,
             commands::rename_vault,
             commands::delete_vault,
+            commands::watchtower,
+            commands::check_breaches,
             commands::items,
             commands::item,
             commands::new_item,
