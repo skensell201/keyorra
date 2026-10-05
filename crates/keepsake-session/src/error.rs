@@ -20,6 +20,8 @@ pub enum ErrorKind {
     Throttled,
     NotFound,
     Invalid,
+    /// The database file is not a Keepsake database: offer "Start over".
+    NotADatabase,
     Other,
 }
 
@@ -50,6 +52,7 @@ impl From<CoreError> for CmdError {
             CoreError::Locked => ErrorKind::Locked,
             CoreError::NotFound(_) => ErrorKind::NotFound,
             CoreError::Invalid(_) => ErrorKind::Invalid,
+            CoreError::NotADatabase(_) => ErrorKind::NotADatabase,
             _ => ErrorKind::Other,
         };
         Self::new(kind, e.to_string())
@@ -70,6 +73,7 @@ mod tests {
             (CoreError::Invalid("x".into()), ErrorKind::Invalid),
             (CoreError::Decrypt, ErrorKind::Other),
             (CoreError::Network("x".into()), ErrorKind::Other),
+            (CoreError::NotADatabase("x".into()), ErrorKind::NotADatabase),
         ];
         for (core, kind) in cases {
             assert_eq!(CmdError::from(core).kind, kind);

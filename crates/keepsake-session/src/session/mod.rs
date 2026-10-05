@@ -22,6 +22,8 @@ mod bridge;
 #[cfg(test)]
 mod bridge_tests;
 #[cfg(test)]
+mod polish_tests;
+#[cfg(test)]
 mod tests;
 
 pub use bridge::{BridgeEvent, PairedBrowser, PairingRequest};
@@ -270,6 +272,69 @@ impl Session {
             name: info.name,
             item_count: 0,
         })
+    }
+
+    pub fn rename_vault(&mut self, id: Uuid, name: &str, now: u64) -> CmdResult<VaultDto> {
+        self.touch(now);
+        let name = name.trim();
+        if name.is_empty() {
+            return Err(CmdError::new(ErrorKind::Invalid, "Vault name is required"));
+        }
+        self.store_mut()?.rename_vault(id, name)?;
+        self.vaults(now)?
+            .into_iter()
+            .find(|v| v.id == id)
+            .ok_or_else(|| CmdError::new(ErrorKind::NotFound, format!("vault {id}")))
+    }
+
+    /// Deletes an empty vault (never the last one). Its items in Recently Deleted go with it.
+    pub fn delete_vault(&mut self, id: Uuid, now: u64) -> CmdResult<()> {
+        let vaults = self.vaults(now)?;
+        let vault = vaults
+            .iter()
+            .find(|v| v.id == id)
+            .ok_or_else(|| CmdError::new(ErrorKind::NotFound, format!("vault {id}")))?;
+        if vaults.len() == 1 {
+            return Err(CmdError::new(ErrorKind::Invalid, "Keep at least one vault"));
+        }
+        if vault.item_count > 0 {
+            return Err(CmdError::new(
+                ErrorKind::Invalid,
+                format!(
+                    "\"{}\" still has {} item(s). Delete them first.",
+                    vault.name, vault.item_count
+                ),
+            ));
+        }
+        Ok(self.store_mut()?.delete_vault(id, now as i64)?)
+    }
+
+    /// Moves an unreadable database aside (never deletes it) so setup can start fresh.
+    /// Refuses when the file opens fine: a working vault is never moved.
+    pub fn start_over(&mut self, now: u64) -> CmdResult<PathBuf> {
+        if self.store.is_some() {
+            return Err(CmdError::new(ErrorKind::Invalid, "Lock Keepsake first"));
+        }
+        match Store::open(&self.path) {
+            Err(keepsake_core::Error::NotADatabase(_)) => {}
+            Ok(_) => {
+                return Err(CmdError::new(
+                    ErrorKind::Invalid,
+                    "This is a working Keepsake database; it was not moved",
+                ))
+            }
+            Err(e) => return Err(e.into()),
+        }
+        let aside = sibling(&self.path, &format!(".unreadable-{now}"));
+        std::fs::rename(&self.path, &aside)
+            .map_err(|e| CmdError::new(ErrorKind::Other, format!("Can't move the file: {e}")))?;
+        for suffix in ["-journal", "-wal", "-shm"] {
+            let extra = sibling(&self.path, suffix);
+            if extra.exists() {
+                let _ = std::fs::rename(&extra, sibling(&aside, suffix));
+            }
+        }
+        Ok(aside)
     }
 
     /// Summaries sorted by title (case-insensitive). Damaged rows show only in unfiltered lists.
@@ -529,6 +594,13 @@ impl Session {
             .ok_or_else(|| CmdError::new(ErrorKind::Invalid, "Choose an export file first"))?;
         Ok(self.store_mut()?.apply_import(&plan)?.into())
     }
+}
+
+/// `path` with `suffix` appended to the whole file name (`keepsake.db` -> `keepsake.db-journal`).
+fn sibling(path: &Path, suffix: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_owned();
+    name.push(suffix);
+    PathBuf::from(name)
 }
 
 fn locked() -> CmdError {
