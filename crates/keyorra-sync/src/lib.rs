@@ -5,6 +5,7 @@
 pub mod cbor;
 pub mod error;
 pub mod labels;
+pub mod pad;
 
 pub use error::{Error, Result};
 
