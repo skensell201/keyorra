@@ -676,25 +676,44 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         self.unwrap_vault_key(vault, &wrapped)
     }
 
-    /// A vault's key is fixed when the vault is created (until key rotation, C1): the one of
-    /// its earliest admitted version, the ancestor of all others. Later versions carrying
-    /// another key (a removed device's, written before readers knew) are never written with
-    /// and never copied into new versions.
+    /// A vault's key is fixed when the vault is created (until key rotation, C1): the key the
+    /// vault id commits to, together with the creating device ([`crate::present::vault_id`]),
+    /// carried by any admitted version. Without such a version (a vault created before ids
+    /// committed), the key of the earliest admitted version whose key unwraps. A key that
+    /// does not unwrap never counts, and new records and vault versions use only this key,
+    /// so a device that is later removed cannot take the vault over.
     fn vault_wrapped_key(&self, vault: Uuid) -> Option<Vec<u8>> {
-        self.fold
+        let versions: Vec<&Accepted> = self
+            .fold
             .retained()
             .filter(|a| a.kind == RecordKind::Vault && a.record_id == vault)
             .filter(|a| self.trust.admits(&a.stream, a.seq))
-            .filter_map(|a| match &a.doc {
-                Doc::Vault(v) => {
-                    let total: u64 = a.version.vector.values().sum();
-                    Some((
-                        (total, a.version.hlc, a.version.author),
-                        v.wrapped_key.clone(),
-                    ))
-                }
-                _ => None,
-            })
+            .collect();
+        let authors: BTreeSet<DeviceId> = versions.iter().map(|a| a.version.author).collect();
+        let mut committed = Vec::new();
+        let mut unwrapping = Vec::new();
+        for a in &versions {
+            let Doc::Vault(v) = &a.doc else { continue };
+            let Ok(key) = crypto::unwrap_vault_key(&self.account_key, vault, &v.wrapped_key) else {
+                continue;
+            };
+            let total: u64 = a.version.vector.values().sum();
+            let order = (total, a.version.hlc, a.version.author);
+            let commits = authors
+                .iter()
+                .any(|d| crate::present::vault_id(d, key.as_bytes()) == vault);
+            if commits {
+                committed.push((order, v.wrapped_key.clone()));
+            } else {
+                unwrapping.push((order, v.wrapped_key.clone()));
+            }
+        }
+        let pick = if committed.is_empty() {
+            unwrapping
+        } else {
+            committed
+        };
+        pick.into_iter()
             .min_by(|x, y| x.0.cmp(&y.0))
             .map(|(_, w)| w)
     }
@@ -711,11 +730,9 @@ impl<R: RngCore + CryptoRng> Engine<R> {
     // ---- local writes ----
 
     pub fn create_vault(&mut self, name: &str, wall_ms: u64) -> Result<Uuid> {
-        let mut id = [0u8; 16];
-        self.rng.fill_bytes(&mut id);
-        let id = uuid::Builder::from_random_bytes(id).into_uuid();
         let mut raw = Zeroizing::new([0u8; 32]);
         self.rng.fill_bytes(&mut raw[..]);
+        let id = crate::present::vault_id(&self.device, &raw);
         let key = Key::from_bytes(*raw);
         let wrapped_key = crypto::wrap_vault_key(&self.account_key, id, &key);
         self.unwrapped.insert(wrapped_key.clone(), key);

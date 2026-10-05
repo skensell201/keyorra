@@ -13,6 +13,17 @@ fn uuid_v8(digest: &[u8]) -> Uuid {
     Uuid::new_v8(digest[..16].try_into().expect("SHA-256 has 32 bytes"))
 }
 
+/// Id of a vault: `UUIDv8(SHA-256("keyorra/sync/v1/vault-id\0" ‖ creator ‖ vault_key)[0..16])`.
+/// It commits to the device that created the vault and to its key, so the vault's key can be
+/// recognised among versions that carry others (a removed device's), without any other
+/// device being able to forge the commitment.
+pub fn vault_id(creator: &crate::DeviceId, vault_key: &[u8; 32]) -> Uuid {
+    uuid_v8(&Sha256::digest(tagged(
+        labels::VAULT_ID,
+        &[creator, vault_key],
+    )))
+}
+
 /// Id of the conflict copy made from sibling `version_hash` of record `record_id`:
 /// `UUIDv8(SHA-256("keyorra/sync/v1/conflict-copy\0" ‖ record_id ‖ version_hash)[0..16])`.
 pub fn conflict_copy_id(record_id: Uuid, version_hash: &[u8; 32]) -> Uuid {

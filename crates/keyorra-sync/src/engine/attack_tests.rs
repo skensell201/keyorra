@@ -658,3 +658,68 @@ fn a_rollback_pauses_only_its_stream_and_repeats_aggregate() {
         "other streams keep flowing"
     );
 }
+
+/// A vault version written by device `i` with a version and wrapped key of its choosing.
+fn forged_vault_put(i: usize, vault: Uuid, wrapped_key: Vec<u8>, hlc: u64) -> Entry {
+    let doc = Doc::Vault(VaultPayload {
+        name: "Personal".into(),
+        wrapped_key,
+        deleted: false,
+    });
+    Entry::Put(Envelope {
+        kind: RecordKind::Vault,
+        record_id: vault,
+        vault_id: None,
+        schema: SCHEMA_VERSION,
+        version: crate::envelope::Version {
+            vector: [(device_id(i), 1)].into_iter().collect(),
+            hlc,
+            author: device_id(i),
+        },
+        tombstone: false,
+        body: Some(doc.encode().to_vec()),
+    })
+}
+
+#[test]
+fn review_v1_an_approved_device_cannot_take_over_a_vault_key() {
+    for garbage in [true, false] {
+        let mut c = Cluster::new(3, 1, Faults::NONE);
+        let vault = c.devices[0].create_vault("Personal", START_MS).unwrap();
+        c.heal();
+        let honest = c.devices[0].view().vaults[&vault].wrapped_key.clone();
+        // Still approved, device 1 writes a "creation" of the vault with the earliest
+        // possible version: a garbage key, or a valid key of its own.
+        let wrapped = if garbage {
+            vec![0xab; 72]
+        } else {
+            crypto::wrap_vault_key(
+                &Key::from_bytes(ACCOUNT_KEY),
+                vault,
+                &Key::from_bytes([5; 32]),
+            )
+        };
+        forge(&mut c, 1, vec![forged_vault_put(1, vault, wrapped, 1)]);
+        c.heal();
+        c.devices[0].revoke(device_id(1), c.clocks[0]).unwrap();
+        c.heal();
+        for i in [0, 2] {
+            let json = Cluster::item_json(ITEM, &format!("by {i}"), &[]);
+            c.devices[i]
+                .save_item(vault, ITEM, &json, c.clocks[i])
+                .unwrap_or_else(|e| panic!("garbage={garbage} device {i}: {e}"));
+            c.heal();
+            assert_eq!(title(&c.devices[2 - i].view(), ITEM), format!("by {i}"));
+        }
+        // New vault versions carry the creator's key.
+        c.devices[2]
+            .rename_vault(vault, "Renamed", c.clocks[2])
+            .unwrap();
+        c.heal();
+        for i in [0, 2] {
+            let v = &c.devices[i].view().vaults[&vault];
+            assert_eq!(v.name, "Renamed");
+            assert_eq!(v.wrapped_key, honest, "garbage={garbage}");
+        }
+    }
+}
