@@ -270,7 +270,8 @@ from its sibling's *own* version, so the result is the same on every device and 
 invented "join author".
 
 **Materialising copies.** Any device whose fold yields a copy id that does not yet exist as
-a record writes, at the end of the pull and before the next user edit: each such copy as a
+a record writes, at the end of every pull (also when the pull failed part of the way) and
+again before any item edit (which is refused if the copies cannot be written): each such copy as a
 new record (its `content_from` is its own version), then a collapsing write of the original
 (content and `content_from` of the visible sibling, vector = join + 1). Two devices doing
 this concurrently produce copies with equal content and collapsing versions that are stale

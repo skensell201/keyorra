@@ -66,6 +66,14 @@ pub enum Event {
         first_seq: u64,
         reason: String,
     },
+    /// Listing a stream's segments failed; the other streams are still read.
+    ListingFailed {
+        from: DeviceId,
+        reason: String,
+    },
+    /// Conflict copies are still owed after materialising (or writing them failed); item
+    /// edits are refused until a later round writes them. An alarm.
+    MaterializeIncomplete(String),
     /// A signed segment broke the rules; the stream is no longer read. An alarm.
     Rejected {
         from: DeviceId,
@@ -206,6 +214,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         item_json: &[u8],
         wall_ms: u64,
     ) -> Result<()> {
+        self.settle_before_edit(wall_ms)?;
         let doc = Doc::Item(ItemPayload {
             item_json: Zeroizing::new(item_json.to_vec()),
             deleted_at: None,
@@ -215,12 +224,14 @@ impl<R: RngCore + CryptoRng> Engine<R> {
     }
 
     pub fn trash_item(&mut self, id: Uuid, at_secs: u64, wall_ms: u64) -> Result<()> {
+        self.settle_before_edit(wall_ms)?;
         let (vault_id, mut p) = self.item_in_state(id, ItemState::Live)?;
         p.deleted_at = Some(at_secs);
         self.write(RecordKind::Item, id, vault_id, Doc::Item(p), wall_ms)
     }
 
     pub fn restore_item(&mut self, id: Uuid, wall_ms: u64) -> Result<()> {
+        self.settle_before_edit(wall_ms)?;
         let (vault_id, mut p) = self.item_in_state(id, ItemState::Trashed)?;
         p.deleted_at = None;
         self.write(RecordKind::Item, id, vault_id, Doc::Item(p), wall_ms)
@@ -228,6 +239,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
 
     /// Permanently deletes an item in Recently Deleted.
     pub fn purge_item(&mut self, id: Uuid, wall_ms: u64) -> Result<()> {
+        self.settle_before_edit(wall_ms)?;
         let (vault_id, _) = self.item_in_state(id, ItemState::Trashed)?;
         self.write(RecordKind::Item, id, vault_id, Doc::Tombstone, wall_ms)
     }
@@ -353,18 +365,20 @@ impl<R: RngCore + CryptoRng> Engine<R> {
 
     // ---- sync ----
 
-    /// One round: pull everything readable, materialise conflict copies, push.
-    /// Transport errors while pulling are returned; push failures are logged and retried.
+    /// One round: pull everything readable, materialise conflict copies, push. Whatever the
+    /// pull managed to apply is always materialised and pushed, even if the transport failed
+    /// part of the way (a failed stream listing is only an event); the pull error, if any, is
+    /// returned afterwards. Push failures are logged and retried.
     pub fn sync(
         &mut self,
         transport: &impl Transport,
         directory: &impl Directory,
         wall_ms: u64,
     ) -> Result<()> {
-        self.pull(transport, directory, wall_ms)?;
+        let pulled = self.pull(transport, directory, wall_ms);
         self.materialize(wall_ms)?;
         self.push(transport);
-        Ok(())
+        pulled
     }
 
     fn pull(
@@ -381,7 +395,13 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         loop {
             let mut progress = false;
             for stream in &streams {
-                progress |= self.pull_stream(transport, directory, stream, wall_ms)?;
+                match self.pull_stream(transport, directory, stream, wall_ms) {
+                    Ok(p) => progress |= p,
+                    Err(e) => self.events.push(Event::ListingFailed {
+                        from: *stream,
+                        reason: e.to_string(),
+                    }),
+                }
             }
             if !progress {
                 return Ok(());
@@ -570,12 +590,29 @@ impl<R: RngCore + CryptoRng> Engine<R> {
     }
 
     /// Writes the conflict copies, and the attachment records they need, that the fold asks
-    /// for (spec §3.5). Each pass removes what it wrote from the next view.
+    /// for (spec §3.5). Each pass removes what it wrote from the next view. If copies are still
+    /// owed afterwards, or a write fails, `Event::MaterializeIncomplete` is raised and item
+    /// edits are refused until a later round succeeds.
     fn materialize(&mut self, wall_ms: u64) -> Result<()> {
+        let result = self.materialize_passes(wall_ms);
+        match &result {
+            Ok(true) => {}
+            Ok(false) => self.events.push(Event::MaterializeIncomplete(
+                "conflict copies still owed after materialising".into(),
+            )),
+            Err(e) => self
+                .events
+                .push(Event::MaterializeIncomplete(e.to_string())),
+        }
+        result.map(|_| ())
+    }
+
+    /// Returns whether nothing is owed any more.
+    fn materialize_passes(&mut self, wall_ms: u64) -> Result<bool> {
         for _ in 0..4 {
             let view = self.fold.view();
             if view.resolutions.is_empty() && view.attachment_copies.is_empty() {
-                return Ok(());
+                return Ok(true);
             }
             for r in view.resolutions {
                 for copy in &r.copies {
@@ -599,7 +636,21 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                 self.write(RecordKind::Attachment, a.id, a.vault_id, doc, wall_ms)?;
             }
         }
-        Ok(())
+        let view = self.fold.view();
+        Ok(view.resolutions.is_empty() && view.attachment_copies.is_empty())
+    }
+
+    /// Item edits first write any conflict copies the fold owes, so an edit can never
+    /// collapse a conflict whose losing side has no copy yet; if that fails, the edit is
+    /// refused.
+    fn settle_before_edit(&mut self, wall_ms: u64) -> Result<()> {
+        if self.materialize_passes(wall_ms)? {
+            Ok(())
+        } else {
+            Err(Error::Refused(
+                "conflict copies are still being written; try again".into(),
+            ))
+        }
     }
 
     fn push(&mut self, transport: &impl Transport) {

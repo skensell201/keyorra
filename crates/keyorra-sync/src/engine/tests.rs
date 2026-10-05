@@ -342,3 +342,114 @@ fn convergence_through_chaos_with_a_fixed_seed() {
     c.heal();
     c.assert_converged();
 }
+
+/// Lists everything, but listing one stream's segments fails.
+struct BrokenStream<'a> {
+    inner: &'a crate::transport::MemoryTransport,
+    broken: DeviceId,
+}
+
+impl Transport for BrokenStream<'_> {
+    fn streams(&self) -> Result<Vec<DeviceId>> {
+        self.inner.streams()
+    }
+    fn segments(&self, stream: &DeviceId, after: u64) -> Result<Vec<Fetched<Vec<u8>>>> {
+        if *stream == self.broken {
+            return Err(Error::Transport("listing failed".into()));
+        }
+        self.inner.segments(stream, after)
+    }
+    fn append(&self, segment: &[u8]) -> Result<AppendOutcome> {
+        self.inner.append(segment)
+    }
+}
+
+#[test]
+fn a_failed_listing_does_not_let_the_next_edit_swallow_a_conflict() {
+    // Review repro: A pulls B's concurrent edit, listing C's stream fails, A edits again.
+    let (mut c, vault) = shared(3);
+    let other = Uuid::from_bytes([0x61; 16]);
+    c.devices[2]
+        .save_item(
+            vault,
+            other,
+            &Cluster::item_json(other, "c", &[]),
+            c.clocks[2],
+        )
+        .unwrap();
+    c.sync(2).unwrap();
+    // B's edit is older, so A's "a" is shown and "b" is the side that needs a copy.
+    c.devices[1]
+        .save_item(
+            vault,
+            ITEM,
+            &Cluster::item_json(ITEM, "b", &[]),
+            c.clocks[1],
+        )
+        .unwrap();
+    c.clocks[0] += 5_000;
+    c.devices[0]
+        .save_item(
+            vault,
+            ITEM,
+            &Cluster::item_json(ITEM, "a", &[]),
+            c.clocks[0],
+        )
+        .unwrap();
+    c.sync(1).unwrap();
+    let broken = BrokenStream {
+        inner: &c.store,
+        broken: device_id(2),
+    };
+    let _ = c.devices[0].sync(&broken, &c.directory, c.clocks[0]);
+    c.devices[0]
+        .save_item(
+            vault,
+            ITEM,
+            &Cluster::item_json(ITEM, "a2", &[]),
+            c.clocks[0],
+        )
+        .unwrap();
+    c.heal();
+    c.assert_converged();
+    let view = c.devices[0].view();
+    let titles: Vec<String> = view.items.keys().map(|i| title(&view, *i)).collect();
+    assert!(titles.contains(&"b".to_owned()), "{titles:?}");
+}
+
+#[test]
+fn a_failed_listing_is_an_event_and_other_streams_are_still_read() {
+    let (mut c, vault) = shared(3);
+    c.devices[1]
+        .save_item(
+            vault,
+            ITEM,
+            &Cluster::item_json(ITEM, "b", &[]),
+            c.clocks[1],
+        )
+        .unwrap();
+    c.sync(1).unwrap();
+    c.devices[2]
+        .save_item(
+            vault,
+            ITEM,
+            &Cluster::item_json(ITEM, "c", &[]),
+            c.clocks[2],
+        )
+        .unwrap();
+    c.sync(2).unwrap();
+    let broken = BrokenStream {
+        inner: &c.store,
+        broken: device_id(1),
+    };
+    c.devices[0]
+        .sync(&broken, &c.directory, c.clocks[0])
+        .unwrap();
+    let events = c.devices[0].take_events();
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, Event::ListingFailed { from, .. } if *from == device_id(1))));
+    assert!(events
+        .iter()
+        .any(|e| matches!(e, Event::Pulled { from, .. } if *from == device_id(2))));
+}

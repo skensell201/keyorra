@@ -17,6 +17,9 @@ pub enum Error {
     /// A record the caller named does not exist (or is not in the needed state).
     #[error("not found: {0}")]
     NotFound(String),
+    /// Not allowed right now (e.g. conflict copies still owed, a vault that is not empty).
+    #[error("refused: {0}")]
+    Refused(String),
     /// The folder or server could not be reached or refused the operation; retried later.
     #[error("transport: {0}")]
     Transport(String),
