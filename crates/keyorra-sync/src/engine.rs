@@ -56,6 +56,10 @@ const MAX_ENTRIES_PER_SEGMENT: usize = 256;
 pub const MAX_PENDING_PER_STREAM: usize = 20_000;
 /// A device that only reads still writes a checkpoint this often when its heads moved.
 pub const CHECKPOINT_EVERY_MS: u64 = 60 * 60 * 1000;
+/// A claimed position more than this far past what was received is not plausible: ignored.
+pub const MAX_CLAIM_AHEAD: u64 = 100_000;
+/// Unmet claims kept per claimant; further ones are ignored until some are met.
+pub const MAX_CLAIMS_PER_CLAIMANT: usize = 64;
 /// Checkpoint claims unmet for this long are reported as withheld (spec §4.5).
 pub const WITHHELD_AFTER_MS: u64 = 24 * 60 * 60 * 1000;
 
@@ -226,6 +230,9 @@ struct Claim {
     head: Head,
     since_ms: u64,
     by: DeviceId,
+    /// Position of the checkpoint in `by`'s stream.
+    at: u64,
+    reported: bool,
 }
 
 /// A checkpoint received at `(from, at)`, evaluated once its position is known to count.
@@ -260,7 +267,6 @@ pub struct Engine<R> {
     checkpoint_bounds: BTreeMap<DeviceId, Heads>,
     observations: Vec<Observation>,
     claims: BTreeMap<DeviceId, Vec<Claim>>,
-    withheld_reported: BTreeSet<DeviceId>,
     /// Streams no longer read: a protocol violation, or a fork the user accepted.
     blocked: BTreeSet<DeviceId>,
     /// Streams without a key whose start was looked at for a `SelfJoin`.
@@ -361,7 +367,6 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             checkpoint_bounds: BTreeMap::new(),
             observations: Vec::new(),
             claims: BTreeMap::new(),
-            withheld_reported: BTreeSet::new(),
             blocked: BTreeSet::new(),
             peeked: BTreeSet::new(),
             sent: Head {
@@ -1342,13 +1347,22 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                     continue;
                 }
                 let received = self.heads.get(device).map_or(0, |h| h.seq);
-                if claimed.seq > received {
+                let plausible = claimed.seq <= received.saturating_add(MAX_CLAIM_AHEAD);
+                let by_claimant = self
+                    .claims
+                    .values()
+                    .flatten()
+                    .filter(|c| c.by == o.from)
+                    .count();
+                if claimed.seq > received && plausible && by_claimant < MAX_CLAIMS_PER_CLAIMANT {
                     let list = self.claims.entry(*device).or_default();
                     if !list.iter().any(|c| c.head == *claimed) {
                         list.push(Claim {
                             head: *claimed,
                             since_ms: wall_ms,
                             by: o.from,
+                            at: o.at,
+                            reported: false,
                         });
                     }
                 }
@@ -1402,7 +1416,6 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         list.retain(|c| c.head.seq > received);
         if list.is_empty() {
             self.claims.remove(stream);
-            self.withheld_reported.remove(stream);
         }
         for c in reached {
             let known = self.hashes.get(stream).and_then(|h| h.get(&c.head.seq));
@@ -1412,23 +1425,19 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         }
     }
 
-    /// The oldest unmet claim of a stream, if older than a day, is reported once.
+    /// Every unmet claim older than a day is reported once (a bogus claim cannot hide a
+    /// later real one).
     fn report_withheld(&mut self, wall_ms: u64) {
-        let overdue: Vec<(DeviceId, u64)> = self
-            .claims
-            .iter()
-            .filter(|(d, list)| {
-                !self.withheld_reported.contains(*d)
-                    && list
-                        .iter()
-                        .map(|c| c.since_ms)
-                        .min()
-                        .is_some_and(|since| wall_ms >= since + WITHHELD_AFTER_MS)
-            })
-            .map(|(d, list)| (*d, list.iter().map(|c| c.head.seq).max().unwrap_or(0)))
-            .collect();
+        let mut overdue = Vec::new();
+        for (from, list) in self.claims.iter_mut() {
+            for c in list.iter_mut() {
+                if !c.reported && wall_ms >= c.since_ms + WITHHELD_AFTER_MS {
+                    c.reported = true;
+                    overdue.push((*from, c.head.seq));
+                }
+            }
+        }
         for (from, claimed_seq) in overdue {
-            self.withheld_reported.insert(from);
             self.events.push(Event::Withheld { from, claimed_seq });
         }
     }
@@ -1597,6 +1606,12 @@ impl<R: RngCore + CryptoRng> Engine<R> {
     /// report this device's removal.
     fn trust_changed(&mut self) {
         self.fold.refold(&self.trust);
+        // Claims made at positions that no longer count are dropped.
+        let trust = &self.trust;
+        for list in self.claims.values_mut() {
+            list.retain(|c| trust.admits(&c.by, c.at));
+        }
+        self.claims.retain(|_, l| !l.is_empty());
         let removed: Vec<DeviceId> = self
             .lanes
             .keys()

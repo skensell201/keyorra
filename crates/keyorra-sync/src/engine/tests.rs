@@ -1102,3 +1102,98 @@ fn a_read_only_device_still_writes_checkpoints_now_and_then() {
     c.sync(1).unwrap();
     assert_eq!(c.devices[1].sent.seq, before + 1);
 }
+
+#[test]
+fn review_w2_an_absurd_claim_does_not_silence_real_withholding() {
+    let (mut c, vault) = shared(4);
+    // Approved device 3 claims device 1 is at an absurd position.
+    let mut claims = Heads::new();
+    claims.insert(
+        device_id(1),
+        Head {
+            seq: 1 << 40,
+            hash: [7; 32],
+        },
+    );
+    c.devices[3].queue(Entry::Checkpoint(claims));
+    c.devices[3].push(&c.store);
+    c.sync(0).unwrap();
+    c.clocks[0] += WITHHELD_AFTER_MS + 1;
+    c.sync(0).unwrap();
+    let withheld = |events: Vec<Event>| -> Vec<u64> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                Event::Withheld { from, claimed_seq } if *from == device_id(1) => {
+                    Some(*claimed_seq)
+                }
+                _ => None,
+            })
+            .collect()
+    };
+    assert!(
+        withheld(c.devices[0].take_events()).is_empty(),
+        "absurd claims are ignored"
+    );
+    // Now device 1's new segment is really withheld from device 0.
+    c.devices[1]
+        .save_item(
+            vault,
+            ITEM,
+            &Cluster::item_json(ITEM, "hidden", &[]),
+            c.clocks[1],
+        )
+        .unwrap();
+    c.sync(1).unwrap();
+    let before = c.devices[0].heads[&device_id(1)].seq;
+    let real = c.devices[1].sent.seq;
+    c.sync(2).unwrap();
+    let other = Uuid::from_bytes([0x61; 16]);
+    c.devices[2]
+        .save_item(
+            vault,
+            other,
+            &Cluster::item_json(other, "x", &[]),
+            c.clocks[2],
+        )
+        .unwrap();
+    c.sync(2).unwrap();
+    let withholding = Upto {
+        inner: &c.store,
+        stream: device_id(1),
+        last_seq: before,
+    };
+    c.devices[0].sync(&withholding, c.clocks[0]).unwrap();
+    c.clocks[0] += WITHHELD_AFTER_MS + 1;
+    c.devices[0].sync(&withholding, c.clocks[0]).unwrap();
+    assert_eq!(withheld(c.devices[0].take_events()), vec![real]);
+}
+
+#[test]
+fn review_w2_claims_of_a_device_removed_before_them_are_dropped() {
+    let (mut c, _) = shared(4);
+    let received = c.devices[0].heads[&device_id(1)].seq;
+    let mut claims = Heads::new();
+    claims.insert(
+        device_id(1),
+        Head {
+            seq: received + 3,
+            hash: [7; 32],
+        },
+    );
+    c.devices[2].queue(Entry::Checkpoint(claims));
+    c.devices[2].push(&c.store);
+    let cut_before = c.devices[0].heads[&device_id(2)].seq;
+    c.sync(3).unwrap();
+    assert!(!c.devices[3].claims.is_empty());
+    // The root removes device 2 at a position before that checkpoint.
+    let hash = c.devices[0].hashes[&device_id(2)][&cut_before];
+    c.devices[0].queue(Entry::Revoke {
+        device: device_id(2),
+        last_valid_seq: cut_before,
+        last_valid_hash: hash,
+    });
+    c.devices[0].push(&c.store);
+    c.sync(3).unwrap();
+    assert!(c.devices[3].claims.is_empty());
+}
