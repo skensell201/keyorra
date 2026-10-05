@@ -7,10 +7,18 @@ use rand::rngs::StdRng;
 use rand::SeedableRng;
 use uuid::Uuid;
 
-use crate::engine::Engine;
+use std::collections::BTreeSet;
+use std::sync::{Arc, Mutex};
+
+use keyorra_core::crypto::KdfParams;
+
+use crate::engine::{DeviceKeys, Engine, OutboxState, OutboxStore};
 use crate::error::Result;
 use crate::faults::{Faults, Faulty};
 use crate::fold::View;
+use crate::header::{wrap_account_key, Header};
+use crate::keys::derive_sync_keys;
+use crate::secret_key::SecretKey;
 use crate::transport::MemoryTransport;
 use crate::DeviceId;
 
@@ -141,6 +149,30 @@ impl Cluster {
         }
     }
 
+    /// A further device joins (device 0 is the root) and device 0 approves it; returns its
+    /// index. It has nothing yet: its first sync starts from a snapshot if there is one.
+    pub fn add_device(&mut self, seed: u64) -> usize {
+        let i = self.devices.len();
+        self.devices.push(Engine::join(
+            device_id(i),
+            signer(i),
+            &device_name(i),
+            ACCOUNT_ID,
+            Key::from_bytes(ACCOUNT_KEY),
+            device_id(0),
+            signer(0).verifying_key(),
+            StdRng::seed_from_u64(seed),
+        ));
+        self.links
+            .push(Faulty::new(self.store.clone(), Faults::NONE, seed));
+        self.clocks.push(self.clocks[0]);
+        let key = self.devices[i].verifying_key();
+        self.devices[0]
+            .endorse(device_id(i), &key, &device_name(i), self.clocks[0])
+            .unwrap();
+        i
+    }
+
     /// A minimal item JSON, as the local store would write it.
     pub fn item_json(id: Uuid, title: &str, attachments: &[Uuid]) -> Vec<u8> {
         let atts: Vec<serde_json::Value> = attachments
@@ -153,5 +185,72 @@ impl Cluster {
             "attachments": atts,
         }))
         .unwrap()
+    }
+}
+
+/// The password and Secret Key of the test account.
+pub const PASSWORD: &str = "correct horse battery staple";
+
+pub fn secret_key() -> SecretKey {
+    SecretKey::from_bytes([0x01; 16])
+}
+
+/// A valid account header of the test account (cheap, test-only KDF parameters).
+pub fn test_header(epoch: u32, password: &str) -> Header {
+    let kdf = KdfParams::INSECURE_FAST;
+    let salt = [epoch as u8; 16];
+    let keys = derive_sync_keys(password, &salt, kdf, &secret_key(), &ACCOUNT_ID).unwrap();
+    let mut header = Header {
+        account_id: ACCOUNT_ID,
+        epoch,
+        generation: 1,
+        root_device: device_id(0),
+        root_key: signer(0).verifying_key().to_bytes(),
+        kdf,
+        salt,
+        secret_key_id: "A3K7".into(),
+        wrapped_account_key: vec![],
+    };
+    header.wrapped_account_key = wrap_account_key(
+        &keys.kek,
+        &Key::from_bytes(ACCOUNT_KEY),
+        &header,
+        &mut rand::rngs::OsRng,
+    );
+    header
+}
+
+/// Opens a test header (without the floor on remote KDF parameters).
+pub fn unlock_test_header(header: &Header, password: &str) -> Result<Key> {
+    let keys = derive_sync_keys(
+        password,
+        &header.salt,
+        header.kdf,
+        &secret_key(),
+        &header.account_id,
+    )?;
+    header.unwrap_account_key(&keys.kek)
+}
+
+/// A key store in memory; shared between clones so a test can look inside.
+#[derive(Clone, Default)]
+pub struct MemoryKeys(pub Arc<Mutex<BTreeSet<DeviceId>>>);
+
+impl DeviceKeys for MemoryKeys {
+    fn holds(&self, device: &DeviceId) -> bool {
+        self.0.lock().unwrap().contains(device)
+    }
+    fn store(&mut self, device: DeviceId, _key: &SigningKey) {
+        self.0.lock().unwrap().insert(device);
+    }
+}
+
+/// The last saved outbox state, shared so a test can "restart" from it.
+#[derive(Clone, Default)]
+pub struct MemoryOutbox(pub Arc<Mutex<Option<OutboxState>>>);
+
+impl OutboxStore for MemoryOutbox {
+    fn save(&mut self, state: &OutboxState) {
+        *self.0.lock().unwrap() = Some(state.clone());
     }
 }

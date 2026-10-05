@@ -421,6 +421,15 @@ impl Fold {
             .unwrap_or_default()
     }
 
+    /// Forgets what `stream` carried after `seq` (this device's own unconfirmed versions once
+    /// another copy of it took those positions; plan A1c-2). Call `refold` afterwards.
+    pub fn forget_after(&mut self, stream: &DeviceId, seq: u64) {
+        for versions in self.retained.values_mut() {
+            versions.retain(|(a, _)| a.stream != *stream || a.seq <= seq);
+        }
+        self.retained.retain(|_, v| !v.is_empty());
+    }
+
     pub fn set(&self, kind: RecordKind, id: Uuid) -> Option<&SiblingSet> {
         self.sets.get(&(kind, id))
     }

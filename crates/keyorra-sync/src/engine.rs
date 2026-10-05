@@ -20,8 +20,11 @@
 //! alarm that pauses nothing (their records count for nobody anyway). Checkpoint claims unmet
 //! for a day raise [`Event::Withheld`] (a warning).
 //!
-//! Plan A1c-2 adds account headers, snapshots, restore, retiring the device id and the outbox
-//! persistence hook; A3 the editor's base version; C1 key rotation and GC.
+//! Plan A1c-2 adds, in submodules: account headers as signed entries of the main device's
+//! stream and its advertised head (`headers`), snapshots for bootstrap, anchoring and restore
+//! (`snapshots`), retiring the device id when another copy of this device wrote or its key is
+//! gone (`retire`), and the outbox persistence hook for A1d (`outbox`). Still later: the
+//! editor's base version (A3), key rotation and GC (C1).
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fmt;
@@ -39,6 +42,7 @@ use crate::entry::{sign_endorsement, Entry, Head, Heads};
 use crate::envelope::{Envelope, RecordKind};
 use crate::error::{Error, Result};
 use crate::fold::{Accepted, Admission, Fold, RecordKey, View};
+use crate::header::{Header, HeaderFile};
 use crate::keys::segment_key;
 use crate::payload::{AttachmentPayload, Doc, ItemPayload, VaultPayload};
 use crate::present::{present_item, present_vault, ItemState};
@@ -48,6 +52,15 @@ use crate::segment::{
 use crate::transport::{AppendOutcome, Fetched, Transport};
 use crate::trust::Trust;
 use crate::{AccountId, DeviceId};
+
+mod headers;
+mod outbox;
+mod retire;
+mod snapshots;
+
+pub use outbox::{NoOutboxStore, OutboxState, OutboxStore};
+pub use retire::{DeviceKeys, KeepKeys, RetireReason};
+pub use snapshots::{SNAPSHOT_EVERY_ENTRIES, SNAPSHOT_EVERY_MS};
 
 /// Entries per segment; keeps segments well below the 4 MiB cap for ordinary records.
 const MAX_ENTRIES_PER_SEGMENT: usize = 256;
@@ -218,15 +231,46 @@ pub enum Event {
     Alarm(Alarm),
     /// The main device removed this one: it reads but no longer writes. A3 offers to rejoin.
     Removed,
-    /// Someone else wrote at this device's next position (retiring the id: plan A1c-2).
+    /// Someone else wrote at this device's next position: another copy of this device.
     OwnStreamConflict,
+    /// This device continues under a new id (spec §4.2), pending the main device's approval.
+    Retired {
+        old: DeviceId,
+        new: DeviceId,
+        reason: RetireReason,
+    },
+    /// The main device itself would have to retire (another copy of it wrote, or its key is
+    /// gone): it stops writing; the user starts a new account from a device and carries the
+    /// data over (A1d/A3).
+    RootMustStartOver {
+        reason: RetireReason,
+    },
+    /// A newer account header (a master password change on the main device).
+    HeaderAdopted {
+        epoch: u32,
+    },
+    SnapshotWritten {
+        name: String,
+    },
+    /// Positions of `stream` up to `seq` were taken from a snapshot by `by` (restore).
+    Anchored {
+        stream: DeviceId,
+        seq: u64,
+        by: DeviceId,
+    },
+    /// A rollback of `stream` that a snapshot already covers: nothing is lost, no alarm.
+    RollbackRepaired {
+        stream: DeviceId,
+    },
 }
 
-struct Unsent {
-    bytes: Vec<u8>,
-    versions: usize,
-    last_seq: u64,
-    last_hash: [u8; 32],
+/// A sealed segment that the store has not confirmed yet: retried byte for byte.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SealedSegment {
+    pub bytes: Vec<u8>,
+    pub versions: usize,
+    pub last_seq: u64,
+    pub last_hash: [u8; 32],
 }
 
 /// A received record that has not been applied yet.
@@ -266,6 +310,7 @@ struct Observation {
     heads: Heads,
 }
 
+#[allow(dead_code)] // TEMPORARY: removed in Task 10 (stubs until Tasks 8-10)
 pub struct Engine<R> {
     device: DeviceId,
     signer: SigningKey,
@@ -298,7 +343,7 @@ pub struct Engine<R> {
     sent: Head,
     /// Chain hash of every own entry, confirmed or queued.
     own_hashes: BTreeMap<u64, [u8; 32]>,
-    unsent: Option<Unsent>,
+    unsent: Option<SealedSegment>,
     outbox: Vec<Value>,
     next_seq: u64,
     /// Heads in the last checkpoint this device wrote, and when.
@@ -313,8 +358,32 @@ pub struct Engine<R> {
     /// How many unapproved devices the user has already seen in an alarm.
     unapproved_seen: usize,
     removed_reported: bool,
-    /// Set after `OwnStreamConflict`: nothing more is written (plan A1c-2 retires the id).
+    /// Set when the main device would have to retire: nothing more is written.
     halted: bool,
+    keys: Box<dyn DeviceKeys>,
+    outbox_store: Box<dyn OutboxStore>,
+    /// Set when another copy of this device was noticed; handled at the end of the round.
+    retire_due: Option<RetireReason>,
+    /// The main device's `Header` entries `(seq, header)` and everyone's `HeaderSeen`.
+    header_entries: Vec<(u64, Header)>,
+    header_seen: Vec<(DeviceId, u64, u32)>,
+    adopted_epoch: u32,
+    /// Own header files waiting for their entry's segment to be confirmed.
+    header_files_out: Vec<(u64, HeaderFile)>,
+    /// Header files below this epoch were deleted.
+    deleted_below: u32,
+    snapshot_ref: Option<snapshots::SnapshotRef>,
+    own_snapshots: Vec<String>,
+    entries_since_snapshot: u64,
+    last_snapshot_ms: Option<u64>,
+    revoked_since_snapshot: bool,
+    /// Own position at which this device restored its own rolled-back stream.
+    restored_own: Option<u64>,
+    bootstrap_tried: bool,
+    /// The own head last written to the root head file (main device).
+    root_head_written: u64,
+    /// The main device's trust entries applied so far, in its stream's order (for snapshots).
+    root_log: Vec<(u64, Entry)>,
     /// Tests only: an attacker's copy of the engine, which writes whatever it is told,
     /// removed or not.
     #[cfg(test)]
@@ -411,6 +480,23 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             root_head_advertised: None,
             removed_reported: false,
             halted: false,
+            keys: Box::new(KeepKeys),
+            outbox_store: Box::new(NoOutboxStore),
+            retire_due: None,
+            header_entries: Vec::new(),
+            header_seen: Vec::new(),
+            adopted_epoch: 0,
+            header_files_out: Vec::new(),
+            deleted_below: 0,
+            snapshot_ref: None,
+            own_snapshots: Vec::new(),
+            entries_since_snapshot: 0,
+            last_snapshot_ms: None,
+            revoked_since_snapshot: false,
+            restored_own: None,
+            bootstrap_tried: false,
+            root_head_written: 0,
+            root_log: Vec::new(),
             #[cfg(test)]
             forging: false,
             clock_reported: BTreeSet::new(),
@@ -1097,12 +1183,16 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             let result = self.trust.apply_root(seq, &entry, |d| {
                 seen.as_ref().and_then(|h| h.get(d)).map_or(0, |h| h.seq)
             });
+            if result.is_ok() {
+                self.root_log.push((seq, entry.clone()));
+            }
             match result {
                 Ok(c) => changed = c,
                 Err(e) if !self.forging() => return Err(Error::Refused(e.to_string())),
                 Err(_) => {}
             }
         }
+        self.note_header_entry(self.device, seq, &entry);
         self.queue(entry);
         if changed {
             self.trust_changed();
@@ -1136,6 +1226,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             .insert(self.next_seq, chain_next(&prev, &value));
         self.outbox.push(value);
         self.next_seq += 1;
+        self.entries_since_snapshot += 1;
         debug_assert_eq!(
             self.next_seq,
             self.unsent.as_ref().map_or(self.sent.seq, |u| u.last_seq)
@@ -1143,6 +1234,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                 + 1,
             "own sequence numbers out of step"
         );
+        self.save_outbox();
     }
 
     // ---- sync ----
@@ -1153,14 +1245,36 @@ impl<R: RngCore + CryptoRng> Engine<R> {
     /// returned afterwards. Alarms do not make a round fail: a rollback or fork pauses only
     /// its stream (the own stream: nothing is pushed), see [`Engine::alarms`].
     pub fn sync(&mut self, transport: &impl Transport, wall_ms: u64) -> Result<()> {
+        if self.sent.seq > 0 && !self.keys.holds(&self.device) {
+            self.retire(RetireReason::KeyMissing, wall_ms)?;
+        }
+        if !self.bootstrap_tried {
+            self.bootstrap_tried = true;
+            self.bootstrap(transport, wall_ms)?;
+        }
+        self.read_root_head_file(transport);
         let pulled = self.pull(transport, wall_ms);
+        if let Some(reason) = self.retire_due.take() {
+            self.retire(reason, wall_ms)?;
+        }
+        self.adopt_header(wall_ms);
+        self.delete_old_headers(transport);
         if self.can_write() {
             self.materialize(wall_ms)?;
             self.checkpoint_if_stale(wall_ms);
         }
         if !self.paused(&self.device) {
             self.push(transport);
+            if let Some(reason) = self.retire_due.take() {
+                self.retire(reason, wall_ms)?;
+                self.push(transport);
+            }
+            if self.can_write() && self.is_idle() && self.snapshot_due(wall_ms) {
+                self.write_snapshot(transport, wall_ms)?;
+                self.push(transport);
+            }
         }
+        self.write_root_head_file(transport);
         pulled
     }
 
@@ -1191,7 +1305,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                 if self.paused(stream) {
                     continue;
                 }
-                match self.receive_stream(transport, stream) {
+                match self.receive_stream(transport, stream, wall_ms) {
                     Ok(p) => progress |= p,
                     Err(e) => self.events.push(Event::ListingFailed {
                         from: *stream,
@@ -1220,11 +1334,17 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             Ok(stored) => {
                 let stored = stored.unwrap_or(0);
                 if stored < received && !self.acknowledged_rollbacks.contains(&(*stream, stored)) {
-                    self.raise(Alarm::Rollback {
-                        stream: *stream,
-                        received,
-                        stored,
-                    });
+                    if self.snapshot_covers(transport, stream, received) {
+                        self.acknowledged_rollbacks.insert((*stream, stored));
+                        self.events
+                            .push(Event::RollbackRepaired { stream: *stream });
+                    } else {
+                        self.raise(Alarm::Rollback {
+                            stream: *stream,
+                            received,
+                            stored,
+                        });
+                    }
                 }
             }
             Err(e) => self.events.push(Event::HeadUnknown {
@@ -1264,7 +1384,12 @@ impl<R: RngCore + CryptoRng> Engine<R> {
 
     /// Receives every segment of `stream` that continues its chain, up to its cut. Returns
     /// whether any was received.
-    fn receive_stream(&mut self, transport: &impl Transport, stream: &DeviceId) -> Result<bool> {
+    fn receive_stream(
+        &mut self,
+        transport: &impl Transport,
+        stream: &DeviceId,
+        wall_ms: u64,
+    ) -> Result<bool> {
         let mut head = self.heads.get(stream).copied().unwrap_or(Head {
             seq: 0,
             hash: chain_genesis(&self.account_id, stream),
@@ -1331,6 +1456,13 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                             first_seq: want,
                         },
                     );
+                } else if candidates.iter().any(|(s, _)| *s > want)
+                    && self.anchor_stream(transport, stream, wall_ms)
+                {
+                    // A gap the store cannot fill (a restored rollback): a snapshot covers it.
+                    head = self.heads.get(stream).copied().unwrap_or(head);
+                    received = true;
+                    continue;
                 }
                 return Ok(received);
             };
@@ -1390,6 +1522,8 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                 }
             }
             let count = entries.len();
+            self.entries_since_snapshot += count as u64;
+            self.confirm_snapshot_ref(stream, segment.header.first_seq, &entries);
             for (seq, entry) in entries {
                 match entry {
                     Entry::Checkpoint(heads) => {
@@ -1419,6 +1553,9 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                     }
                     // The first entry of an approved self-joined stream: nothing to do.
                     Entry::SelfJoin { .. } if seq == 1 && !is_root => {}
+                    Entry::Snapshot { .. } => {}
+                    Entry::HeaderSeen { .. } => self.note_header_entry(*stream, seq, &entry),
+                    Entry::Header(_) if is_root => self.note_header_entry(*stream, seq, &entry),
                     entry if is_root => self.apply_root_entry(seq, &entry),
                     _ => self.events.push(Event::TrustEntryIgnored {
                         from: *stream,
@@ -1500,7 +1637,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
     fn check_own_claim(&mut self, claimed: &Head, by: DeviceId) {
         let known = self.own_hashes.get(&claimed.seq);
         if known.is_some_and(|h| *h != claimed.hash) {
-            self.claim_mismatch(self.device, claimed.seq, by);
+            self.own_claim_mismatch(claimed.seq, by);
             return;
         }
         if claimed.seq <= self.sent.seq {
@@ -1514,7 +1651,18 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                 self.unsent = None;
             }
             _ if known.is_some() => {}
-            _ => self.claim_mismatch(self.device, claimed.seq, by),
+            _ => self.own_claim_mismatch(claimed.seq, by),
+        }
+    }
+
+    /// Another history of this device's own stream: if the main device says so, another
+    /// copy of this device wrote there and this one retires; anyone else's word is a dispute.
+    fn own_claim_mismatch(&mut self, seq: u64, by: DeviceId) {
+        if by == self.trust.root() {
+            self.events.push(Event::OwnStreamConflict);
+            self.retire_due = Some(RetireReason::OtherCopyWrote);
+        } else {
+            self.claim_mismatch(self.device, seq, by);
         }
     }
 
@@ -1637,8 +1785,17 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                 .filter(|h| hashes.get(d).and_then(|x| x.get(&h.seq)) == Some(&h.hash))
                 .map_or(0, |h| h.seq)
         };
-        match self.trust.apply_root(seq, entry, seen) {
-            Ok(true) => self.trust_changed(),
+        let result = self.trust.apply_root(seq, entry, seen);
+        if result.is_ok() && !self.root_log.iter().any(|(s, _)| *s == seq) {
+            self.root_log.push((seq, entry.clone()));
+        }
+        match result {
+            Ok(true) => {
+                if matches!(entry, Entry::Revoke { .. }) {
+                    self.revoked_since_snapshot = true;
+                }
+                self.trust_changed()
+            }
             Ok(false) => {}
             Err(e) => self.events.push(Event::TrustEntryIgnored {
                 from: root,
@@ -1846,14 +2003,18 @@ impl<R: RngCore + CryptoRng> Engine<R> {
     }
 
     fn push(&mut self, transport: &impl Transport) {
-        if self.halted || (self.unsent.is_none() && self.outbox.is_empty()) {
+        if self.halted || self.retire_due.is_some() {
+            return;
+        }
+        self.upload_header_files(transport);
+        if self.unsent.is_none() && self.outbox.is_empty() {
             return;
         }
         // The store's head of this device's own stream must be where this device left it.
         match transport.head(&self.device) {
             Ok(stored) => {
                 let stored = stored.unwrap_or(0);
-                if stored < self.sent.seq {
+                if stored < self.sent.seq && self.restored_own != Some(self.sent.seq) {
                     self.raise(Alarm::Rollback {
                         stream: self.device,
                         received: self.sent.seq,
@@ -1862,8 +2023,8 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                     return;
                 }
                 if stored > self.sent.seq && self.unsent.is_none() {
-                    self.halted = true;
                     self.events.push(Event::OwnStreamConflict);
+                    self.retire_due = Some(RetireReason::OtherCopyWrote);
                     return;
                 }
             }
@@ -1891,12 +2052,14 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                 let bytes =
                     seal_segment(&self.segment_key, &self.signer, &at, entries, &mut self.rng)
                         .expect("own entries fit a segment");
-                self.unsent = Some(Unsent {
+                self.unsent = Some(SealedSegment {
                     bytes,
                     versions,
                     last_seq,
                     last_hash,
                 });
+                // Persisted before the append, so a restart retries these exact bytes.
+                self.save_outbox();
             }
             let unsent = self.unsent.as_ref().expect("set above");
             match transport.append(&unsent.bytes) {
@@ -1909,12 +2072,14 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                         versions: unsent.versions,
                     });
                     self.unsent = None;
+                    self.save_outbox();
+                    self.upload_header_files(transport);
                 }
                 Ok(AppendOutcome::Conflict) => {
                     // Someone else wrote at this device's next position: another copy of this
-                    // device (plan A1c-2 retires the id). Nothing more is written meanwhile.
-                    self.halted = true;
+                    // device (a clone, a restored backup). This device continues under a new id.
                     self.events.push(Event::OwnStreamConflict);
+                    self.retire_due = Some(RetireReason::OtherCopyWrote);
                     return;
                 }
                 Err(e) => {
@@ -1930,5 +2095,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
 mod adversary_tests;
 #[cfg(test)]
 mod attack_tests;
+#[cfg(test)]
+mod recovery_tests;
 #[cfg(test)]
 mod tests;

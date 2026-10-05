@@ -706,7 +706,7 @@ fn after_an_own_stream_conflict_the_device_stops_pushing() {
 }
 
 /// A second engine with the same id, key and state: a cloned or restored Mac.
-fn clone_of(e: &Engine<rand::rngs::StdRng>) -> Engine<rand::rngs::OsRng> {
+pub(super) fn clone_of(e: &Engine<rand::rngs::StdRng>) -> Engine<rand::rngs::OsRng> {
     let i = (e.device[0] - 1) as usize;
     let mut twin = Engine::join(
         e.device,
@@ -728,6 +728,9 @@ fn clone_of(e: &Engine<rand::rngs::StdRng>) -> Engine<rand::rngs::OsRng> {
     twin.hashes = e.hashes.clone();
     twin.checkpoint_bounds = e.checkpoint_bounds.clone();
     twin.last_checkpoint = e.last_checkpoint.clone();
+    twin.root_log = e.root_log.clone();
+    twin.header_entries = e.header_entries.clone();
+    twin.header_seen = e.header_seen.clone();
     twin
 }
 
