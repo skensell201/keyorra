@@ -14,6 +14,12 @@ pub enum Error {
     BadSignature,
     #[error("incorrect password or secret key")]
     WrongPassword,
+    /// A record the caller named does not exist (or is not in the needed state).
+    #[error("not found: {0}")]
+    NotFound(String),
+    /// The folder or server could not be reached or refused the operation; retried later.
+    #[error("transport: {0}")]
+    Transport(String),
     #[error(transparent)]
     Core(#[from] keyorra_core::Error),
 }

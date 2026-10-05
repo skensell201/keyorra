@@ -13,6 +13,7 @@ pub const SEGMENT: &[u8] = b"keyorra/sync/v1/segment";
 pub const SNAPSHOT: &[u8] = b"keyorra/sync/v1/snapshot";
 pub const CHAIN_GENESIS: &[u8] = b"keyorra/sync/v1/chain-genesis";
 pub const CHAIN: &[u8] = b"keyorra/sync/v1/chain";
+pub const CONFLICT_COPY: &[u8] = b"keyorra/sync/v1/conflict-copy";
 
 pub const ALL: &[&[u8]] = &[
     KEK,
@@ -27,6 +28,7 @@ pub const ALL: &[&[u8]] = &[
     SNAPSHOT,
     CHAIN_GENESIS,
     CHAIN,
+    CONFLICT_COPY,
 ];
 
 /// `label ‖ 0x00 ‖ parts[0] ‖ parts[1] ‖ …`. Parts are fixed-length or the last field.
