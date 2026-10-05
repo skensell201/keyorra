@@ -2,12 +2,14 @@ import { authorize } from "./access";
 import { idbDelete, idbGet, idbPut } from "./idb";
 import { Client, LockedError, NoAppError, UnpairedError, type Pairing } from "./client";
 import { PendingSaves, offerFor } from "./pending";
+import { browserName, nativeRuntime, nativeSender } from "./platform";
 import type { ErrorKind, Result, ToBackground, ToContent } from "./messages";
 
+// Safari ignores the host name and hands every native message to its app extension.
 const HOST = "app.keepsake.bridge";
 
 // The pairing key is kept in IndexedDB, which only this worker opens; chrome.storage is readable by content scripts.
-const client = new Client((msg) => chrome.runtime.sendNativeMessage(HOST, msg), {
+const client = new Client(nativeSender(nativeRuntime(), HOST), {
   get: () => idbGet<Pairing>("pairing"),
   set: (p) => idbPut("pairing", p).then(() => {}),
   clear: () => idbDelete("pairing").then(() => {}),
@@ -18,16 +20,6 @@ const client = new Client((msg) => chrome.runtime.sendNativeMessage(HOST, msg), 
 // Logins awaiting a save across a page navigation: memory only, never page storage.
 const pending = new PendingSaves();
 chrome.tabs.onRemoved.addListener((tabId) => pending.clear(tabId));
-
-function browserName(): string {
-  const ua = navigator.userAgent;
-  if (/Firefox\//.test(ua)) return "Firefox";
-  if (/YaBrowser\//.test(ua)) return "Yandex";
-  if (/OPR\//.test(ua)) return "Opera";
-  if (/Edg\//.test(ua)) return "Edge";
-  if (/Vivaldi\//.test(ua)) return "Vivaldi";
-  return "Chrome";
-}
 
 function kind(e: unknown): ErrorKind {
   if (e instanceof LockedError) return "locked";
@@ -43,7 +35,7 @@ async function handle(msg: ToBackground, sender: chrome.runtime.MessageSender): 
     case "state":
       return client.state();
     case "pair":
-      return client.startPairing(browserName());
+      return client.startPairing(browserName(navigator.userAgent, chrome.runtime.getURL("")));
     case "pairStatus":
       return client.pairingResult();
     case "pairingCode":

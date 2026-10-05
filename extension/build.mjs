@@ -1,4 +1,4 @@
-// Builds dist/chromium and dist/firefox from one source tree.
+// Builds dist/chromium, dist/firefox and dist/safari from one source tree.
 import { build } from "esbuild";
 import { cpSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 
@@ -32,6 +32,14 @@ const targets = {
     ...base,
     background: { scripts: ["background.js"] },
     browser_specific_settings: { gecko: { id: "keepsake@keepsake.app", strict_min_version: "128.0" } },
+  },
+  // Packaged by safari/ (Xcode) into the app extension's Resources. A non-persistent background
+  // page, as in Apple's own MV3 template: Safari requires it to be non-persistent, and the bundle
+  // already runs as a page in Firefox, while Safari's MV3 service workers have been less dependable.
+  safari: {
+    ...base,
+    background: { scripts: ["background.js"], persistent: false },
+    browser_specific_settings: { safari: { strict_min_version: "17.0" } },
   },
 };
 
