@@ -7,7 +7,8 @@
 
 use std::collections::BTreeMap;
 
-use keyorra_core::crypto::{self, Key, NONCE_LEN};
+use keyorra_core::crypto::{self, Key};
+use rand::{CryptoRng, RngCore};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zeroize::Zeroizing;
@@ -178,13 +179,16 @@ impl Envelope {
     }
 
     /// Shape rules: a tombstone has no body, anything else has one; vault-key kinds name
-    /// their vault.
+    /// their vault and vault records do not (their `record_id` is the vault).
     pub fn check(&self) -> Result<()> {
         if self.tombstone == self.body.is_some() {
             return Err(malformed("tombstone and body disagree"));
         }
         if self.kind.sealed_with_vault_key() && self.vault_id.is_none() {
             return Err(malformed("record without vault"));
+        }
+        if !self.kind.sealed_with_vault_key() && self.vault_id.is_some() {
+            return Err(malformed("vault record with a vault id"));
         }
         Ok(())
     }
@@ -212,7 +216,7 @@ impl Envelope {
         vault_key: &Key,
         account_id: &AccountId,
         payload: &[u8],
-        nonce: &[u8; NONCE_LEN],
+        rng: &mut (impl RngCore + CryptoRng),
     ) {
         assert!(
             self.kind.sealed_with_vault_key(),
@@ -220,7 +224,7 @@ impl Envelope {
         );
         self.tombstone = false;
         let aad = self.body_aad(account_id);
-        self.body = Some(crypto::seal_with_nonce(vault_key, nonce, payload, &aad));
+        self.body = Some(crypto::seal_with_rng(vault_key, rng, payload, &aad));
     }
 
     pub fn open_body(&self, vault_key: &Key, account_id: &AccountId) -> Result<Zeroizing<Vec<u8>>> {
@@ -259,7 +263,7 @@ mod tests {
             &Key::from_bytes([0x70; 32]),
             &ACCOUNT,
             b"{\"title\":\"x\"}",
-            &[0x51; NONCE_LEN],
+            &mut crate::nonce::fixed([0x51; 24]),
         );
         env
     }
@@ -406,6 +410,11 @@ mod tests {
             ..item()
         };
         vault.check().unwrap();
+        let vault_with_id = Envelope {
+            kind: RecordKind::Vault,
+            ..item()
+        };
+        assert!(vault_with_id.check().is_err());
         // from_value applies the same rules.
         assert!(Envelope::from_value(&no_body.to_value()).is_err());
     }

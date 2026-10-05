@@ -3,7 +3,9 @@ mod kdf;
 mod key;
 mod keys;
 
-pub use aead::{open, seal, seal_with_nonce, NONCE_LEN};
+#[cfg(any(test, feature = "test-utils"))]
+pub use aead::seal_with_nonce;
+pub use aead::{open, seal, seal_with_rng, NONCE_LEN};
 pub use kdf::{derive_kek, KdfParams};
 pub use key::Key;
 pub use keys::{

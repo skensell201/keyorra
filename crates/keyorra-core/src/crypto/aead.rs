@@ -1,5 +1,8 @@
 use chacha20poly1305::{
-    aead::{Aead, AeadCore, KeyInit, OsRng, Payload},
+    aead::{
+        rand_core::{CryptoRng, RngCore},
+        Aead, KeyInit, OsRng, Payload,
+    },
     Key as CipherKey, XChaCha20Poly1305, XNonce,
 };
 use zeroize::Zeroizing;
@@ -12,19 +15,36 @@ const TAG_LEN: usize = 16;
 
 /// Encrypts `plaintext`; output is `nonce || ciphertext || tag`.
 pub fn seal(key: &Key, plaintext: &[u8], aad: &[u8]) -> Vec<u8> {
-    let mut nonce = [0u8; NONCE_LEN];
-    nonce.copy_from_slice(&XChaCha20Poly1305::generate_nonce(&mut OsRng));
-    seal_with_nonce(key, &nonce, plaintext, aad)
+    seal_with_rng(key, &mut OsRng, plaintext, aad)
 }
 
-/// [`seal`] with a caller-chosen nonce, for deterministic test vectors and for callers that
-/// draw the nonce from a CSPRNG themselves. Reusing a (key, nonce) pair breaks the cipher.
+/// [`seal`] with the nonce drawn from a caller-supplied CSPRNG (so callers that must stay free
+/// of OS APIs, and tests with a scripted generator, can seal). Never pass a generator that can
+/// repeat: reusing a (key, nonce) pair breaks the cipher.
+pub fn seal_with_rng(
+    key: &Key,
+    rng: &mut (impl RngCore + CryptoRng),
+    plaintext: &[u8],
+    aad: &[u8],
+) -> Vec<u8> {
+    let mut nonce = [0u8; NONCE_LEN];
+    rng.fill_bytes(&mut nonce);
+    seal_inner(key, &nonce, plaintext, aad)
+}
+
+/// [`seal`] with a caller-chosen nonce, for known-answer tests only. Reusing a (key, nonce)
+/// pair breaks the cipher, so this is not part of the production API.
+#[cfg(any(test, feature = "test-utils"))]
 pub fn seal_with_nonce(
     key: &Key,
     nonce: &[u8; NONCE_LEN],
     plaintext: &[u8],
     aad: &[u8],
 ) -> Vec<u8> {
+    seal_inner(key, nonce, plaintext, aad)
+}
+
+fn seal_inner(key: &Key, nonce: &[u8; NONCE_LEN], plaintext: &[u8], aad: &[u8]) -> Vec<u8> {
     let cipher = XChaCha20Poly1305::new(CipherKey::from_slice(key.as_bytes()));
     let ciphertext = cipher
         .encrypt(
@@ -146,6 +166,36 @@ mod tests {
         assert_eq!(
             data_encoding::HEXLOWER.encode(&sealed[NONCE_LEN..]),
             expected
+        );
+    }
+
+    #[test]
+    fn seal_with_rng_draws_the_nonce_from_the_rng() {
+        struct Fixed;
+        impl RngCore for Fixed {
+            fn next_u32(&mut self) -> u32 {
+                0x0909_0909
+            }
+            fn next_u64(&mut self) -> u64 {
+                0x0909_0909_0909_0909
+            }
+            fn fill_bytes(&mut self, dest: &mut [u8]) {
+                dest.fill(9);
+            }
+            fn try_fill_bytes(
+                &mut self,
+                dest: &mut [u8],
+            ) -> std::result::Result<(), chacha20poly1305::aead::rand_core::Error> {
+                self.fill_bytes(dest);
+                Ok(())
+            }
+        }
+        impl CryptoRng for Fixed {}
+        let key = Key::from_bytes([7u8; 32]);
+        let sealed = seal_with_rng(&key, &mut Fixed, b"hello", b"aad");
+        assert_eq!(
+            sealed,
+            seal_with_nonce(&key, &[9u8; NONCE_LEN], b"hello", b"aad")
         );
     }
 

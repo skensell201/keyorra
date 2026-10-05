@@ -11,7 +11,7 @@ use zeroize::Zeroizing;
 
 use crate::error::{malformed, Result};
 
-const DIGITS: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+pub(crate) const DIGITS: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 const CHECK: &[u8; 37] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ*~$=U";
 const ID_LEN: usize = 4;
 const KEY_DIGITS: usize = 26;
@@ -39,32 +39,39 @@ impl SecretKey {
 
     /// The human form, e.g. for the Emergency Kit.
     pub fn display(&self, id: &str) -> Zeroizing<String> {
-        let value = u128::from_be_bytes(*self.0);
-        let mut chars: Vec<u8> = (0..KEY_DIGITS)
-            .map(|i| DIGITS[((value >> (5 * (KEY_DIGITS - 1 - i))) & 31) as usize])
-            .collect();
-        chars.push(CHECK[(value % 37) as usize]);
-        let mut out = Zeroizing::new(id.to_owned());
+        let value = Zeroizing::new(u128::from_be_bytes(*self.0));
+        // Exact capacities: a growing buffer would leave unzeroed copies behind.
+        let mut chars: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(KEY_DIGITS + 1));
+        chars.extend(
+            (0..KEY_DIGITS).map(|i| DIGITS[((*value >> (5 * (KEY_DIGITS - 1 - i))) & 31) as usize]),
+        );
+        chars.push(CHECK[(*value % 37) as usize]);
+        let groups = (KEY_DIGITS + 1).div_ceil(5);
+        let mut out = Zeroizing::new(String::with_capacity(id.len() + KEY_DIGITS + 1 + groups));
+        out.push_str(id);
         for group in chars.chunks(5) {
             out.push('-');
             out.push_str(std::str::from_utf8(group).expect("ASCII"));
         }
-        chars.iter_mut().for_each(|c| *c = 0);
         out
     }
 
     /// Parses [`display`](Self::display) output; returns the id and the key.
     pub fn parse(text: &str) -> Result<(String, SecretKey)> {
-        let chars: Zeroizing<Vec<u8>> = Zeroizing::new(
-            text.bytes()
-                .filter(|&b| b != b'-' && !b.is_ascii_whitespace())
-                .map(|b| match b.to_ascii_uppercase() {
-                    b'I' | b'L' => b'1',
-                    b'O' => b'0',
-                    other => other,
-                })
-                .collect(),
-        );
+        let mut chars: Zeroizing<Vec<u8>> = Zeroizing::new(Vec::with_capacity(text.len()));
+        for c in text.chars() {
+            if c.is_whitespace() || is_dash(c) {
+                continue;
+            }
+            if !c.is_ascii() {
+                return Err(malformed("secret key character"));
+            }
+            chars.push(match c.to_ascii_uppercase() as u8 {
+                b'I' | b'L' => b'1',
+                b'O' => b'0',
+                other => other,
+            });
+        }
         if chars.len() != ID_LEN + KEY_DIGITS + 1 {
             return Err(malformed("secret key length"));
         }
@@ -77,20 +84,25 @@ impl SecretKey {
         for &c in &chars[..ID_LEN] {
             digit(c)?;
         }
-        let mut value: u128 = 0;
+        let mut value = Zeroizing::new(0u128);
         for &c in &chars[ID_LEN..ID_LEN + KEY_DIGITS] {
             let d = digit(c)? as u128;
-            value = value
+            *value = value
                 .checked_mul(32)
                 .and_then(|v| v.checked_add(d))
                 .ok_or_else(|| malformed("secret key out of range"))?;
         }
-        if chars[ID_LEN + KEY_DIGITS] != CHECK[(value % 37) as usize] {
+        if chars[ID_LEN + KEY_DIGITS] != CHECK[(*value % 37) as usize] {
             return Err(malformed("secret key check character"));
         }
         let id = String::from_utf8(chars[..ID_LEN].to_vec()).expect("ASCII");
         Ok((id, SecretKey::from_bytes(value.to_be_bytes())))
     }
+}
+
+/// Hyphen-minus plus the Unicode dashes that word processors and chat apps substitute.
+fn is_dash(c: char) -> bool {
+    matches!(c, '-' | '\u{2010}'..='\u{2015}' | '\u{2212}')
 }
 
 impl std::fmt::Debug for SecretKey {
@@ -126,6 +138,22 @@ mod tests {
         let sloppy = shown.to_lowercase().replace('1', "l").replace('0', "o");
         let (_, key) = SecretKey::parse(&sloppy).unwrap();
         assert_eq!(key.as_bytes(), sample().as_bytes());
+    }
+
+    #[test]
+    fn parse_ignores_unicode_whitespace_and_dashes() {
+        let shown = sample().display("A3K7");
+        let fancy = shown
+            .replacen('-', "\u{2010}", 1)
+            .replacen('-', "\u{2013}", 1)
+            .replacen('-', "\u{2212}", 1)
+            .replacen('-', "\u{a0}", 1)
+            .replacen('-', "\u{2003}", 1);
+        let (id, key) = SecretKey::parse(&format!("  {fancy}\n")).unwrap();
+        assert_eq!(id, "A3K7");
+        assert_eq!(key.as_bytes(), sample().as_bytes());
+        // Other non-ASCII characters are still errors.
+        assert!(SecretKey::parse(&shown.replacen('A', "\u{410}", 1)).is_err());
     }
 
     #[test]

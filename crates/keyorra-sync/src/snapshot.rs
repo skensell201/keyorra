@@ -2,26 +2,36 @@
 //! A1c; here the body is any CBOR value).
 //!
 //! ```text
-//! snapshot = "KYP1" ‖ collection:u8 ‖ author:16 ‖ nonce:24
+//! snapshot = "KYP1" ‖ collection:u8 ‖ author:16
 //!            ‖ XChaCha20-Poly1305(K_seg, nonce, pad(canonical(payload)), aad = header ‖ nonce)
+//!            (the sealed output starts with the nonce)
 //! payload  = { "body": …, "sig": Ed25519(author key, "keyorra/sync/v1/snapshot\0" ‖ header ‖ canonical(body)) }
 //! name     = lowercase hex SHA-256 of the whole snapshot
 //! ```
 
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use keyorra_core::crypto::{self, Key, NONCE_LEN};
+use rand::{CryptoRng, RngCore};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::cbor::{self, Value};
 use crate::error::{malformed, Error, Result};
 use crate::labels::{self, tagged};
-use crate::pad::{pad, unpad};
+use crate::nonce::{self, Replay};
+use crate::pad::{pad, padded_len, unpad};
 use crate::segment::ACCOUNT_COLLECTION;
 use crate::DeviceId;
 
 pub const MAGIC: &[u8; 4] = b"KYP1";
 pub const HEADER_LEN: usize = 4 + 1 + 16;
+/// Cap on the canonical size of a snapshot body.
+pub const MAX_BODY_LEN: usize = 64 * 1024 * 1024;
+
+/// Largest valid sealed snapshot: header, nonce, padded payload, tag.
+pub fn max_snapshot_len() -> usize {
+    HEADER_LEN + NONCE_LEN + padded_len(MAX_BODY_LEN + 128) + 16
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SnapshotHeader {
@@ -52,8 +62,8 @@ impl SnapshotHeader {
     }
 }
 
-fn signed_message(header: &[u8; HEADER_LEN], body: &Value) -> Vec<u8> {
-    tagged(labels::SNAPSHOT, &[header, &cbor::encode(body)])
+fn signed_message(header: &[u8; HEADER_LEN], body: &Value) -> Zeroizing<Vec<u8>> {
+    Zeroizing::new(tagged(labels::SNAPSHOT, &[header, &cbor::encode(body)]))
 }
 
 fn aad(header: &[u8; HEADER_LEN], nonce: &[u8; NONCE_LEN]) -> Vec<u8> {
@@ -67,26 +77,31 @@ pub fn seal_snapshot(
     signer: &SigningKey,
     author: DeviceId,
     body: Value,
-    nonce: &[u8; NONCE_LEN],
-) -> Vec<u8> {
+    rng: &mut (impl RngCore + CryptoRng),
+) -> Result<Vec<u8>> {
+    if cbor::encode(&body).len() > MAX_BODY_LEN {
+        return Err(malformed("snapshot too large"));
+    }
     let header = SnapshotHeader {
         collection: ACCOUNT_COLLECTION,
         author,
     }
     .to_bytes();
     let sig = signer.sign(&signed_message(&header, &body)).to_bytes();
-    let payload = Zeroizing::new(pad(&cbor::encode(&Value::map(vec![
+    let encoded = Zeroizing::new(cbor::encode(&Value::map(vec![
         ("body", body),
         ("sig", Value::bytes(sig)),
-    ]))));
+    ])));
+    let payload = Zeroizing::new(pad(&encoded));
+    let nonce = nonce::draw(rng);
     let mut out = header.to_vec();
-    out.extend_from_slice(&crypto::seal_with_nonce(
+    out.extend_from_slice(&crypto::seal_with_rng(
         segment_key,
-        nonce,
+        &mut Replay(nonce),
         &payload,
-        &aad(&header, nonce),
+        &aad(&header, &nonce),
     ));
-    out
+    Ok(out)
 }
 
 pub fn open_snapshot(
@@ -94,6 +109,9 @@ pub fn open_snapshot(
     author: &VerifyingKey,
     snapshot: &[u8],
 ) -> Result<(SnapshotHeader, Value)> {
+    if snapshot.len() > max_snapshot_len() {
+        return Err(malformed("snapshot larger than allowed"));
+    }
     let header = SnapshotHeader::parse(snapshot)?;
     let header_bytes = header.to_bytes();
     let sealed = &snapshot[HEADER_LEN..];
@@ -103,7 +121,11 @@ pub fn open_snapshot(
         .ok_or_else(|| malformed("snapshot nonce"))?;
     let padded = crypto::open(segment_key, sealed, &aad(&header_bytes, nonce))
         .map_err(|_| Error::Decrypt)?;
-    let payload = cbor::decode(unpad(&padded)?)?;
+    let content = unpad(&padded)?;
+    if content.len() > MAX_BODY_LEN + 128 {
+        return Err(malformed("snapshot payload larger than allowed"));
+    }
+    let payload = cbor::decode(content)?;
     let f = payload.fields(&["body", "sig"])?;
     let body = f.get("body")?;
     let sig: [u8; 64] = f.get("sig")?.as_array_of()?;
@@ -140,7 +162,14 @@ mod tests {
     }
 
     fn sealed() -> Vec<u8> {
-        seal_snapshot(&k_seg(), &signer(), AUTHOR, body(), &[0x55; NONCE_LEN])
+        seal_snapshot(
+            &k_seg(),
+            &signer(),
+            AUTHOR,
+            body(),
+            &mut crate::nonce::fixed([0x55; 24]),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -182,7 +211,7 @@ mod tests {
         }
         .to_bytes();
         assert_ne!(
-            signed_message(&header, &body()),
+            *signed_message(&header, &body()),
             tagged(labels::SEGMENT, &[&header, &cbor::encode(&body())])
         );
     }
@@ -191,5 +220,15 @@ mod tests {
     fn name_is_stable() {
         assert_eq!(snapshot_name(&sealed()), snapshot_name(&sealed()));
         assert_eq!(snapshot_name(&sealed()).len(), 64);
+    }
+
+    #[test]
+    fn oversized_snapshots_are_rejected_before_decrypting() {
+        let mut huge = sealed();
+        huge.resize(max_snapshot_len() + 1, 0);
+        assert!(matches!(
+            open_snapshot(&k_seg(), &signer().verifying_key(), &huge),
+            Err(Error::Malformed(_))
+        ));
     }
 }

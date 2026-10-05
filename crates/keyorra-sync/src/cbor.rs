@@ -9,6 +9,10 @@
 use crate::error::{malformed, Result};
 
 const MAX_DEPTH: usize = 32;
+/// Containers never reserve more than this many elements up front, whatever length they
+/// claim: the claim is bounded by the input size, but an element is much larger than the
+/// byte that announces it.
+const MAX_PREALLOC: usize = 1024;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Value {
@@ -182,6 +186,15 @@ fn write(value: &Value, out: &mut Vec<u8>) {
     }
 }
 
+/// [`decode`] for input from an unauthenticated source: input longer than `max_len` bytes is
+/// refused before any parsing.
+pub fn decode_limited(bytes: &[u8], max_len: usize) -> Result<Value> {
+    if bytes.len() > max_len {
+        return Err(malformed("CBOR input larger than allowed"));
+    }
+    decode(bytes)
+}
+
 /// Decodes exactly one canonical value; trailing bytes are an error.
 pub fn decode(bytes: &[u8]) -> Result<Value> {
     let mut reader = Reader { bytes, pos: 0 };
@@ -275,7 +288,7 @@ impl Reader<'_> {
             }
             4 => {
                 let len = self.len(n)?;
-                let mut items = Vec::with_capacity(len);
+                let mut items = Vec::with_capacity(len.min(MAX_PREALLOC));
                 for _ in 0..len {
                     items.push(self.value(depth + 1)?);
                 }
@@ -283,7 +296,7 @@ impl Reader<'_> {
             }
             5 => {
                 let len = self.len(n)?;
-                let mut entries = Vec::with_capacity(len);
+                let mut entries = Vec::with_capacity(len.min(MAX_PREALLOC));
                 let mut last_key: Option<&[u8]> = None;
                 for _ in 0..len {
                     let start = self.pos;
@@ -418,6 +431,36 @@ mod tests {
         let mut bytes = vec![0x81; 40];
         bytes.push(0x00);
         assert!(matches!(decode(&bytes), Err(Error::Malformed(_))));
+    }
+
+    #[test]
+    fn length_bombs_do_not_reserve_memory_or_pass() {
+        // 30 nested arrays, each claiming as many elements as there are bytes left, then
+        // nothing to back the claims.
+        let total = 200_000usize;
+        let mut bytes = Vec::new();
+        for _ in 0..30 {
+            let left = (total - bytes.len() - 5) as u32;
+            bytes.push(0x9a);
+            bytes.extend_from_slice(&left.to_be_bytes());
+        }
+        bytes.resize(total, 0x80);
+        assert!(matches!(decode(&bytes), Err(Error::Malformed(_))));
+        // The same for a map and for a huge byte string claim.
+        let mut map = vec![0xba];
+        map.extend_from_slice(&1_000_000u32.to_be_bytes());
+        map.resize(1_000_005, 0);
+        assert!(matches!(decode(&map), Err(Error::Malformed(_))));
+    }
+
+    #[test]
+    fn limited_decode_refuses_oversized_input_up_front() {
+        let ok = vec![0x80];
+        assert!(decode_limited(&ok, 1).is_ok());
+        assert!(matches!(
+            decode_limited(&[0x82, 0, 0], 2),
+            Err(Error::Malformed(_))
+        ));
     }
 
     #[test]

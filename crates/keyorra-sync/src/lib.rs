@@ -9,6 +9,7 @@ pub mod error;
 pub mod header;
 pub mod keys;
 pub mod labels;
+mod nonce;
 pub mod pad;
 pub mod secret_key;
 pub mod segment;

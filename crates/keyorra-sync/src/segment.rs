@@ -1,7 +1,8 @@
 //! Log segments: immutable, signed, hash-chained batches of one device's entries.
 //!
 //! ```text
-//! segment = header ‖ nonce:24 ‖ XChaCha20-Poly1305(K_seg, nonce, pad(canonical(payload)), aad = header ‖ nonce)
+//! segment = header ‖ XChaCha20-Poly1305(K_seg, nonce, pad(canonical(payload)), aad = header ‖ nonce)
+//!           (the sealed output starts with the nonce)
 //! header  = "KYS1" ‖ collection:u8 ‖ device_id:16 ‖ first_seq:u64 ‖ last_seq:u64 ‖ prev_hash:32 ‖ last_hash:32
 //! payload = { "entries": [entry…], "sig": Ed25519(device key, "keyorra/sync/v1/segment\0" ‖ header ‖ canonical(entries)) }
 //! chain_0 = SHA-256("keyorra/sync/v1/chain-genesis\0" ‖ account_id ‖ device_id)
@@ -14,13 +15,15 @@
 
 use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use keyorra_core::crypto::{self, Key, NONCE_LEN};
+use rand::{CryptoRng, RngCore};
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
 use crate::cbor::{self, Value};
 use crate::error::{malformed, Error, Result};
 use crate::labels::{self, tagged};
-use crate::pad::{pad, unpad};
+use crate::nonce::{self, Replay};
+use crate::pad::{pad, padded_len, unpad};
 use crate::{AccountId, DeviceId};
 
 pub const MAGIC: &[u8; 4] = b"KYS1";
@@ -29,6 +32,12 @@ pub const HEADER_LEN: usize = 4 + 1 + 16 + 8 + 8 + 32 + 32;
 pub const ACCOUNT_COLLECTION: u8 = 0;
 /// Cap on the canonical size of a segment's entries; larger rounds become several segments.
 pub const MAX_ENTRIES_LEN: usize = 4 * 1024 * 1024;
+
+/// Largest valid sealed segment: header, nonce, padded payload (entries plus signature
+/// framing), tag. Anything longer is rejected before it is parsed or decrypted.
+pub fn max_segment_len() -> usize {
+    HEADER_LEN + NONCE_LEN + padded_len(MAX_ENTRIES_LEN + 128) + 16
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SegmentHeader {
@@ -54,7 +63,13 @@ impl SegmentHeader {
     }
 
     /// Reads the plaintext header of a segment. Needs no key (a server uses this).
+    ///
+    /// The header is unauthenticated: `prev_hash` of a stream's first segment must equal
+    /// [`chain_genesis`], which is checked by the stream logic of plan A1c, not here.
     pub fn parse(segment: &[u8]) -> Result<SegmentHeader> {
+        if segment.len() > max_segment_len() {
+            return Err(malformed("segment larger than allowed"));
+        }
         if segment.len() < HEADER_LEN || &segment[..4] != MAGIC {
             return Err(malformed("segment header"));
         }
@@ -96,8 +111,8 @@ pub fn chain(prev: &[u8; 32], entries: &[Value]) -> [u8; 32] {
     entries.iter().fold(*prev, |h, e| chain_next(&h, e))
 }
 
-fn signed_message(header: &[u8; HEADER_LEN], entries: &Value) -> Vec<u8> {
-    tagged(labels::SEGMENT, &[header, &cbor::encode(entries)])
+fn signed_message(header: &[u8; HEADER_LEN], entries: &Value) -> Zeroizing<Vec<u8>> {
+    Zeroizing::new(tagged(labels::SEGMENT, &[header, &cbor::encode(entries)]))
 }
 
 fn aad(header: &[u8; HEADER_LEN], nonce: &[u8; NONCE_LEN]) -> Vec<u8> {
@@ -127,16 +142,20 @@ pub fn seal_segment(
     signer: &SigningKey,
     at: &StreamPosition,
     entries: Vec<Value>,
-    nonce: &[u8; NONCE_LEN],
+    rng: &mut (impl RngCore + CryptoRng),
 ) -> Result<Vec<u8>> {
     if entries.is_empty() || at.first_seq == 0 {
         return Err(malformed("empty segment or seq 0"));
     }
+    let last_seq = at
+        .first_seq
+        .checked_add(entries.len() as u64 - 1)
+        .ok_or_else(|| malformed("segment sequence numbers overflow"))?;
     let header = SegmentHeader {
         collection: ACCOUNT_COLLECTION,
         device_id: at.device_id,
         first_seq: at.first_seq,
-        last_seq: at.first_seq + entries.len() as u64 - 1,
+        last_seq,
         prev_hash: at.prev_hash,
         last_hash: chain(&at.prev_hash, &entries),
     }
@@ -146,16 +165,18 @@ pub fn seal_segment(
         return Err(malformed("segment too large"));
     }
     let sig = signer.sign(&signed_message(&header, &entries)).to_bytes();
-    let payload = Zeroizing::new(pad(&cbor::encode(&Value::map(vec![
+    let encoded = Zeroizing::new(cbor::encode(&Value::map(vec![
         ("entries", entries),
         ("sig", Value::bytes(sig)),
-    ]))));
+    ])));
+    let payload = Zeroizing::new(pad(&encoded));
+    let nonce = nonce::draw(rng);
     let mut out = header.to_vec();
-    out.extend_from_slice(&crypto::seal_with_nonce(
+    out.extend_from_slice(&crypto::seal_with_rng(
         segment_key,
-        nonce,
+        &mut Replay(nonce),
         &payload,
-        &aad(&header, nonce),
+        &aad(&header, &nonce),
     ));
     Ok(out)
 }
@@ -171,7 +192,11 @@ pub fn open_segment(segment_key: &Key, author: &VerifyingKey, segment: &[u8]) ->
         .ok_or_else(|| malformed("segment nonce"))?;
     let padded = crypto::open(segment_key, sealed, &aad(&header_bytes, nonce))
         .map_err(|_| Error::Decrypt)?;
-    let payload = cbor::decode(unpad(&padded)?)?;
+    let content = unpad(&padded)?;
+    if content.len() > MAX_ENTRIES_LEN + 128 {
+        return Err(malformed("segment payload larger than allowed"));
+    }
+    let payload = cbor::decode(content)?;
     let f = payload.fields(&["entries", "sig"])?;
     let entries_value = f.get("entries")?;
     let sig: [u8; 64] = f.get("sig")?.as_array_of()?;
@@ -181,6 +206,9 @@ pub fn open_segment(segment_key: &Key, author: &VerifyingKey, segment: &[u8]) ->
             &Signature::from_bytes(&sig),
         )
         .map_err(|_| Error::BadSignature)?;
+    if cbor::encode(entries_value).len() > MAX_ENTRIES_LEN {
+        return Err(malformed("segment too large"));
+    }
     let entries = entries_value.as_list()?.to_vec();
     if entries.len() as u64 != header.entry_count() {
         return Err(malformed("segment entry count"));
@@ -219,7 +247,14 @@ mod tests {
     }
 
     fn sealed() -> Vec<u8> {
-        seal_segment(&k_seg(), &signer(), &start(), entries(), &[0x53; NONCE_LEN]).unwrap()
+        seal_segment(
+            &k_seg(),
+            &signer(),
+            &start(),
+            entries(),
+            &mut crate::nonce::fixed([0x53; 24]),
+        )
+        .unwrap()
     }
 
     #[test]
@@ -246,7 +281,7 @@ mod tests {
             &signer(),
             &next_at,
             vec![Value::Null],
-            &[0x54; NONCE_LEN],
+            &mut crate::nonce::fixed([0x54; 24]),
         )
         .unwrap();
         let next = open_segment(&k_seg(), &signer().verifying_key(), &next).unwrap();
@@ -319,17 +354,60 @@ mod tests {
     #[test]
     fn refuses_empty_segments_and_seq_zero() {
         let k = k_seg();
-        assert!(seal_segment(&k, &signer(), &start(), vec![], &[0; NONCE_LEN]).is_err());
+        assert!(seal_segment(
+            &k,
+            &signer(),
+            &start(),
+            vec![],
+            &mut crate::nonce::fixed([0; 24])
+        )
+        .is_err());
         let zero = StreamPosition {
             first_seq: 0,
             ..start()
         };
-        assert!(seal_segment(&k, &signer(), &zero, entries(), &[0; NONCE_LEN]).is_err());
+        assert!(seal_segment(
+            &k,
+            &signer(),
+            &zero,
+            entries(),
+            &mut crate::nonce::fixed([0; 24])
+        )
+        .is_err());
     }
 
     #[test]
     fn size_is_padded() {
         let len = sealed().len();
         assert_eq!(len, HEADER_LEN + NONCE_LEN + 1024 + 16);
+    }
+
+    #[test]
+    fn sequence_overflow_and_oversized_input_are_rejected() {
+        let k = k_seg();
+        let at = StreamPosition {
+            first_seq: u64::MAX,
+            ..start()
+        };
+        assert!(matches!(
+            seal_segment(
+                &k,
+                &signer(),
+                &at,
+                entries(),
+                &mut crate::nonce::fixed([0; 24])
+            ),
+            Err(Error::Malformed(_))
+        ));
+        let mut huge = sealed();
+        huge.resize(max_segment_len() + 1, 0);
+        assert!(matches!(
+            SegmentHeader::parse(&huge),
+            Err(Error::Malformed(_))
+        ));
+        assert!(matches!(
+            open_segment(&k, &signer().verifying_key(), &huge),
+            Err(Error::Malformed(_))
+        ));
     }
 }

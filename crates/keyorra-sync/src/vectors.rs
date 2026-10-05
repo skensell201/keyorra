@@ -15,6 +15,7 @@ use crate::chunk::{chunk_name, seal_chunk, ChunkPlace};
 use crate::envelope::{Envelope, RecordKind, Version};
 use crate::header::{wrap_account_key, Header, HeaderFile};
 use crate::keys::{derive_sync_keys, segment_key};
+use crate::nonce::fixed;
 use crate::pad::padme;
 use crate::secret_key::SecretKey;
 use crate::segment::{chain_genesis, seal_segment, StreamPosition};
@@ -83,7 +84,7 @@ pub(crate) fn compute() -> BTreeMap<String, String> {
     let k_seg = segment_key(&account_key, &account_id);
     put("keys.segment_key", hex(k_seg.as_bytes()));
 
-    let header = Header {
+    let mut header = Header {
         account_id,
         epoch: 1,
         generation: 1,
@@ -91,15 +92,14 @@ pub(crate) fn compute() -> BTreeMap<String, String> {
         kdf: KDF,
         salt,
         secret_key_id: "A3K7".into(),
-        wrapped_account_key: wrap_account_key(
-            &keys.kek,
-            &account_key,
-            &account_id,
-            1,
-            1,
-            &seq::<NONCE_LEN>(0x60),
-        ),
+        wrapped_account_key: vec![],
     };
+    header.wrapped_account_key = wrap_account_key(
+        &keys.kek,
+        &account_key,
+        &header,
+        &mut fixed(seq::<NONCE_LEN>(0x60)),
+    );
     let file = HeaderFile::sign(header, device_id, &device_key);
     put("header.file", hex(&file.encode()));
     put("header.file_name", file.file_name());
@@ -122,7 +122,7 @@ pub(crate) fn compute() -> BTreeMap<String, String> {
         &vault_key,
         &account_id,
         br#"{"title":"GitHub"}"#,
-        &seq::<NONCE_LEN>(0x80),
+        &mut fixed(seq::<NONCE_LEN>(0x80)),
     );
     put("envelope.item", hex(&cbor::encode(&item.to_value())));
     put("envelope.item.header_hash", hex(&item.header_hash()));
@@ -138,7 +138,7 @@ pub(crate) fn compute() -> BTreeMap<String, String> {
         &attachment_key,
         &place,
         b"attachment bytes",
-        &seq::<NONCE_LEN>(0xa0),
+        &mut fixed(seq::<NONCE_LEN>(0xa0)),
     )
     .unwrap();
     put("chunk", hex(&chunk));
@@ -152,7 +152,14 @@ pub(crate) fn compute() -> BTreeMap<String, String> {
         prev_hash: genesis,
     };
     let entries = vec![Value::map(vec![("put", item.to_value())])];
-    let segment = seal_segment(&k_seg, &device_key, &at, entries, &seq::<NONCE_LEN>(0xc0)).unwrap();
+    let segment = seal_segment(
+        &k_seg,
+        &device_key,
+        &at,
+        entries,
+        &mut fixed(seq::<NONCE_LEN>(0xc0)),
+    )
+    .unwrap();
     put("segment", hex(&segment));
 
     let body = Value::map(vec![("records", Value::Array(vec![item.to_value()]))]);
@@ -161,8 +168,9 @@ pub(crate) fn compute() -> BTreeMap<String, String> {
         &device_key,
         device_id,
         body,
-        &seq::<NONCE_LEN>(0xe8),
-    );
+        &mut fixed(seq::<NONCE_LEN>(0xe8)),
+    )
+    .unwrap();
     put("snapshot", hex(&snapshot));
     put("snapshot.name", snapshot_name(&snapshot));
 
@@ -203,7 +211,7 @@ fn vectors_open_again() {
     let device = SigningKey::from_bytes(&seq::<32>(0x40)).verifying_key();
     file.verify(&device).unwrap();
     let secret = SecretKey::parse(&v["secret_key.display"]).unwrap().1;
-    let (ak, _) = file.header.unlock(PASSWORD, &secret).unwrap();
+    let (ak, _) = file.header.unlock_cheap(PASSWORD, &secret).unwrap();
     assert_eq!(hex(ak.as_bytes()), v["in.account_key"]);
     let k_seg = segment_key(&ak, &file.header.account_id);
     let segment = open_segment(&k_seg, &device, &unhex("segment")).unwrap();

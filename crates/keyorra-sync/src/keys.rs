@@ -11,7 +11,7 @@
 use hkdf::Hkdf;
 use keyorra_core::crypto::{derive_kek, KdfParams, Key};
 use sha2::Sha256;
-use zeroize::Zeroizing;
+use zeroize::{Zeroize, Zeroizing};
 
 use crate::error::{malformed, Result};
 use crate::labels::{self, tagged};
@@ -25,11 +25,30 @@ pub const MAX_REMOTE_M_KIB: u32 = 1024 * 1024;
 pub const MAX_REMOTE_T: u32 = 10;
 pub const MAX_REMOTE_P: u32 = 4;
 
-pub fn check_remote_kdf(kdf: &KdfParams) -> Result<()> {
+/// Floor for KDF parameters read from a synced header: the app's own default minimum. Without
+/// it, whoever can write the folder or server could replace the header by one with a trivial
+/// KDF and brute-force the password offline from the (public) wrapped key.
+pub const MIN_REMOTE_M_KIB: u32 = 64 * 1024;
+pub const MIN_REMOTE_T: u32 = 2;
+
+/// Upper bounds only (`validate` plus the remote maxima). Used where the caller chose the
+/// parameters itself, e.g. when creating an account or in tests with cheap parameters.
+fn check_kdf_ceiling(kdf: &KdfParams) -> Result<()> {
     kdf.validate()?;
     if kdf.m_kib > MAX_REMOTE_M_KIB || kdf.t > MAX_REMOTE_T || kdf.p > MAX_REMOTE_P {
         return Err(malformed(
             "kdf parameters out of bounds for a synced header",
+        ));
+    }
+    Ok(())
+}
+
+/// Full check for parameters that come from a synced header: ceiling and floor.
+pub fn check_remote_kdf(kdf: &KdfParams) -> Result<()> {
+    check_kdf_ceiling(kdf)?;
+    if kdf.m_kib < MIN_REMOTE_M_KIB || kdf.t < MIN_REMOTE_T {
+        return Err(malformed(
+            "kdf parameters below the minimum for a synced header",
         ));
     }
     Ok(())
@@ -50,9 +69,9 @@ pub fn derive_sync_keys(
     secret_key: &SecretKey,
     account_id: &AccountId,
 ) -> Result<SyncKeys> {
-    check_remote_kdf(&kdf)?;
+    check_kdf_ceiling(&kdf)?;
     let u = derive_kek(password, salt, kdf)?;
-    let hk = Hkdf::<Sha256>::new(Some(secret_key.as_bytes()), u.as_bytes());
+    let hk = extract(Some(secret_key.as_bytes()), u.as_bytes());
     Ok(SyncKeys {
         kek: expand(&hk, &tagged(labels::KEK, &[account_id])),
         auth: expand(&hk, &tagged(labels::SERVER_AUTH, &[account_id])),
@@ -61,8 +80,16 @@ pub fn derive_sync_keys(
 
 /// The key that seals segments and snapshots of one account.
 pub fn segment_key(account_key: &Key, account_id: &AccountId) -> Key {
-    let hk = Hkdf::<Sha256>::new(Some(account_id), account_key.as_bytes());
+    let hk = extract(Some(account_id), account_key.as_bytes());
     expand(&hk, &tagged(labels::SEGMENT_KEY, &[]))
+}
+
+/// `HKDF-Extract`, wiping the returned PRK copy. (The `Hkdf` value keeps its own keyed state
+/// until dropped; the crate offers no way to wipe that.)
+fn extract(salt: Option<&[u8]>, ikm: &[u8]) -> Hkdf<Sha256> {
+    let (mut prk, hk) = Hkdf::<Sha256>::extract(salt, ikm);
+    prk.as_mut_slice().zeroize();
+    hk
 }
 
 fn expand(hk: &Hkdf<Sha256>, info: &[u8]) -> Key {
@@ -151,6 +178,29 @@ mod tests {
         }
         assert!(start.elapsed().as_secs() < 2);
         assert!(check_remote_kdf(&KdfParams::DEFAULT).is_ok());
+    }
+
+    #[test]
+    fn remote_kdf_floor_is_enforced_for_headers_but_not_for_local_derivation() {
+        assert!(check_remote_kdf(&KdfParams::DEFAULT).is_ok());
+        for weak in [
+            KdfParams {
+                m_kib: MIN_REMOTE_M_KIB - 1,
+                ..KdfParams::DEFAULT
+            },
+            KdfParams {
+                t: MIN_REMOTE_T - 1,
+                ..KdfParams::DEFAULT
+            },
+            FAST,
+        ] {
+            assert!(
+                matches!(check_remote_kdf(&weak), Err(Error::Malformed(_))),
+                "{weak:?}"
+            );
+        }
+        // Deriving with cheap parameters the caller chose itself still works (vectors, tests).
+        assert!(derive_sync_keys("pw", &SALT, FAST, &sk(1), &ACCOUNT).is_ok());
     }
 
     #[test]

@@ -81,7 +81,10 @@ K_seg    = HKDF(salt = account_id, ikm = AK, info = "keyorra/sync/v1/segment-key
 ```
 
 KDF parameters read from a header must satisfy, before Argon2 runs: `m ≤ 1048576` KiB,
-`1 ≤ t ≤ 10`, `1 ≤ p ≤ 4` (and Argon2's own minimum `m ≥ 8p`).
+`1 ≤ p ≤ 4`, `t ≤ 10`, and (floor) `m ≥ 65536` KiB and `t ≥ 2`, the app's own minimum:
+weaker parameters would let whoever writes the folder or server brute-force the password offline
+from the public wrapped key. Argon2's own minimum `m ≥ 8p` also applies. The ceiling is checked
+whenever keys are derived; the floor when a header read from storage is unlocked.
 
 ## 6. Account header
 
@@ -90,11 +93,18 @@ Header = { "keyorra_sync": 1, "account_id": bytes16, "epoch": uint32, "generatio
            "root_device": bytes16, "kdf": { "m_kib", "t", "p" }, "salt": bytes16,
            "secret_key_id": text(4), "wrapped_account_key": bytes }
 wrapped_account_key = XChaCha20-Poly1305(KEK_sync, nonce, AK,
-                        aad = "keyorra/sync/v1/account-key\0" ‖ account_id ‖ epoch:u32 ‖ generation:u32)
+                        aad = "keyorra/sync/v1/account-key\0" ‖ binding)       exactly 72 bytes
+binding    = SHA-256(canonical(Header with wrapped_account_key = empty bytes))
 HeaderFile = { "header": Header, "author": bytes16, "sig": bytes64 }
-sig        = Ed25519(author key, "keyorra/sync/v1/header\0" ‖ canonical(Header))
+sig        = Ed25519(author key, "keyorra/sync/v1/header\0" ‖ author:16 ‖ canonical(Header))
 file name  = hex8(epoch) ‖ "-" ‖ hex(author) ‖ ".hdr"
 ```
+
+`binding` ties the wrapped key to account, epoch, generation, root device, KDF parameters, salt
+and Secret Key id, so a header cannot be recombined from parts. `secret_key_id` is 4 characters
+of the Secret Key alphabet. A header read from storage is untrusted until its signature has been
+verified with a key the trust rules (section 10) accept; unlocking it first is allowed but its
+result must not be used before that. A header file is at most 16 KiB.
 
 A `keyorra_sync` value other than 1 is "unsupported", not "malformed". Which header counts
 (highest epoch, matching log entry, tie-breaks) is defined in section 10.
@@ -114,7 +124,7 @@ body (vault) = the plaintext payload (protected by the segment layer)
 ```
 
 Rules: `tombstone` is true exactly when `body` is null; `item` and `attachment` envelopes
-have a `vault_id`. Unknown `format` or `kind`: unsupported (kept, not interpreted). The
+have a `vault_id`, `vault` envelopes have none (`vault_id` is null). Unknown `format` or `kind`: unsupported (kept, not interpreted). The
 payload contents and the merge rules are defined in section 9.
 
 ## 8. Framing: chunks, segments, snapshots
@@ -127,28 +137,38 @@ chunk = "KYC1" ‖ XChaCha20-Poly1305(attachment key, nonce, pad(data),
 name  = hex(SHA-256(chunk))
 ```
 
+In the formats below, `XChaCha20-Poly1305(...)` denotes the sealed output of section 1, which
+begins with the 24-byte nonce; there is no separate nonce field. Nonces are drawn fresh from a
+CSPRNG for every seal.
+
 **Segment.**
 
 ```
 header  = "KYS1" ‖ collection:u8 (= 0) ‖ device_id:16 ‖ first_seq:u64 ‖ last_seq:u64 ‖ prev_hash:32 ‖ last_hash:32
-segment = header ‖ nonce:24 ‖ XChaCha20-Poly1305(K_seg, nonce, pad(canonical(payload)), aad = header ‖ nonce)
+segment = header ‖ XChaCha20-Poly1305(K_seg, nonce, pad(canonical(payload)), aad = header ‖ nonce)
 payload = { "entries": [entry, …], "sig": Ed25519(device key, "keyorra/sync/v1/segment\0" ‖ header ‖ canonical(entries)) }
 chain_0 = SHA-256("keyorra/sync/v1/chain-genesis\0" ‖ account_id ‖ device_id)
 chain_n = SHA-256("keyorra/sync/v1/chain\0" ‖ chain_{n−1} ‖ canonical(entry_n))
 ```
 
 `first_seq ≥ 1`; the entry count equals `last_seq − first_seq + 1`; `last_hash` is the chain
-over the entries starting from `prev_hash`; the canonical entries are at most 4 MiB. A
+over the entries starting from `prev_hash`; the canonical entries are at most 4 MiB and the
+whole segment at most the padded size of that plus framing (checked before parsing or
+decrypting); `first_seq + count − 1` must not overflow. That the first segment of a stream
+starts from `chain_0` is checked by the stream rules (section 10), not by the framing. A
 non-zero collection is unsupported in version 1 (reserved for shared vaults).
 
 **Snapshot.**
 
 ```
 header   = "KYP1" ‖ collection:u8 (= 0) ‖ author:16
-snapshot = header ‖ nonce:24 ‖ XChaCha20-Poly1305(K_seg, nonce, pad(canonical(payload)), aad = header ‖ nonce)
+snapshot = header ‖ XChaCha20-Poly1305(K_seg, nonce, pad(canonical(payload)), aad = header ‖ nonce)
 payload  = { "body": …, "sig": Ed25519(author key, "keyorra/sync/v1/snapshot\0" ‖ header ‖ canonical(body)) }
 name     = hex(SHA-256(snapshot))
 ```
+
+The canonical snapshot body is at most 64 MiB; the sealed snapshot is length-checked before
+decryption. A chunk longer than the padded size of 4 MiB is rejected before decryption.
 
 ## 9. Fold and presentation
 

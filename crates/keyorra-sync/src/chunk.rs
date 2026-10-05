@@ -7,13 +7,14 @@
 //! the blob's name is the lowercase hex SHA-256 of the whole chunk.
 
 use keyorra_core::crypto::{self, Key, NONCE_LEN};
+use rand::{CryptoRng, RngCore};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
 use crate::error::{malformed, Error, Result};
 use crate::labels::{self, tagged};
-use crate::pad::{pad, unpad};
+use crate::pad::{pad, padded_len, unpad};
 use crate::AccountId;
 
 pub const MAGIC: &[u8; 4] = b"KYC1";
@@ -46,7 +47,7 @@ pub fn seal_chunk(
     attachment_key: &Key,
     place: &ChunkPlace,
     data: &[u8],
-    nonce: &[u8; NONCE_LEN],
+    rng: &mut (impl RngCore + CryptoRng),
 ) -> Result<Vec<u8>> {
     if data.len() > MAX_CHUNK {
         return Err(malformed("chunk larger than 4 MiB"));
@@ -56,9 +57,9 @@ pub fn seal_chunk(
     }
     let padded = Zeroizing::new(pad(data));
     let mut out = MAGIC.to_vec();
-    out.extend_from_slice(&crypto::seal_with_nonce(
+    out.extend_from_slice(&crypto::seal_with_rng(
         attachment_key,
-        nonce,
+        rng,
         &padded,
         &place.aad(),
     ));
@@ -70,11 +71,19 @@ pub fn open_chunk(
     place: &ChunkPlace,
     chunk: &[u8],
 ) -> Result<Zeroizing<Vec<u8>>> {
+    // Checked before any decryption: a chunk comes from untrusted storage.
+    if chunk.len() > MAGIC.len() + NONCE_LEN + padded_len(MAX_CHUNK) + 16 {
+        return Err(malformed("chunk larger than allowed"));
+    }
     let sealed = chunk
         .strip_prefix(MAGIC)
         .ok_or_else(|| malformed("chunk magic"))?;
     let padded = crypto::open(attachment_key, sealed, &place.aad()).map_err(|_| Error::Decrypt)?;
-    Ok(Zeroizing::new(unpad(&padded)?.to_vec()))
+    let data = unpad(&padded)?;
+    if data.len() > MAX_CHUNK {
+        return Err(malformed("chunk larger than 4 MiB"));
+    }
+    Ok(Zeroizing::new(data.to_vec()))
 }
 
 /// The blob name: lowercase hex SHA-256 of the chunk bytes.
@@ -101,7 +110,13 @@ mod tests {
 
     #[test]
     fn round_trip_and_padding() {
-        let chunk = seal_chunk(&key(), &place(), b"hello", &[0x52; NONCE_LEN]).unwrap();
+        let chunk = seal_chunk(
+            &key(),
+            &place(),
+            b"hello",
+            &mut crate::nonce::fixed([0x52; 24]),
+        )
+        .unwrap();
         assert!(chunk.starts_with(MAGIC));
         assert_eq!(chunk.len(), 4 + NONCE_LEN + 1024 + 16);
         assert_eq!(&*open_chunk(&key(), &place(), &chunk).unwrap(), b"hello");
@@ -109,7 +124,13 @@ mod tests {
 
     #[test]
     fn bound_to_account_attachment_index_and_count() {
-        let chunk = seal_chunk(&key(), &place(), b"hello", &[0x52; NONCE_LEN]).unwrap();
+        let chunk = seal_chunk(
+            &key(),
+            &place(),
+            b"hello",
+            &mut crate::nonce::fixed([0x52; 24]),
+        )
+        .unwrap();
         for other in [
             ChunkPlace {
                 account_id: [0x11; 16],
@@ -142,16 +163,27 @@ mod tests {
     #[test]
     fn rejects_oversized_bad_index_and_bad_magic() {
         let big = vec![0u8; MAX_CHUNK + 1];
-        assert!(seal_chunk(&key(), &place(), &big, &[0; NONCE_LEN]).is_err());
+        assert!(seal_chunk(&key(), &place(), &big, &mut crate::nonce::fixed([0; 24])).is_err());
         let bad = ChunkPlace {
             index: 2,
             ..place()
         };
-        assert!(seal_chunk(&key(), &bad, b"x", &[0; NONCE_LEN]).is_err());
-        let mut chunk = seal_chunk(&key(), &place(), b"x", &[0; NONCE_LEN]).unwrap();
+        assert!(seal_chunk(&key(), &bad, b"x", &mut crate::nonce::fixed([0; 24])).is_err());
+        let mut chunk =
+            seal_chunk(&key(), &place(), b"x", &mut crate::nonce::fixed([0; 24])).unwrap();
         chunk[0] = b'X';
         assert!(matches!(
             open_chunk(&key(), &place(), &chunk),
+            Err(Error::Malformed(_))
+        ));
+    }
+
+    #[test]
+    fn open_rejects_oversized_input_before_decrypting() {
+        let mut huge = MAGIC.to_vec();
+        huge.resize(MAGIC.len() + NONCE_LEN + padded_len(MAX_CHUNK) + 16 + 1, 0);
+        assert!(matches!(
+            open_chunk(&key(), &place(), &huge),
             Err(Error::Malformed(_))
         ));
     }

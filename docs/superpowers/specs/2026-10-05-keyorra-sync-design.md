@@ -161,6 +161,10 @@ a prefix, so no label is a prefix of another.
 | `KEK_sync` | HKDF-Expand(M, `keyorra/sync/v1/kek\0 ‖ account_id`, 32) | unwraps AK from the synced header |
 | `AUTH` | HKDF-Expand(M, `keyorra/sync/v1/server-auth\0 ‖ account_id`, 32) | server login (§6.3) |
 | `K_seg` | HKDF-SHA256(ikm = AK, salt = account_id, info = `keyorra/sync/v1/segment-key\0`) | segments and snapshots |
+
+KDF parameters read from a synced header are bounded on both sides before Argon2 runs: at most
+1 GiB, t = 10, p = 4, and at least the app's own minimum (64 MiB, t = 2); a weaker header would let
+whoever writes the folder or server brute-force the password offline.
 | vault key | existing, per vault | inner layer of item and attachment records |
 | attachment key | 32 random bytes per attachment | chunk blobs (§3.6) |
 | device key | Ed25519, per device, in the Keychain (§4.2) | signs segments, snapshots, headers, endorsements |
@@ -291,7 +295,7 @@ does not change.
 
 ```
 Envelope  = { format: 1, kind, record_id, vault_id?, schema, version, tombstone: bool, body: bytes? }
-body      = nonce:24 ‖ XChaCha20-Poly1305(vault_key, nonce, payload, body_aad)       // item, attachment
+body      = XChaCha20-Poly1305(vault_key, nonce, payload, body_aad)       // item, attachment; sealed output = nonce:24 ‖ ciphertext ‖ tag
 body_aad  = "keyorra/sync/v1/body\0" ‖ account_id ‖ SHA-256(canonical(Envelope with body = null))
 ```
 
@@ -303,7 +307,7 @@ by a holder of only the vault key.
 **Attachment chunks** (the only per-object blobs):
 
 ```
-chunk      = "KYC1" ‖ nonce:24 ‖ XChaCha20-Poly1305(att_key, nonce, pad(bytes), chunk_aad)
+chunk      = "KYC1" ‖ XChaCha20-Poly1305(att_key, nonce, pad(bytes), chunk_aad)   // sealed output starts with the nonce
 chunk_aad  = "keyorra/sync/v1/chunk\0" ‖ account_id ‖ attachment_id ‖ index:u32 ‖ count:u32
 name       = hex SHA-256(chunk)
 ```
@@ -344,8 +348,9 @@ chain_n = SHA-256("keyorra/sync/v1/chain\0" ‖ chain_{n-1} ‖ canonical(entry_
 
 ```
 segment = "KYS1" ‖ collection:u8 ‖ device_id:16 ‖ first_seq:u64 ‖ last_seq:u64
-          ‖ prev_hash:32 ‖ last_hash:32 ‖ nonce:24
+          ‖ prev_hash:32 ‖ last_hash:32
           ‖ XChaCha20-Poly1305(K_seg, nonce, pad(canonical({entries, sig})), aad = header ‖ nonce)
+          // the sealed output starts with the 24-byte nonce (no separate nonce field)
 sig     = Ed25519(device_sk, "keyorra/sync/v1/segment\0" ‖ all plaintext header bytes ‖ canonical(entries))
 ```
 
@@ -464,9 +469,10 @@ as standalone files, but they count only as signed log entries:
 ```
 Header       = { keyorra_sync: 1, account_id, epoch: u32, generation: u32, root_device,
                  kdf, salt, secret_key_id, wrapped_account_key }
-wrapped_account_key = seal(KEK_sync, AK, "keyorra/sync/v1/account-key\0" ‖ account_id ‖ epoch ‖ generation)
+wrapped_account_key = seal(KEK_sync, AK, "keyorra/sync/v1/account-key\0" ‖ SHA-256(canonical(header with empty wrapped_account_key)))
+                      // binds account_id, epoch, generation, root_device, kdf, salt and secret_key_id
 header file  = canonical({ header, author: DeviceId, sig })     // named <epoch:08x>-<author hex>.hdr
-sig          = Ed25519(author_sk, "keyorra/sync/v1/header\0" ‖ canonical(header))
+sig          = Ed25519(author_sk, "keyorra/sync/v1/header\0" ‖ author ‖ canonical(header))
 ```
 
 - The same `Header` must appear as an accepted `Header` entry in the author's stream; a
@@ -493,7 +499,7 @@ floor: {D -> seq}, devices (introductions, endorsements, revocations with their 
 signatures), current header, every sibling set (envelopes inline)}`, signed by the author
 (`keyorra/sync/v1/snapshot`), sealed with `K_seg`, padded, and referenced by a `Snapshot`
 entry in the author's stream so snapshots are themselves chained.
-Framing: `"KYP1" ‖ collection:u8 ‖ author:16 ‖ nonce:24 ‖ XChaCha20-Poly1305(K_seg, nonce,
+Framing: `"KYP1" ‖ collection:u8 ‖ author:16 ‖ XChaCha20-Poly1305(K_seg, nonce,
 pad(canonical({body, sig})), aad = header ‖ nonce)`, `sig = Ed25519(author_sk,
 "keyorra/sync/v1/snapshot\0" ‖ header ‖ canonical(body))`; the name is the SHA-256 of the
 bytes.
