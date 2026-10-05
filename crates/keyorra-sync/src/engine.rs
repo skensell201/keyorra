@@ -55,10 +55,12 @@ use crate::{AccountId, DeviceId};
 
 mod headers;
 mod outbox;
+mod resume;
 mod retire;
 mod snapshots;
 
 pub use outbox::{NoOutboxStore, OutboxState, OutboxStore};
+pub use resume::{EngineMemo, Resumed};
 pub use retire::{DeviceKeys, KeepKeys, RetireReason};
 pub use snapshots::{SNAPSHOT_EVERY_ENTRIES, SNAPSHOT_EVERY_MS};
 
@@ -436,6 +438,11 @@ pub struct Engine<R> {
     /// The main device's snapshots cover the own stream up to here: kept segments up to it
     /// are dropped once the store is seen holding them.
     own_covered: u64,
+    /// After a restart: the own stream is read again (up to the confirmed position) before
+    /// the queued own entries are applied and before anything new is written.
+    rebuilding: bool,
+    /// Heads received before a restart, compared once the streams are read again.
+    remembered_heads: Heads,
     /// The last outbox save failed: nothing is appended until one succeeds.
     outbox_unsaved: bool,
     bootstrap_tried: bool,
@@ -557,6 +564,8 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             revoked_since_snapshot: false,
             own_segments: BTreeMap::new(),
             outbox_unsaved: false,
+            rebuilding: false,
+            remembered_heads: Heads::new(),
             own_covered: 0,
             bootstrap_tried: false,
             root_head_written: (0, 0, 0, 0),
@@ -656,7 +665,9 @@ impl<R: RngCore + CryptoRng> Engine<R> {
     /// Whether this device's next entry would count: approved and not removed, or
     /// self-joined and not (yet) decided on (then it counts only here until approved).
     pub fn can_write(&self) -> bool {
-        self.trust.admits(&self.device, self.next_seq) && !self.approved_with_another_key()
+        !self.rebuilding
+            && self.trust.admits(&self.device, self.next_seq)
+            && !self.approved_with_another_key()
     }
 
     fn approved_with_another_key(&self) -> bool {
@@ -1019,6 +1030,24 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         Ok(id)
     }
 
+    /// Brings a vault of the local store into sync with its existing id and key (enabling
+    /// sync on a vault that already has data, plan A1d). Its id does not commit to its key
+    /// (spec §4.4), so the earliest admitted version whose key unwraps decides; new vaults
+    /// should be created with [`Engine::create_vault`].
+    pub fn adopt_vault(&mut self, id: Uuid, name: &str, key: &Key, wall_ms: u64) -> Result<()> {
+        if self.fold.contains(RecordKind::Vault, id) {
+            return Err(Error::Refused(format!("vault {id} is already synced")));
+        }
+        let wrapped_key = crypto::wrap_vault_key(&self.account_key, id, key);
+        self.unwrapped.insert(wrapped_key.clone(), key.clone());
+        let doc = Doc::Vault(VaultPayload {
+            name: name.to_owned(),
+            wrapped_key,
+            deleted: false,
+        });
+        self.write(RecordKind::Vault, id, None, doc, wall_ms)
+    }
+
     pub fn rename_vault(&mut self, id: Uuid, name: &str, wall_ms: u64) -> Result<()> {
         let mut p = self.vault_payload(id)?;
         p.name = name.to_owned();
@@ -1359,7 +1388,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
     }
 
     fn pull(&mut self, transport: &impl Transport, wall_ms: u64) -> Result<()> {
-        let streams: Vec<DeviceId> = transport
+        let mut streams: Vec<DeviceId> = transport
             .streams()?
             .into_iter()
             .filter(|d| *d != self.device && !self.blocked.contains(d))
@@ -1367,6 +1396,9 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             .collect();
         for stream in &streams {
             self.check_stored_head(transport, stream);
+        }
+        if self.rebuilding {
+            streams.push(self.device);
         }
         loop {
             let mut progress = false;
@@ -1390,6 +1422,9 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         }
         self.report_withheld(wall_ms);
         self.check_root_head();
+        if self.rebuilding {
+            self.finish_rebuild(wall_ms);
+        }
         Ok(())
     }
 
@@ -1492,7 +1527,17 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             })
             .collect();
         candidates.sort_by_key(|(seq, _)| *seq);
-        let Some(key) = self.trust.key(stream) else {
+        // The own stream (read again after a restart) verifies with the own key.
+        let own = *stream == self.device;
+        if own && head.seq >= self.sent.seq {
+            return Ok(false);
+        }
+        let key = if own {
+            Some(self.signer.verifying_key())
+        } else {
+            self.trust.key(stream)
+        };
+        let Some(key) = key else {
             if head.seq == 0 && !self.peeked.contains(stream) {
                 if let Some((_, first)) = candidates.iter().find(|(s, _)| *s == 1) {
                     let first = first.clone();
@@ -1595,6 +1640,11 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             self.confirm_snapshot_ref(stream, segment.header.first_seq, &entries);
             for (seq, entry) in entries {
                 match entry {
+                    // Own checkpoints read again after a restart say nothing new.
+                    Entry::Checkpoint(_) if own => {}
+                    Entry::SelfJoin { .. } if own && seq == 1 && !is_root => {
+                        self.trust.set_pending_self(self.device)
+                    }
                     Entry::Checkpoint(heads) => {
                         let bounds = self.checkpoint_bounds.entry(*stream).or_default();
                         for (d, h) in &heads {
@@ -2427,5 +2477,7 @@ mod adversary_tests;
 mod attack_tests;
 #[cfg(test)]
 mod recovery_tests;
+#[cfg(test)]
+mod resume_tests;
 #[cfg(test)]
 mod tests;

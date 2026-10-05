@@ -322,10 +322,16 @@ impl<R: RngCore + CryptoRng> Engine<R> {
     ) {
         let root = self.trust.root();
         let from_root = author == root;
-        let wanted = |d: &DeviceId| match only {
-            Some(s) => *d == s,
-            None => true,
-        } && (from_root || *d == author);
+        let own = self.device;
+        // The own stream is never taken from a snapshot: it is read itself (after a restart).
+        let wanted = |d: &DeviceId| {
+            *d != own
+                && match only {
+                    Some(s) => *d == s,
+                    None => true,
+                }
+                && (from_root || *d == author)
+        };
         if from_root {
             for (stream, seq, entry) in &body.entries {
                 match entry {
