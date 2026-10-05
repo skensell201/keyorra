@@ -8,6 +8,7 @@ pub mod error;
 pub mod session;
 pub mod settings;
 pub mod sleep;
+pub mod sync;
 pub mod throttle;
 pub mod touchid;
 pub mod watchtower;

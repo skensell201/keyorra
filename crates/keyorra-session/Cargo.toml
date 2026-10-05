@@ -8,7 +8,9 @@ publish = false
 [dependencies]
 chacha20poly1305 = "0.10"
 data-encoding = "2"
+ed25519-dalek = { version = "2", features = ["zeroize"] }
 keyorra-core = { path = "../keyorra-core" }
+keyorra-sync = { path = "../keyorra-sync" }
 p256 = { version = "0.13", features = ["ecdh"] }
 psl = "2"
 rand = "0.8"
@@ -22,4 +24,5 @@ zeroize = { version = "1", features = ["serde"] }
 
 [dev-dependencies]
 keyorra-core = { path = "../keyorra-core", features = ["test-utils"] }
+keyorra-sync = { path = "../keyorra-sync", features = ["test-utils"] }
 tempfile = "3"
