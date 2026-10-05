@@ -56,6 +56,52 @@ pub trait Transport {
     fn put_root_head_file(&self, bytes: &[u8]) -> Result<()>;
 }
 
+/// A boxed transport (the app picks the transport at run time).
+impl<T: Transport + ?Sized> Transport for Box<T> {
+    fn streams(&self) -> Result<Vec<DeviceId>> {
+        (**self).streams()
+    }
+    fn segments(&self, stream: &DeviceId, after_seq: u64) -> Result<Vec<Fetched<Vec<u8>>>> {
+        (**self).segments(stream, after_seq)
+    }
+    fn append(&self, segment: &[u8]) -> Result<AppendOutcome> {
+        (**self).append(segment)
+    }
+    fn head(&self, stream: &DeviceId) -> Result<Option<u64>> {
+        (**self).head(stream)
+    }
+    fn headers(&self) -> Result<Vec<(String, Fetched<Vec<u8>>)>> {
+        (**self).headers()
+    }
+    fn put_header(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        (**self).put_header(name, bytes)
+    }
+    fn delete_header(&self, name: &str) -> Result<()> {
+        (**self).delete_header(name)
+    }
+    fn snapshots(&self) -> Result<Vec<(String, DeviceId)>> {
+        (**self).snapshots()
+    }
+    fn get_snapshot(&self, name: &str) -> Result<Fetched<Vec<u8>>> {
+        (**self).get_snapshot(name)
+    }
+    fn put_snapshot(&self, bytes: &[u8]) -> Result<String> {
+        (**self).put_snapshot(bytes)
+    }
+    fn delete_snapshot(&self, name: &str) -> Result<()> {
+        (**self).delete_snapshot(name)
+    }
+    fn delete_segment(&self, stream: &DeviceId, first_seq: u64) -> Result<()> {
+        (**self).delete_segment(stream, first_seq)
+    }
+    fn root_head_file(&self) -> Result<Fetched<Vec<u8>>> {
+        (**self).root_head_file()
+    }
+    fn put_root_head_file(&self, bytes: &[u8]) -> Result<()> {
+        (**self).put_root_head_file(bytes)
+    }
+}
+
 #[derive(Clone, Debug, Default)]
 struct Files {
     headers: BTreeMap<String, Vec<u8>>,
