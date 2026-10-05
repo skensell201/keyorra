@@ -113,6 +113,23 @@ enum Op {
     ThiefEndorse,
     ApproveThief,
     RemoveThief,
+    /// A keyless folder writer puts junk at an honest device's next position, or a few
+    /// positions further (a raised stored head) (review K1).
+    JunkAtNext {
+        dev: usize,
+        gap: bool,
+    },
+    /// The stolen device signs a snapshot of its own stream with other content (review S1).
+    StolenSnapshot,
+    RootSnapshot,
+    /// The store deletes the main device's snapshots, or serves an old one again.
+    DeleteRootSnapshots,
+    ReplayRootSnapshot,
+    /// The store serves an old root head file again (review I1).
+    ReplayRootHead,
+    /// Someone with the password and Secret Key plants a header naming another main device
+    /// (review I2).
+    ForeignHeader,
 }
 
 fn op() -> impl Strategy<Value = Op> {
@@ -132,6 +149,13 @@ fn op() -> impl Strategy<Value = Op> {
         1 => Just(Op::StolenVaultKey),
         1 => any::<bool>().prop_map(|garbage| Op::StolenEarliestVault { garbage }),
         1 => Just(Op::SwapSelfJoin),
+        1 => (d.clone(), any::<bool>()).prop_map(|(dev, gap)| Op::JunkAtNext { dev, gap }),
+        1 => Just(Op::StolenSnapshot),
+        1 => Just(Op::RootSnapshot),
+        1 => Just(Op::DeleteRootSnapshots),
+        1 => Just(Op::ReplayRootSnapshot),
+        1 => Just(Op::ReplayRootHead),
+        1 => Just(Op::ForeignHeader),
         1 => i.clone().prop_map(|item| Op::StolenCopy { item }),
         1 => d.clone().prop_map(|dev| Op::StolenFork { dev }),
         1 => Just(Op::SelfJoin),
@@ -151,6 +175,11 @@ struct World {
     stolen_removed: bool,
     thief_approved: bool,
     swapped: bool,
+    /// Junk planted at honest positions, as (device index, position).
+    junk: Vec<(usize, u64)>,
+    old_root_snapshots: Vec<Vec<u8>>,
+    old_root_heads: Vec<Vec<u8>>,
+    foreign_header: bool,
     seed: u64,
 }
 
@@ -177,6 +206,10 @@ fn setup(seed: u64) -> World {
         stolen_removed: false,
         thief_approved: false,
         swapped: false,
+        junk: Vec::new(),
+        old_root_snapshots: Vec::new(),
+        old_root_heads: Vec::new(),
+        foreign_header: false,
         seed,
     }
 }
@@ -410,6 +443,96 @@ impl World {
                     body: Some(doc.encode().to_vec()),
                 }));
             }
+            Op::JunkAtNext { dev, gap } => {
+                let seq = self.c.devices[dev].sent.seq + if gap { 3 } else { 1 };
+                let header = crate::segment::SegmentHeader {
+                    collection: crate::segment::ACCOUNT_COLLECTION,
+                    device_id: device_id(dev),
+                    first_seq: seq,
+                    last_seq: seq,
+                    prev_hash: [0; 32],
+                    last_hash: [0; 32],
+                };
+                let mut bytes = header.to_bytes().to_vec();
+                bytes.extend_from_slice(&[0; 64]);
+                if matches!(self.c.store.append(&bytes), Ok(AppendOutcome::Appended)) {
+                    self.junk.push((dev, seq));
+                }
+            }
+            Op::StolenSnapshot => {
+                let own: Vec<Accepted> = self.c.devices[STOLEN]
+                    .fold()
+                    .retained()
+                    .filter(|a| a.stream == device_id(STOLEN) && a.kind == RecordKind::Item)
+                    .cloned()
+                    .collect();
+                let mut versions = Vec::new();
+                for mut a in own {
+                    if let Doc::Item(p) = &mut a.doc {
+                        let json = Cluster::item_json(a.record_id, &format!("late{step}"), &[]);
+                        p.item_json = Zeroizing::new(json);
+                    }
+                    if let Ok(env) = self.c.devices[STOLEN].reseal(&a) {
+                        versions.push((a.stream, a.seq, env));
+                    }
+                }
+                let mut frontier = Heads::new();
+                frontier.insert(device_id(STOLEN), self.c.devices[STOLEN].sent);
+                let body = crate::pack::SnapshotBody {
+                    account_id: ACCOUNT_ID,
+                    floors: frontier.iter().map(|(d, h)| (*d, h.seq)).collect(),
+                    frontier,
+                    entries: Vec::new(),
+                    versions,
+                };
+                let mut rng = StdRng::seed_from_u64(self.seed ^ step as u64);
+                let segment_key =
+                    crate::keys::segment_key(&Key::from_bytes(ACCOUNT_KEY), &ACCOUNT_ID);
+                if let Ok(bytes) = crate::snapshot::seal_snapshot(
+                    &segment_key,
+                    &signer(STOLEN),
+                    device_id(STOLEN),
+                    body.to_value(),
+                    &mut rng,
+                ) {
+                    let _ = self.c.store.put_snapshot(&bytes);
+                }
+            }
+            Op::RootSnapshot => {
+                if let Ok(name) = self.c.devices[0].write_snapshot(&self.c.store.clone(), clock) {
+                    if let Ok(Fetched::Ready(b)) = self.c.store.get_snapshot(&name) {
+                        self.old_root_snapshots.push(b);
+                    }
+                }
+            }
+            Op::DeleteRootSnapshots => {
+                for (name, author) in self.c.store.snapshots().unwrap_or_default() {
+                    if author == device_id(0) {
+                        let _ = self.c.store.delete_snapshot(&name);
+                    }
+                }
+            }
+            Op::ReplayRootSnapshot => {
+                if let Some(b) = self.old_root_snapshots.first() {
+                    let _ = self.c.store.put_snapshot(b);
+                }
+            }
+            Op::ReplayRootHead => {
+                if let Ok(Fetched::Ready(b)) = self.c.store.root_head_file() {
+                    self.old_root_heads.push(b);
+                }
+                if let Some(b) = self.old_root_heads.first() {
+                    let _ = self.c.store.put_root_head_file(b);
+                }
+            }
+            Op::ForeignHeader => {
+                let mut header = crate::testkit::test_header(9, "thief");
+                header.root_device = THIEF;
+                header.root_key = signer(7).verifying_key().to_bytes();
+                let file = crate::header::HeaderFile::sign(header, THIEF, &signer(7));
+                let _ = self.c.store.put_header(&file.file_name(), &file.encode());
+                self.foreign_header = true;
+            }
             Op::SwapSelfJoin => {
                 if self.thief.is_some() || self.swapped {
                     return;
@@ -505,8 +628,20 @@ impl World {
                     );
                 }
                 Alarm::ApprovedWithAnotherKey => panic!("device {i}: {alarm}"),
-                Alarm::OwnStreamTampered { .. } => panic!("device {i}: {alarm}"),
-                Alarm::ForeignHeader { .. } => {}
+                // The user removes the junk and retries (it must be junk that was planted).
+                // (The position is a best guess when the store hides the junk.)
+                Alarm::OwnStreamTampered { .. } => {
+                    assert!(
+                        self.junk.iter().any(|(d, _)| *d == i),
+                        "device {i}: {alarm}"
+                    );
+                    for (d, seq) in self.junk.iter().filter(|(d, _)| *d == i) {
+                        self.c.store.remove_segment(&device_id(*d), *seq);
+                    }
+                }
+                Alarm::ForeignHeader { .. } => {
+                    assert!(self.foreign_header, "device {i}: {alarm}");
+                }
                 // Computed from state; resolves itself.
                 Alarm::RootBehind { .. } => continue,
                 Alarm::Rollback { .. } | Alarm::Unapproved { .. } => {}
@@ -530,10 +665,13 @@ impl World {
                 let started = Instant::now();
                 let _ = e.sync(&self.c.store, self.c.clocks[0]);
                 assert!(started.elapsed() < ROUND_LIMIT, "the late device hung");
+                let foreign = self.foreign_header;
                 assert!(
-                    e.alarms()
-                        .iter()
-                        .all(|a| matches!(a, Alarm::Unapproved { .. } | Alarm::Disputed { .. })),
+                    e.alarms().iter().all(|a| match a {
+                        Alarm::Unapproved { .. } | Alarm::Disputed { .. } => true,
+                        Alarm::ForeignHeader { .. } => foreign,
+                        _ => false,
+                    }),
                     "late device: {:?}",
                     e.alarms()
                 );
@@ -611,7 +749,6 @@ fn check(seed: u64, ops: &[Op]) {
     let mut extra = Some(late);
     w.heal(&mut extra);
     let late = extra.unwrap();
-
     let first = w.c.devices[0].view();
     for i in 1..HONEST {
         assert_eq!(
@@ -626,6 +763,14 @@ fn check(seed: u64, ops: &[Op]) {
     let mut honest: Vec<&Engine<StdRng>> = w.c.devices[..HONEST].iter().collect();
     honest.push(&late);
     let all = written(&honest);
+    for i in 0..HONEST {
+        assert_eq!(
+            w.c.devices[i].device(),
+            device_id(i),
+            "device {i} kept its id"
+        );
+        assert!(!w.c.devices[i].halted, "device {i} halted");
+    }
     for d in honest {
         let trust = d.trust();
         for i in 0..HONEST {

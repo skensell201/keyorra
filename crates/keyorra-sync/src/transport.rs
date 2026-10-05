@@ -119,11 +119,13 @@ impl Transport for MemoryTransport {
 
     fn head(&self, stream: &DeviceId) -> Result<Option<u64>> {
         let streams = self.streams.lock().unwrap();
-        Ok(streams
-            .get(stream)
-            .and_then(|segs| segs.values().next_back())
-            .and_then(|b| SegmentHeader::parse(b).ok())
-            .map(|h| h.last_seq))
+        // The highest last position named by any file (as a folder listing would).
+        Ok(streams.get(stream).and_then(|segs| {
+            segs.values()
+                .filter_map(|b| SegmentHeader::parse(b).ok())
+                .map(|h| h.last_seq)
+                .max()
+        }))
     }
 
     fn headers(&self) -> Result<Vec<(String, Fetched<Vec<u8>>)>> {

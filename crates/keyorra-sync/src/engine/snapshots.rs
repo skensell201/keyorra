@@ -60,7 +60,36 @@ impl<R: RngCore + CryptoRng> Engine<R> {
     /// and chains it into the own stream. Returns its name.
     pub fn write_snapshot(&mut self, transport: &impl Transport, wall_ms: u64) -> Result<String> {
         self.require_writable()?;
+        // The frontier covers only what is applied: a stream with records still waiting is
+        // cut back to just before the first of them (a reader starting from the snapshot reads
+        // them from the stream itself).
         let mut frontier = self.heads.clone();
+        for ((stream, _), queue) in &self.lanes {
+            let Some(first) = queue.iter().map(|p| p.seq).min() else {
+                continue;
+            };
+            // Back to the end of the segment before it: readers read whole segments.
+            let below = self
+                .segment_ends
+                .get(stream)
+                .and_then(|ends| ends.range(..first).next_back().copied())
+                .unwrap_or(0);
+            if frontier.get(stream).is_some_and(|h| h.seq > below) {
+                let hash = if below == 0 {
+                    None
+                } else {
+                    self.hashes.get(stream).and_then(|h| h.get(&below)).copied()
+                };
+                match hash {
+                    Some(hash) => {
+                        frontier.insert(*stream, Head { seq: below, hash });
+                    }
+                    None => {
+                        frontier.remove(stream);
+                    }
+                }
+            }
+        }
         frontier.insert(self.device, self.sent);
         let within = |d: &DeviceId, s: u64| frontier.get(d).is_some_and(|h| s <= h.seq);
         let root = self.trust.root();
@@ -337,10 +366,18 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                     .entry(*device)
                     .or_default()
                     .insert(head.seq, head.hash);
+                self.segment_ends
+                    .entry(*device)
+                    .or_default()
+                    .insert(head.seq);
             }
         }
         self.apply_pending(wall_ms);
-        if author != self.device {
+        // The author's log must mention the snapshot after its frontier; only checkable if
+        // this device has not read past that point already (then the entry went by unseen).
+        let known_author = self.heads.get(&author).map_or(0, |h| h.seq);
+        let after = body.frontier.get(&author).map_or(0, |h| h.seq);
+        if author != self.device && known_author <= after {
             if let (Some(raw), Some(at)) = (name_bytes(name), body.frontier.get(&author)) {
                 self.snapshot_ref = Some(SnapshotRef {
                     author,

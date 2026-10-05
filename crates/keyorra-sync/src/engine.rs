@@ -370,6 +370,9 @@ pub struct Engine<R> {
     unwrapped: BTreeMap<Vec<u8>, Key>,
     /// Per other device: the last received position.
     heads: Heads,
+    /// Per other device: the last position of every received segment (snapshot frontiers
+    /// must be segment ends, since readers read whole segments).
+    segment_ends: BTreeMap<DeviceId, BTreeSet<u64>>,
     /// Per other device: the chain hash of every received entry.
     hashes: BTreeMap<DeviceId, BTreeMap<u64, [u8; 32]>>,
     /// Received records waiting to be applied, per stream and record.
@@ -505,6 +508,7 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             unwrapped: BTreeMap::new(),
             heads: Heads::new(),
             hashes: BTreeMap::new(),
+            segment_ends: BTreeMap::new(),
             lanes: BTreeMap::new(),
             pending_count: BTreeMap::new(),
             checkpoint_bounds: BTreeMap::new(),
@@ -1624,6 +1628,10 @@ impl<R: RngCore + CryptoRng> Engine<R> {
                 hash: segment.header.last_hash,
             };
             self.heads.insert(*stream, head);
+            self.segment_ends
+                .entry(*stream)
+                .or_default()
+                .insert(head.seq);
             self.settle_claims(stream);
             self.events.push(Event::Pulled {
                 from: *stream,
@@ -2128,7 +2136,8 @@ impl<R: RngCore + CryptoRng> Engine<R> {
         match transport.head(&self.device) {
             Ok(stored) => {
                 let stored = stored.unwrap_or(0);
-                if stored < self.sent.seq {
+                let acknowledged = self.acknowledged_rollbacks.contains(&(self.device, stored));
+                if stored < self.sent.seq && !acknowledged {
                     self.raise(Alarm::Rollback {
                         stream: self.device,
                         received: self.sent.seq,

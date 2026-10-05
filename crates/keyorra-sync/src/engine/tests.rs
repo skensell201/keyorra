@@ -726,6 +726,7 @@ pub(super) fn clone_of(e: &Engine<rand::rngs::StdRng>) -> Engine<rand::rngs::OsR
     twin.trust = e.trust.clone();
     twin.heads = e.heads.clone();
     twin.hashes = e.hashes.clone();
+    twin.segment_ends = e.segment_ends.clone();
     twin.checkpoint_bounds = e.checkpoint_bounds.clone();
     twin.last_checkpoint = e.last_checkpoint.clone();
     twin.root_log = e.root_log.clone();
