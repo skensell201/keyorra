@@ -186,6 +186,18 @@ impl<T: Transport> Transport for Faulty<T> {
         self.inner.put_root_head_file(bytes)
     }
 
+    fn put_chunk(&self, bytes: &[u8]) -> Result<String> {
+        self.inner.put_chunk(bytes)
+    }
+
+    fn get_chunk(&self, name: &str) -> Result<Fetched<Vec<u8>>> {
+        self.inner.get_chunk(name)
+    }
+
+    fn begin_round(&self) {
+        self.inner.begin_round()
+    }
+
     fn append(&self, segment: &[u8]) -> Result<AppendOutcome> {
         let f = self.faults();
         if self.roll(f.fail_before_append) {
@@ -279,6 +291,18 @@ impl<T: Transport> Transport for Rollback<T> {
     fn put_root_head_file(&self, bytes: &[u8]) -> Result<()> {
         self.inner.put_root_head_file(bytes)
     }
+
+    fn put_chunk(&self, bytes: &[u8]) -> Result<String> {
+        self.inner.put_chunk(bytes)
+    }
+
+    fn get_chunk(&self, name: &str) -> Result<Fetched<Vec<u8>>> {
+        self.inner.get_chunk(name)
+    }
+
+    fn begin_round(&self) {
+        self.inner.begin_round()
+    }
 }
 
 /// A store that shows one stream from another store: one side of a fork (two histories of
@@ -355,6 +379,18 @@ impl<T: Transport, U: Transport> Transport for Overlay<T, U> {
 
     fn put_root_head_file(&self, bytes: &[u8]) -> Result<()> {
         self.base.put_root_head_file(bytes)
+    }
+
+    fn put_chunk(&self, bytes: &[u8]) -> Result<String> {
+        self.base.put_chunk(bytes)
+    }
+
+    fn get_chunk(&self, name: &str) -> Result<Fetched<Vec<u8>>> {
+        self.base.get_chunk(name)
+    }
+
+    fn begin_round(&self) {
+        self.base.begin_round()
     }
 }
 

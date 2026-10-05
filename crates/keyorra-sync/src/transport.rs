@@ -54,6 +54,21 @@ pub trait Transport {
     /// The main device's advertised head file ([`crate::root_head`]).
     fn root_head_file(&self) -> Result<Fetched<Vec<u8>>>;
     fn put_root_head_file(&self, bytes: &[u8]) -> Result<()>;
+    /// Stores an attachment chunk under its name, the lowercase hex SHA-256 of the bytes
+    /// ([`crate::chunk::chunk_name`]), which it returns. Chunks are write-once: storing the
+    /// same bytes again is a no-op (plan A2).
+    fn put_chunk(&self, bytes: &[u8]) -> Result<String> {
+        let _ = bytes;
+        Err(crate::Error::Transport(
+            "this store keeps no attachment chunks".into(),
+        ))
+    }
+    fn get_chunk(&self, name: &str) -> Result<Fetched<Vec<u8>>> {
+        let _ = name;
+        Ok(Fetched::Missing)
+    }
+    /// A sync round starts (a folder transport starts its time budget, plan A2).
+    fn begin_round(&self) {}
 }
 
 /// A boxed transport (the app picks the transport at run time).
@@ -100,6 +115,15 @@ impl<T: Transport + ?Sized> Transport for Box<T> {
     fn put_root_head_file(&self, bytes: &[u8]) -> Result<()> {
         (**self).put_root_head_file(bytes)
     }
+    fn put_chunk(&self, bytes: &[u8]) -> Result<String> {
+        (**self).put_chunk(bytes)
+    }
+    fn get_chunk(&self, name: &str) -> Result<Fetched<Vec<u8>>> {
+        (**self).get_chunk(name)
+    }
+    fn begin_round(&self) {
+        (**self).begin_round()
+    }
 }
 
 #[derive(Clone, Debug, Default)]
@@ -107,6 +131,7 @@ struct Files {
     headers: BTreeMap<String, Vec<u8>>,
     snapshots: BTreeMap<String, Vec<u8>>,
     root_head: Option<Vec<u8>>,
+    chunks: BTreeMap<String, Vec<u8>>,
 }
 
 /// One stream: segment bytes by first sequence number.
@@ -245,6 +270,25 @@ impl Transport for MemoryTransport {
         Ok(())
     }
 
+    fn put_chunk(&self, bytes: &[u8]) -> Result<String> {
+        let name = crate::chunk::chunk_name(bytes);
+        self.files
+            .lock()
+            .unwrap()
+            .chunks
+            .entry(name.clone())
+            .or_insert_with(|| bytes.to_vec());
+        Ok(name)
+    }
+
+    fn get_chunk(&self, name: &str) -> Result<Fetched<Vec<u8>>> {
+        let files = self.files.lock().unwrap();
+        Ok(files
+            .chunks
+            .get(name)
+            .map_or(Fetched::Missing, |b| Fetched::Ready(b.clone())))
+    }
+
     fn append(&self, segment: &[u8]) -> Result<AppendOutcome> {
         let header = SegmentHeader::parse(segment)?;
         let mut streams = self.streams.lock().unwrap();
@@ -321,6 +365,28 @@ mod tests {
             AppendOutcome::Conflict
         );
         assert!(t.append(b"junk").is_err());
+    }
+
+    #[test]
+    fn chunks_are_stored_under_their_hash() {
+        let t = MemoryTransport::new();
+        let name = t.put_chunk(b"KYC1 chunk bytes").unwrap();
+        assert_eq!(name, crate::chunk::chunk_name(b"KYC1 chunk bytes"));
+        assert_eq!(
+            t.put_chunk(b"KYC1 chunk bytes").unwrap(),
+            name,
+            "write-once, same name"
+        );
+        assert_eq!(
+            t.get_chunk(&name).unwrap(),
+            Fetched::Ready(b"KYC1 chunk bytes".to_vec())
+        );
+        assert_eq!(t.get_chunk(&"0".repeat(64)).unwrap(), Fetched::Missing);
+        let boxed: Box<dyn Transport> = Box::new(t.clone());
+        assert_eq!(
+            boxed.get_chunk(&name).unwrap(),
+            Fetched::Ready(b"KYC1 chunk bytes".to_vec())
+        );
     }
 
     #[test]
