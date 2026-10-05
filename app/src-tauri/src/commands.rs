@@ -191,3 +191,19 @@ pub fn paired_browsers(state: State<'_, AppState>) -> CmdResult<Vec<PairedBrowse
 pub fn remove_paired_browser(state: State<'_, AppState>, client_id: String) -> CmdResult<()> {
     lock_session(&state).remove_paired_browser(&client_id)
 }
+
+#[tauri::command(async)]
+pub fn start_over(state: State<'_, AppState>) -> CmdResult<String> {
+    let aside = lock_session(&state).start_over(now())?;
+    Ok(aside.display().to_string())
+}
+
+#[tauri::command(async)]
+pub fn rename_vault(state: State<'_, AppState>, id: Uuid, name: String) -> CmdResult<VaultDto> {
+    lock_session(&state).rename_vault(id, &name, now())
+}
+
+#[tauri::command(async)]
+pub fn delete_vault(state: State<'_, AppState>, id: Uuid) -> CmdResult<()> {
+    lock_session(&state).delete_vault(id, now())
+}

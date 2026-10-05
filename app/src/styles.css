@@ -261,3 +261,6 @@ fieldset.fields .reveal { align-self: flex-start; }
 .pair-code { font-size: 34px; font-weight: 600; letter-spacing: 0.12em; text-align: center; margin: 4px 0; }
 .browser-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 4px; }
 .browser-list li { display: flex; justify-content: space-between; align-items: center; padding: 6px 4px 6px 12px; background: var(--surface-2); border-radius: 12px; font-weight: 600; }
+
+/* Plan 2c */
+.modal.confirm { width: 420px; }

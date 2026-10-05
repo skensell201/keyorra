@@ -3,7 +3,16 @@ import { listen, type UnlistenFn } from "@tauri-apps/api/event";
 
 export type Status = "new" | "locked" | "unlocked";
 
-export type ErrorKind = "wrongPassword" | "locked" | "throttled" | "notFound" | "invalid" | "other";
+export type ErrorKind =
+  | "wrongPassword"
+  | "locked"
+  | "throttled"
+  | "notFound"
+  | "invalid"
+  | "notADatabase"
+  | "passwordRequired"
+  | "cancelled"
+  | "other";
 export interface CmdError {
   kind: ErrorKind;
   message: string;
@@ -137,6 +146,10 @@ export const api = {
   lock: () => invoke<void>("lock"),
   vaults: () => invoke<Vault[]>("vaults"),
   createVault: (name: string) => invoke<Vault>("create_vault", { name }),
+  renameVault: (id: string, name: string) => invoke<Vault>("rename_vault", { id, name }),
+  deleteVault: (id: string) => invoke<void>("delete_vault", { id }),
+  /** Moves an unreadable database aside; returns where it went. */
+  startOver: () => invoke<string>("start_over"),
   items: (filter: ItemFilter) => invoke<ItemSummary[]>("items", { filter }),
   item: (id: string) => invoke<Item>("item", { id }),
   newItem: (vaultId: string, kind: ItemKind) => invoke<Item>("new_item", { vaultId, kind }),
