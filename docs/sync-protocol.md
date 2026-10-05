@@ -1,7 +1,8 @@
 # Keyorra Sync Protocol
 
 Version: 1 (draft). Status: sections 1–8 are defined and implemented in `crates/keyorra-sync`
-(plan A1a); later sections are placeholders filled by later plans. The design rationale is in
+(plan A1a), section 9 and the first part of section 10 by plan A1b; later sections are
+placeholders filled by later plans. The design rationale is in
 `docs/superpowers/specs/2026-10-05-keyorra-sync-design.md`; this document is the normative
 description. Any change to bytes on the wire changes this file in the same commit.
 
@@ -37,6 +38,7 @@ Every label is used as `label ‖ 0x00 ‖ parts…`, so no label is a prefix of
 | `keyorra/sync/v1/snapshot` | snapshot signature |
 | `keyorra/sync/v1/chain-genesis` | first link of a stream's hash chain |
 | `keyorra/sync/v1/chain` | every further link |
+| `keyorra/sync/v1/conflict-copy` | ids of conflict copies and of their attachment records |
 
 ## 3. Canonical CBOR
 
@@ -170,14 +172,104 @@ name     = hex(SHA-256(snapshot))
 The canonical snapshot body is at most 64 MiB; the sealed snapshot is length-checked before
 decryption. A chunk longer than the padded size of 4 MiB is rejected before decryption.
 
-## 9. Fold and presentation
+## 9. Payloads, versions, fold and presentation
 
-To be defined by plan A1b (sibling sets, presentation rules, conflict copies).
+### 9.1 Payloads
+
+The opened body of an envelope (section 7) is the canonical CBOR of:
+
+```
+item       = { "item": bytes, "deleted_at": uint | null, "content_from": { bytes16 → uint ≥ 1 } }
+vault      = { "name": text, "wrapped_key": bytes, "deleted": bool }
+attachment = { "item_id": bytes16, "name": text, "size": uint, "key": bytes32,
+               "chunk_size": uint, "chunks": [bytes32, …] }
+```
+
+`item` is the item's JSON object exactly as the local store serializes it; `deleted_at` is
+unix seconds (in Recently Deleted when set); `content_from` (never empty) is the version
+vector of the write that last changed `item`. `wrapped_key` is the vault key sealed by the
+account key (`keyorra-core` `wrap_vault_key`). `key` is the attachment's own key; `chunks`
+are chunk names (section 8). A tombstone envelope has no payload. Vaults are never
+tombstoned; they are deleted with `deleted = true`.
+
+### 9.2 Clocks and new versions
+
+`hlc = unix_ms << 16 | counter`. A new local write takes `max(wall_ms << 16, last + 1)`. A
+received version whose physical part is more than 300 000 ms ahead of the local wall clock
+is accepted but does not move the local clock (and is logged).
+
+A new version of record `r` by device `D`: `vector = join(vectors of r's siblings)` with
+`vector[D] = max(that, D's previous counter for r) + 1`. An edit sets the item's
+`content_from` to the new vector; trashing and restoring keep the previous `content_from`.
+
+### 9.3 Validation
+
+A segment's versions are accepted together or not at all. For each version carried by the
+stream of device `S`: `version.author = S`; `vector[S]` is exactly one more than the
+highest `vector[S]` among `S`'s versions of the same record already accepted (or in the same
+segment), or 1; the payload decodes as the envelope's kind; a vault is never a tombstone. A
+version already accepted (same version hash) is ignored. A violation rejects the segment and
+stops reading that stream (an alarm).
+
+### 9.4 Sibling sets and the fold
+
+For every record, the sibling set is the set of accepted, admitted versions that no other
+accepted, admitted version dominates (vector ≥ in every entry and different). Equal vectors
+count as the same version. The set depends only on which versions were accepted, not on
+their order. Every accepted version is retained so the sets can be rebuilt when admission
+changes (section 10).
+
+### 9.5 Presentation
+
+Ranks: `(hlc, author)` compared as `(u64, bytes16)`, higher wins.
+
+**Items.** A sibling is *live* (no `deleted_at`), *trashed* (`deleted_at` set) or *purged*
+(tombstone). It is *stale* when another sibling's vector covers (≥ in every entry) its
+`content_from`. Siblings are ordered fresh before stale, then by rank. Shown: the first
+purged sibling if any; else the first live one; else the first trashed one. Every other
+sibling becomes a conflict copy unless it is stale, its content equals content already shown
+(the shown sibling's or an earlier copy's; JSON values compared without `updated_at`), or
+(with a purge shown) it is trashed. A trashed sibling's copy keeps its `deleted_at`.
+
+**Vaults.** Shown: the highest-ranked sibling's payload. It counts as deleted only if it is
+`deleted` and no live item has this vault; otherwise a `deleted` vault is shown as revived.
+Siblings with different `wrapped_key` raise an alarm.
+
+**Attachments.** Removed if any sibling is a tombstone; otherwise the highest-ranked payload.
+
+### 9.6 Conflict copies
+
+For a copied sibling `s` of item `r`:
+
+```
+copy_id            = UUIDv8(SHA-256("keyorra/sync/v1/conflict-copy\0" ‖ r ‖ version_hash(s))[0..16])
+copy attachment id = UUIDv8(SHA-256("keyorra/sync/v1/conflict-copy\0" ‖ copy_id ‖ attachment_id)[0..16])
+```
+
+(UUIDv8: the first 16 bytes with the version nibble set to 8 and the RFC 4122 variant.) The
+copy's JSON is `s`'s JSON with `"id"` = `copy_id`, `"conflict"` = `{ "of": r, "version":
+hex(version_hash(s)), "from_device": hex(s.author) }`, and every attachment reference's `"id"`
+replaced by its copy attachment id with `"copied_from"` = the original id. The title is not
+changed.
+
+A device whose fold shows a copy that does not exist as a record writes, before its next user
+edit: each missing copy (a new record; `content_from` = its own version), then a version of
+`r` with the shown sibling's content and `content_from` (or a tombstone if `r` is purged).
+For each attachment reference with `copied_from` in a shown copy whose record does not exist,
+a device that has the original attachment live writes it: the original payload with
+`item_id` = the copy.
 
 ## 10. Streams, entries and trust
 
-To be defined by plan A1c (entry types, endorsement, acceptance rule, causal delivery,
-headers as log entries, snapshot contents, restore, clone detection).
+**Entries (A1b).** `Put = { "put": Envelope }`. Further entry types, the device directory,
+admission, causal delivery and the rest of this section: plan A1c.
+
+**Reading a stream (A1b).** A device keeps, per other stream, the last applied
+`(seq, chain hash)` (initially `(0, chain_0)`). It applies the segment whose `first_seq` is
+the next seq and whose `prev_hash` is the known hash, verified with the stream device's key;
+duplicates and later segments wait. A segment that does not open is retried later. A segment
+whose item or attachment needs a vault key not known yet waits until the vault record has
+been read from any stream.
 
 ## 11. Folder transport
 
