@@ -1,0 +1,533 @@
+//! Sync in the session (plan A1d): turned on, joined, run and turned off here; it runs only
+//! while the vault is unlocked. The app supplies the transport and the device key store
+//! through a [`SyncLink`] (the folder transport is plan A2; the UI is plan A3).
+
+use keyorra_core::crypto::Key;
+use keyorra_core::store::Store;
+use keyorra_sync::header::Header;
+use keyorra_sync::secret_key::SecretKey;
+use keyorra_sync::transport::Transport;
+use serde::Serialize;
+
+use super::{locked, move_aside, sibling, Session, Status, DB_SIBLINGS, MIN_PASSWORD_LEN};
+use crate::error::{CmdError, CmdResult, ErrorKind};
+use crate::sync::{self as s, DeviceKeyStore, SetupCode, SyncStatus, Synced};
+
+/// The transport sync runs over, boxed.
+pub type BoxedTransport = Box<dyn Transport + Send>;
+
+/// What the app gives the session for sync.
+pub trait SyncLink: Send {
+    /// The store of files the account lives in (opened per use).
+    fn transport(&self) -> Result<BoxedTransport, String>;
+    fn device_keys(&self) -> Box<dyn DeviceKeyStore>;
+    /// This Mac's name, shown to the other devices.
+    fn device_name(&self) -> String;
+    /// Opens an account header with the master password and Secret Key (tests replace the
+    /// remote KDF floor).
+    fn unlock_header(
+        &self,
+        header: &Header,
+        password: &str,
+        secret_key: &SecretKey,
+    ) -> keyorra_sync::Result<Key> {
+        header.unlock(password, secret_key).map(|(key, _)| key)
+    }
+}
+
+/// Shown once when sync is turned on (and again from settings while unlocked).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EmergencyKitDto {
+    pub account_id: String,
+    pub secret_key: String,
+    pub setup_code: String,
+}
+
+/// The sync part of the settings screen.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SyncStatusDto {
+    pub enabled: bool,
+    /// Set but not running (e.g. the transport could not be opened); shown with a retry.
+    pub error: Option<String>,
+    pub status: Option<SyncStatus>,
+    /// From the last round: local changes sync could not take and undid (shown once), and
+    /// records that wait or could not be shown.
+    pub notices: Vec<String>,
+}
+
+fn sync_error(e: keyorra_sync::Error) -> CmdError {
+    match e {
+        keyorra_sync::Error::Core(core) => core.into(),
+        keyorra_sync::Error::WrongPassword => CmdError::new(
+            ErrorKind::WrongPassword,
+            "Wrong master password or Secret Key",
+        ),
+        keyorra_sync::Error::NotFound(m) => CmdError::new(ErrorKind::NotFound, m),
+        keyorra_sync::Error::Refused(m) => CmdError::new(ErrorKind::Invalid, m),
+        other => CmdError::new(ErrorKind::Other, other.to_string()),
+    }
+}
+
+fn no_link() -> CmdError {
+    CmdError::new(ErrorKind::Invalid, "Sync isn't available in this build")
+}
+
+fn open_transport(link: &dyn SyncLink) -> CmdResult<BoxedTransport> {
+    link.transport()
+        .map_err(|e| CmdError::new(ErrorKind::Other, format!("Sync folder: {e}")))
+}
+
+/// Where the old database goes when the vault joins another account (spec §7.3):
+/// `keyorra.db.pre-sync-YYYYMMDD`, then `-2`, `-3`… if taken.
+fn pre_sync_path(path: &std::path::Path, now: u64) -> std::path::PathBuf {
+    let (y, m, d) = civil_date(now / 86_400);
+    let base = sibling(path, &format!(".pre-sync-{y:04}{m:02}{d:02}"));
+    let taken = |p: &std::path::Path| p.symlink_metadata().is_ok();
+    (1u32..)
+        .map(|n| match n {
+            1 => base.clone(),
+            n => sibling(&base, &format!("-{n}")),
+        })
+        .find(|c| !taken(c) && !DB_SIBLINGS.iter().any(|s| taken(&sibling(c, s))))
+        .expect("some counter is free")
+}
+
+/// Days since 1970-01-01 → (year, month, day), proleptic Gregorian (H. Hinnant's algorithm).
+fn civil_date(days: u64) -> (i64, u32, u32) {
+    let z = days as i64 + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    (y, m, d)
+}
+
+fn wall_ms(now: u64) -> u64 {
+    now.saturating_mul(1000)
+}
+
+impl Session {
+    pub fn set_sync_link(&mut self, link: Box<dyn SyncLink>) {
+        self.sync_link = Some(link);
+    }
+
+    fn link(&self) -> CmdResult<&dyn SyncLink> {
+        self.sync_link.as_deref().ok_or_else(no_link)
+    }
+
+    fn transport(&self) -> CmdResult<BoxedTransport> {
+        open_transport(self.link()?)
+    }
+
+    /// Runs `f` with the link taken out of the session (so `f` may change the session).
+    fn with_link<R>(
+        &mut self,
+        f: impl FnOnce(&mut Self, &dyn SyncLink) -> CmdResult<R>,
+    ) -> CmdResult<R> {
+        let link = self.sync_link.take().ok_or_else(no_link)?;
+        let result = f(self, link.as_ref());
+        self.sync_link = Some(link);
+        result
+    }
+
+    /// Called right after every unlock: sync continues where it stopped. A failure is kept
+    /// for the status (unlocking never fails because of sync).
+    pub(super) fn resume_sync(&mut self) {
+        self.sync_error = None;
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        if !s::is_enabled(store).unwrap_or(false) {
+            return;
+        }
+        let result = (|| -> CmdResult<Synced<BoxedTransport>> {
+            let link = self.link()?;
+            let transport = self.transport()?;
+            let keys = link.device_keys();
+            s::resume(store, transport, keys.as_ref()).map_err(sync_error)
+        })();
+        match result {
+            Ok(synced) => self.synced = Some(synced),
+            Err(e) => self.sync_error = Some(e.message),
+        }
+    }
+
+    /// Keeps what the UI shows about the last round.
+    fn note_round(&mut self, round: keyorra_sync::Result<s::RoundReport>) {
+        match round {
+            Ok(report) => {
+                self.sync_error = None;
+                self.sync_notices = report
+                    .reverted
+                    .iter()
+                    .map(|(_, why)| why.clone())
+                    .chain(report.failed.iter().map(|(id, why)| format!("{id}: {why}")))
+                    .collect();
+            }
+            Err(e) => self.sync_error = Some(sync_error(e).message),
+        }
+    }
+
+    pub fn sync_status(&self) -> CmdResult<SyncStatusDto> {
+        let store = self.store()?;
+        Ok(SyncStatusDto {
+            enabled: s::is_enabled(store).map_err(sync_error)?,
+            error: self.sync_error.clone(),
+            status: self.synced.as_ref().map(|x| x.status()),
+            notices: self.sync_notices.clone(),
+        })
+    }
+
+    /// One sync round (the app calls it on a timer and after every change while unlocked).
+    pub fn sync_now(&mut self, now: u64) -> CmdResult<SyncStatusDto> {
+        let store = self.store.as_mut().ok_or_else(locked)?;
+        if let Some(synced) = self.synced.as_mut() {
+            let round = synced.round(store, wall_ms(now));
+            self.note_round(round);
+            self.watchtower_count = None;
+        }
+        self.sync_status()
+    }
+
+    /// Turns this vault into the main device of a new synced account. The master password
+    /// is asked again (it also protects the account header).
+    pub fn enable_sync(&mut self, password: &str, now: u64) -> CmdResult<EmergencyKitDto> {
+        self.touch(now);
+        let link = self.link()?;
+        let (transport, mut keys, name) =
+            (self.transport()?, link.device_keys(), link.device_name());
+        let kdf = self.kdf;
+        let store = self.store.as_mut().ok_or_else(locked)?;
+        store.check_password(password)?;
+        let s::Enabled {
+            synced,
+            kit,
+            first_round,
+            ..
+        } = s::enable(
+            store,
+            transport,
+            keys.as_mut(),
+            &name,
+            password,
+            kdf,
+            wall_ms(now),
+        )
+        .map_err(sync_error)?;
+        let dto = EmergencyKitDto {
+            account_id: kit.account_id,
+            secret_key: kit.secret_key.to_string(),
+            setup_code: synced.setup_code().to_text().to_string(),
+        };
+        self.synced = Some(synced);
+        self.note_round(first_round);
+        Ok(dto)
+    }
+
+    /// The Emergency Kit and setup code again (unlocked, sync on).
+    pub fn emergency_kit(&self) -> CmdResult<EmergencyKitDto> {
+        self.store()?;
+        let synced = self
+            .synced
+            .as_ref()
+            .ok_or_else(|| CmdError::new(ErrorKind::Invalid, "Sync is off"))?;
+        let kit = synced.emergency_kit();
+        Ok(EmergencyKitDto {
+            account_id: kit.account_id,
+            secret_key: kit.secret_key.to_string(),
+            setup_code: synced.setup_code().to_text().to_string(),
+        })
+    }
+
+    /// Joins a synced account with the master password and a setup code (or the Secret Key
+    /// alone: then the main device is not pinned and the UI warns).
+    ///
+    /// - No vault on this Mac yet: one is created for the account.
+    /// - This vault (unlocked, sync off) belonged to the same account: it rejoins; records
+    ///   merge by id.
+    /// - It belongs to another account: a vault is made for the account and this vault's
+    ///   items are carried over into it; the old file is kept aside.
+    pub fn join_sync(&mut self, password: &str, code: &str, now: u64) -> CmdResult<()> {
+        self.touch(now);
+        let (sk_id, sk, pin) = match SetupCode::parse(code) {
+            Ok(c) => (c.secret_key_id, c.secret_key, Some(c.pin)),
+            Err(_) => {
+                let (id, sk) = SecretKey::parse(code).map_err(|_| {
+                    CmdError::new(ErrorKind::Invalid, "That isn't a setup code or Secret Key")
+                })?;
+                (id, sk, None)
+            }
+        };
+        if password.chars().count() < MIN_PASSWORD_LEN {
+            return Err(CmdError::new(
+                ErrorKind::WrongPassword,
+                "Wrong master password",
+            ));
+        }
+        self.with_link(|this, link| this.join_with(link, password, (&sk, &sk_id), pin, now))
+    }
+
+    fn join_with(
+        &mut self,
+        link: &dyn SyncLink,
+        password: &str,
+        (sk, sk_id): (&SecretKey, &str),
+        pin: Option<keyorra_sync::account::RootPin>,
+        now: u64,
+    ) -> CmdResult<()> {
+        let (transport, mut keys, name) = (
+            open_transport(link)?,
+            link.device_keys(),
+            link.device_name(),
+        );
+        let unlock = |h: &Header| link.unlock_header(h, password, sk);
+        match self.status() {
+            Status::Locked => Err(locked()),
+            Status::New => {
+                if let Some(dir) = self.path.parent() {
+                    std::fs::create_dir_all(dir)
+                        .map_err(|e| CmdError::new(ErrorKind::Other, e.to_string()))?;
+                }
+                let s::Joined {
+                    store,
+                    synced,
+                    first_round,
+                } = s::join(
+                    &self.path,
+                    password,
+                    self.kdf,
+                    sk,
+                    sk_id,
+                    pin.as_ref(),
+                    transport,
+                    keys.as_mut(),
+                    &name,
+                    unlock,
+                    wall_ms(now),
+                )
+                .map_err(sync_error)?;
+                self.store = Some(store);
+                self.synced = Some(synced);
+                self.note_round(first_round);
+                self.password_verified_at = Some(now);
+                self.keyring.delete();
+                Ok(())
+            }
+            Status::Unlocked => {
+                let store = self.store.as_mut().ok_or_else(locked)?;
+                if s::is_enabled(store).map_err(sync_error)? {
+                    return Err(CmdError::new(ErrorKind::Invalid, "Sync is already on"));
+                }
+                let result = s::rejoin(
+                    store,
+                    sk,
+                    sk_id,
+                    pin.as_ref(),
+                    transport,
+                    keys.as_mut(),
+                    &name,
+                    unlock,
+                    wall_ms(now),
+                );
+                match result {
+                    Ok(rejoined) => {
+                        self.synced = Some(rejoined.synced);
+                        self.note_round(rejoined.first_round);
+                        Ok(())
+                    }
+                    Err(keyorra_sync::Error::Refused(m)) if m.contains("another account") => {
+                        self.join_carrying_over(link, password, (sk, sk_id), pin, now)
+                    }
+                    Err(e) => Err(sync_error(e)),
+                }
+            }
+        }
+    }
+
+    fn join_carrying_over(
+        &mut self,
+        link: &dyn SyncLink,
+        password: &str,
+        (sk, sk_id): (&SecretKey, &str),
+        pin: Option<keyorra_sync::account::RootPin>,
+        now: u64,
+    ) -> CmdResult<()> {
+        let (transport, mut keys, name) = (
+            open_transport(link)?,
+            link.device_keys(),
+            link.device_name(),
+        );
+        let joining = self.path.with_extension("joining");
+        let _ = std::fs::remove_file(&joining);
+        let s::Joined {
+            store: mut new_store,
+            synced,
+            ..
+        } = s::join(
+            &joining,
+            password,
+            self.kdf,
+            sk,
+            sk_id,
+            pin.as_ref(),
+            transport,
+            keys.as_mut(),
+            &name,
+            |h: &Header| link.unlock_header(h, password, sk),
+            wall_ms(now),
+        )
+        .map_err(sync_error)?;
+        let old = self.store.take().ok_or_else(locked)?;
+        if let Err(e) = s::carry_over(&old, &mut new_store) {
+            self.store = Some(old);
+            drop(new_store);
+            let _ = std::fs::remove_file(&joining);
+            return Err(sync_error(e));
+        }
+        drop(old);
+        drop(new_store);
+        drop(synced);
+        let aside = pre_sync_path(&self.path, now);
+        move_aside(&self.path, &aside, |from, to| std::fs::rename(from, to))
+            .and_then(|()| std::fs::rename(&joining, &self.path))
+            .map_err(|e| CmdError::new(ErrorKind::Other, format!("Can't move the file: {e}")))?;
+        // The Touch ID record wraps the old vault's key.
+        self.keyring.delete();
+        let mut store = Store::open(&self.path)?;
+        store.unlock(password)?;
+        self.store = Some(store);
+        self.password_verified_at = Some(now);
+        let resumed = s::resume(
+            self.store.as_ref().ok_or_else(locked)?,
+            open_transport(link)?,
+            link.device_keys().as_ref(),
+        )
+        .map_err(sync_error)?;
+        self.synced = Some(resumed);
+        Ok(())
+    }
+
+    /// Turns sync off on this Mac; everything stays in the vault.
+    pub fn disable_sync(&mut self, now: u64) -> CmdResult<()> {
+        self.touch(now);
+        let mut keys = self.link()?.device_keys();
+        let synced = self.synced.take();
+        let store = self.store.as_mut().ok_or_else(locked)?;
+        s::disable(store, synced, keys.as_mut()).map_err(sync_error)?;
+        self.sync_error = None;
+        Ok(())
+    }
+
+    /// The main device approves a device after the user compared its key code.
+    pub fn approve_device(&mut self, id: &str, code: &str, now: u64) -> CmdResult<()> {
+        self.touch(now);
+        let device: [u8; 16] = data_encoding::HEXLOWER
+            .decode(id.as_bytes())
+            .ok()
+            .and_then(|b| b.try_into().ok())
+            .ok_or_else(|| CmdError::new(ErrorKind::Invalid, "Unknown device"))?;
+        let synced = self
+            .synced
+            .as_mut()
+            .ok_or_else(|| CmdError::new(ErrorKind::Invalid, "Sync is off"))?;
+        synced
+            .approve(device, code.trim(), wall_ms(now))
+            .map_err(sync_error)
+    }
+
+    /// Makes this Mac the main device of a new account with new keys, carrying everything
+    /// over (the main device was copied or lost its key; or the user wants a clean start).
+    pub fn start_new_sync_account(
+        &mut self,
+        password: &str,
+        now: u64,
+    ) -> CmdResult<EmergencyKitDto> {
+        self.touch(now);
+        let link = self.link()?;
+        let (transport, mut keys, name) =
+            (self.transport()?, link.device_keys(), link.device_name());
+        let kdf = self.kdf;
+        let old = self.synced.take();
+        let store = self.store.as_mut().ok_or_else(locked)?;
+        let s::Enabled {
+            synced,
+            kit,
+            first_round,
+            ..
+        } = s::start_new_account(
+            store,
+            old,
+            transport,
+            keys.as_mut(),
+            &name,
+            password,
+            kdf,
+            wall_ms(now),
+        )
+        .map_err(sync_error)?;
+        // The Touch ID record wraps the replaced account key.
+        self.keyring.delete();
+        let dto = EmergencyKitDto {
+            account_id: kit.account_id,
+            secret_key: kit.secret_key.to_string(),
+            setup_code: synced.setup_code().to_text().to_string(),
+        };
+        self.synced = Some(synced);
+        self.note_round(first_round);
+        Ok(dto)
+    }
+
+    /// A new vault while synced is created through sync (its id commits to its key).
+    pub(super) fn create_vault_synced(
+        &mut self,
+        name: &str,
+        now: u64,
+    ) -> Option<CmdResult<uuid::Uuid>> {
+        let synced = self.synced.as_mut()?;
+        if !synced.engine().can_write() {
+            return None;
+        }
+        let store = self.store.as_mut()?;
+        Some(
+            synced
+                .create_vault(store, name, wall_ms(now))
+                .map_err(sync_error),
+        )
+    }
+
+    /// While synced, the master password is changed on the main device, which publishes it
+    /// for the account; other devices refuse.
+    pub(super) fn change_sync_password(&mut self, new: &str, now: u64) -> CmdResult<()> {
+        let Some(synced) = self.synced.as_mut() else {
+            return Ok(());
+        };
+        let store = self.store.as_ref().ok_or_else(locked)?;
+        let account = store.account_key_copy()?;
+        synced
+            .change_password(&account, new, self.kdf, wall_ms(now))
+            .map_err(sync_error)
+    }
+
+    pub(super) fn sync_blocks_password_change(&self) -> bool {
+        self.synced.as_ref().is_some_and(|x| !x.engine().is_root())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn dates_for_the_old_file_name() {
+        assert_eq!(civil_date(0), (1970, 1, 1));
+        assert_eq!(civil_date(19_723), (2024, 1, 1));
+        assert_eq!(civil_date(20_731), (2026, 10, 5));
+        assert_eq!(civil_date(11_016), (2000, 2, 29));
+    }
+}

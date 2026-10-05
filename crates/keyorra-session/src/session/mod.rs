@@ -25,6 +25,9 @@ mod bridge;
 mod bridge_tests;
 #[cfg(test)]
 mod polish_tests;
+mod sync;
+#[cfg(test)]
+mod sync_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -84,7 +87,17 @@ pub struct Session {
     keyring: Box<dyn Keyring>,
     /// When the master password was last entered (or the Touch ID record says so).
     password_verified_at: Option<u64>,
+    /// Transport and device keys for sync (from the app).
+    sync_link: Option<Box<dyn sync::SyncLink>>,
+    /// Running while unlocked and sync is on.
+    synced: Option<crate::sync::Synced<sync::BoxedTransport>>,
+    /// Why sync is not running (shown with a retry).
+    sync_error: Option<String>,
+    /// What the last round undid or could not show.
+    sync_notices: Vec<String>,
 }
+
+pub use sync::{BoxedTransport, EmergencyKitDto, SyncLink, SyncStatusDto};
 
 impl Session {
     /// `kdf` is `KdfParams::DEFAULT` in the app; tests pass cheap parameters.
@@ -114,6 +127,10 @@ impl Session {
             watchtower_count: None,
             keyring: Box::new(NoKeyring),
             password_verified_at: None,
+            sync_link: None,
+            synced: None,
+            sync_error: None,
+            sync_notices: Vec::new(),
         }
     }
 
@@ -177,6 +194,7 @@ impl Session {
                 self.store = Some(store);
                 self.password_verified_at = Some(now);
                 self.rearm_touch_id(now);
+                self.resume_sync();
                 Ok(())
             }
             Err(keyorra_core::Error::WrongPassword) => {
@@ -301,6 +319,7 @@ impl Session {
         let _ = store.purge_expired(now as i64);
         self.store = Some(store);
         self.password_verified_at = Some(record.verified_at);
+        self.resume_sync();
         Ok(())
     }
 
@@ -326,6 +345,9 @@ impl Session {
 
     /// Drops the store; its keys are wiped on drop.
     pub fn lock(&mut self) {
+        // Sync runs only while unlocked; its state is in the store.
+        self.synced = None;
+        self.sync_notices.clear();
         self.store = None;
         self.breaches.clear();
         self.watchtower_count = None;
@@ -382,10 +404,17 @@ impl Session {
                 "The new password must be different",
             ));
         }
+        if self.sync_blocks_password_change() {
+            return Err(CmdError::new(
+                ErrorKind::Invalid,
+                "Change the master password on your main device",
+            ));
+        }
         let result = self.store_mut()?.change_password(current, new);
         match result {
             Ok(()) => {
                 self.throttle.record_success();
+                self.change_sync_password(new, now)?;
                 self.password_verified_at = Some(now);
                 // Replace the Touch ID record, like 1Password does after a password change.
                 self.rearm_touch_id(now);
@@ -439,6 +468,13 @@ impl Session {
         let name = name.trim();
         if name.is_empty() {
             return Err(CmdError::new(ErrorKind::Invalid, "Vault name is required"));
+        }
+        if let Some(created) = self.create_vault_synced(name, now) {
+            return Ok(VaultDto {
+                id: created?,
+                name: name.to_owned(),
+                item_count: 0,
+            });
         }
         let info = self.store_mut()?.create_vault(name)?;
         Ok(VaultDto {
