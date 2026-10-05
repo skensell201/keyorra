@@ -1130,6 +1130,8 @@ Unchanged and per device; never synced.
   equals the fold. Per-file results.
 - **Emergency Kit / setup code** (after re-entering the master password).
 
+As built (A3-1): The Sync screen is one call (`sync_screen`): on/off, running, location, last round (time, went through), this Mac's role and key code, devices (approved, waiting, removed, main, this Mac), alarms with a plain title, an explanation and the actions that fit (accept; restore from this Mac — own stream, or any stream on the main Mac; remove device — the main Mac, for a forked device; continue as a new device), notices of the last round, and the log of this unlock (200 lines, in memory). "Unconfirmed" is shown for the account (the main Mac's newest changes are not all here), not per item. Tools: Emergency Kit (master password unless entered in the last 5 minutes), Verify everything (every item and attachment decrypts; every live item matches what sync shows), What the folder sees (names and sizes; unknown files marked), the database's backup copies (`.bak-v*`, `.pre-sync-*`) with delete. The sync folder is chosen only while sync is off (iCloud Drive by default; another folder with a note on what to keep in mind: cloud storage folders kept downloaded, network drives connected). The setup code is copied concealed from clipboard managers and cleared after 90 seconds.
+
 ### 9.2 "What the folder/server sees"
 
 An in-app table of every file or blob for this account exactly as stored: name, kind as
@@ -1242,7 +1244,8 @@ Each line becomes one implementation plan in `docs/superpowers/plans/`.
 | **A1d-2** Sync in the session | Session wiring (sync only while unlocked), setup code, device keys sealed to the Secure Enclave, turning sync off, rejoining (merge by record id), carrying another account's vault over, starting a new account | Two sessions converge through enable/join/approve/lock/unlock/disable/rejoin |
 | **A2-1** Folder transport | `keyorra-sync-fs` (layout, strict names, temp outside the synced tree, exclusive renames, download state, round budget), chunks in the transport trait | two engines converge through a temp folder with conflict copies and late files |
 | **A2-2** Attachments and macOS | attachment contents as chunks, file coordination, per-account folders in the session, iCloud Drive link, FSEvents and polling | two vault stores sync an item with an attachment through a folder |
-| **A3** UI | Enable/join/leave, Emergency Kit, setup code, folder-based approval, Sync screen, conflicts in list/detail/Watchtower, alarms | Suite 10 (folder) green; manual two-Mac iCloud test |
+| **A3-1** Sync screen backend | Folder inventory, alarm views and actions, device removal, Verify everything, backup copies, log, joining outcome, sync folder choice, concealed setup code | Session and app tests green |
+| **A3-2** Sync screen and flows in the app (Vitest) | Enable/join/leave, Emergency Kit, setup code, folder-based approval, Sync screen, banner, alarms; conflicts in list/detail/Watchtower | Suite 10 (folder) green; manual two-Mac iCloud test |
 | **B1** Server | Schema, API, auth, approval exchange, SSE, limits, quotas, TLS modes, logs, admin CLI, backup/restore/check | Suite 8 green |
 | **B2** Server transport | HTTP transport, login/approval UI, pinning, transport switch with `Moved` | Suite 9 + E2E against server green |
 | **B3** Packaging | Multi-arch Docker image, static musl binaries, systemd unit, signed releases, `docs/self-hosting.md` | Image runs on amd64 and arm64 (Raspberry Pi) from the docs alone |
