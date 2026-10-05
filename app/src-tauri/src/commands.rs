@@ -165,6 +165,9 @@ pub fn connect_browsers() -> CmdResult<Vec<String>> {
             return Err(CmdError::new(ErrorKind::Other, message));
         }
     }
+    let safari =
+        keepsake_session::bridge::host::safari_status(std::path::Path::new("/Applications"));
+    done.push(safari.to_string());
     Ok(done)
 }
 

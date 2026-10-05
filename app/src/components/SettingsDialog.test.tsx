@@ -147,3 +147,15 @@ test("says so when the browsers cannot be loaded", async () => {
   expect(await screen.findByText("Couldn't load browsers")).toBeInTheDocument();
   expect(screen.queryByText("No browsers connected yet.")).not.toBeInTheDocument();
 });
+
+test("tells how to add Safari when its app is missing", async () => {
+  vi.mocked(api.connectBrowsers).mockResolvedValue(["Chrome", "Safari: install Keepsake for Safari"]);
+  const user = userEvent.setup();
+  render(<SettingsDialog onClose={vi.fn()} />);
+  await user.click(await screen.findByRole("button", { name: "Connect browsers" }));
+  expect(
+    await screen.findByText(
+      "Ready in Chrome. Load the Keepsake extension there and click Connect. Safari: install Keepsake for Safari.",
+    ),
+  ).toBeInTheDocument();
+});

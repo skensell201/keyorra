@@ -103,6 +103,16 @@ pub fn manifests(app_support: &Path, exe: &Path) -> Vec<Manifest> {
         .collect()
 }
 
+/// Safari needs no host manifest: its extension ships inside "Keepsake for Safari.app" and
+/// reaches the app's socket itself. Ready means that app is installed in `applications`.
+pub fn safari_status(applications: &Path) -> &'static str {
+    if applications.join("Keepsake for Safari.app").is_dir() {
+        "Safari"
+    } else {
+        "Safari: install Keepsake for Safari"
+    }
+}
+
 fn manifest_json(family: Family, exe: &Path) -> String {
     let mut m = json!({
         "name": HOST_NAME,
@@ -140,6 +150,17 @@ mod tests {
         ])));
         assert!(!is_host_launch(&args(&["keepsake-app"])));
         assert!(!is_host_launch(&args(&["keepsake-app", "--hidden"])));
+    }
+
+    #[test]
+    fn safari_is_ready_once_its_app_is_installed() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(
+            safari_status(dir.path()),
+            "Safari: install Keepsake for Safari"
+        );
+        std::fs::create_dir_all(dir.path().join("Keepsake for Safari.app/Contents")).unwrap();
+        assert_eq!(safari_status(dir.path()), "Safari");
     }
 
     #[test]

@@ -34,10 +34,13 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
   async function connectBrowsers() {
     try {
       const found = await api.connectBrowsers();
+      // Entries like "Safari: install Keepsake for Safari" are advice, not ready browsers.
+      const ready = found.filter((b) => !b.includes(":"));
+      const advice = found.filter((b) => b.includes(":")).map((a) => ` ${a}.`);
       setBrowsersNote(
-        found.length
-          ? `Ready in ${found.join(", ")}. Load the Keepsake extension there and click Connect.`
-          : "No supported browsers found.",
+        (ready.length
+          ? `Ready in ${ready.join(", ")}. Load the Keepsake extension there and click Connect.`
+          : "No supported browsers found.") + advice.join(""),
       );
     } catch (e) {
       setBrowsersNote(errorMessage(e));
