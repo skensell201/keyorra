@@ -188,6 +188,33 @@ impl Transport for Upto<'_> {
     fn head(&self, stream: &DeviceId) -> Result<Option<u64>> {
         self.inner.head(stream)
     }
+    fn headers(&self) -> Result<Vec<(String, Fetched<Vec<u8>>)>> {
+        self.inner.headers()
+    }
+    fn put_header(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        self.inner.put_header(name, bytes)
+    }
+    fn delete_header(&self, name: &str) -> Result<()> {
+        self.inner.delete_header(name)
+    }
+    fn snapshots(&self) -> Result<Vec<(String, DeviceId)>> {
+        self.inner.snapshots()
+    }
+    fn get_snapshot(&self, name: &str) -> Result<Fetched<Vec<u8>>> {
+        self.inner.get_snapshot(name)
+    }
+    fn put_snapshot(&self, bytes: &[u8]) -> Result<String> {
+        self.inner.put_snapshot(bytes)
+    }
+    fn delete_snapshot(&self, name: &str) -> Result<()> {
+        self.inner.delete_snapshot(name)
+    }
+    fn root_head_file(&self) -> Result<Fetched<Vec<u8>>> {
+        self.inner.root_head_file()
+    }
+    fn put_root_head_file(&self, bytes: &[u8]) -> Result<()> {
+        self.inner.put_root_head_file(bytes)
+    }
 }
 
 #[test]
@@ -462,6 +489,33 @@ impl Transport for BrokenStream<'_> {
     }
     fn head(&self, stream: &DeviceId) -> Result<Option<u64>> {
         self.inner.head(stream)
+    }
+    fn headers(&self) -> Result<Vec<(String, Fetched<Vec<u8>>)>> {
+        self.inner.headers()
+    }
+    fn put_header(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        self.inner.put_header(name, bytes)
+    }
+    fn delete_header(&self, name: &str) -> Result<()> {
+        self.inner.delete_header(name)
+    }
+    fn snapshots(&self) -> Result<Vec<(String, DeviceId)>> {
+        self.inner.snapshots()
+    }
+    fn get_snapshot(&self, name: &str) -> Result<Fetched<Vec<u8>>> {
+        self.inner.get_snapshot(name)
+    }
+    fn put_snapshot(&self, bytes: &[u8]) -> Result<String> {
+        self.inner.put_snapshot(bytes)
+    }
+    fn delete_snapshot(&self, name: &str) -> Result<()> {
+        self.inner.delete_snapshot(name)
+    }
+    fn root_head_file(&self) -> Result<Fetched<Vec<u8>>> {
+        self.inner.root_head_file()
+    }
+    fn put_root_head_file(&self, bytes: &[u8]) -> Result<()> {
+        self.inner.put_root_head_file(bytes)
     }
 }
 

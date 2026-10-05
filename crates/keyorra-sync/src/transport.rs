@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::error::Result;
 use crate::segment::SegmentHeader;
+use crate::snapshot::{snapshot_name, SnapshotHeader};
 use crate::DeviceId;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -37,6 +38,26 @@ pub trait Transport {
     /// The highest `last_seq` stored for `stream` (from file names or server metadata, without
     /// reading segments): how a device notices that a stream went backwards (spec §4.5).
     fn head(&self, stream: &DeviceId) -> Result<Option<u64>>;
+    /// Account header files as (file name, content) (spec §4.7).
+    fn headers(&self) -> Result<Vec<(String, Fetched<Vec<u8>>)>>;
+    fn put_header(&self, name: &str, bytes: &[u8]) -> Result<()>;
+    fn delete_header(&self, name: &str) -> Result<()>;
+    /// Snapshots as (name = lowercase hex SHA-256 of the file, author) (spec §4.8).
+    fn snapshots(&self) -> Result<Vec<(String, DeviceId)>>;
+    fn get_snapshot(&self, name: &str) -> Result<Fetched<Vec<u8>>>;
+    /// Stores a snapshot under its name, which it returns.
+    fn put_snapshot(&self, bytes: &[u8]) -> Result<String>;
+    fn delete_snapshot(&self, name: &str) -> Result<()>;
+    /// The main device's advertised head file ([`crate::root_head`]).
+    fn root_head_file(&self) -> Result<Fetched<Vec<u8>>>;
+    fn put_root_head_file(&self, bytes: &[u8]) -> Result<()>;
+}
+
+#[derive(Clone, Debug, Default)]
+struct Files {
+    headers: BTreeMap<String, Vec<u8>>,
+    snapshots: BTreeMap<String, Vec<u8>>,
+    root_head: Option<Vec<u8>>,
 }
 
 /// One stream: segment bytes by first sequence number.
@@ -46,6 +67,7 @@ type Stream = BTreeMap<u64, Vec<u8>>;
 #[derive(Clone, Debug, Default)]
 pub struct MemoryTransport {
     streams: Arc<Mutex<BTreeMap<DeviceId, Stream>>>,
+    files: Arc<Mutex<Files>>,
 }
 
 impl MemoryTransport {
@@ -57,6 +79,7 @@ impl MemoryTransport {
     pub fn deep_copy(&self) -> MemoryTransport {
         MemoryTransport {
             streams: Arc::new(Mutex::new(self.streams.lock().unwrap().clone())),
+            files: Arc::new(Mutex::new(self.files.lock().unwrap().clone())),
         }
     }
 
@@ -94,6 +117,69 @@ impl Transport for MemoryTransport {
             .and_then(|segs| segs.values().next_back())
             .and_then(|b| SegmentHeader::parse(b).ok())
             .map(|h| h.last_seq))
+    }
+
+    fn headers(&self) -> Result<Vec<(String, Fetched<Vec<u8>>)>> {
+        let files = self.files.lock().unwrap();
+        Ok(files
+            .headers
+            .iter()
+            .map(|(n, b)| (n.clone(), Fetched::Ready(b.clone())))
+            .collect())
+    }
+
+    fn put_header(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        let mut files = self.files.lock().unwrap();
+        files.headers.insert(name.to_owned(), bytes.to_vec());
+        Ok(())
+    }
+
+    fn delete_header(&self, name: &str) -> Result<()> {
+        self.files.lock().unwrap().headers.remove(name);
+        Ok(())
+    }
+
+    fn snapshots(&self) -> Result<Vec<(String, DeviceId)>> {
+        let files = self.files.lock().unwrap();
+        Ok(files
+            .snapshots
+            .iter()
+            .filter_map(|(n, b)| Some((n.clone(), SnapshotHeader::parse(b).ok()?.author)))
+            .collect())
+    }
+
+    fn get_snapshot(&self, name: &str) -> Result<Fetched<Vec<u8>>> {
+        let files = self.files.lock().unwrap();
+        Ok(files
+            .snapshots
+            .get(name)
+            .map_or(Fetched::Missing, |b| Fetched::Ready(b.clone())))
+    }
+
+    fn put_snapshot(&self, bytes: &[u8]) -> Result<String> {
+        SnapshotHeader::parse(bytes)?;
+        let name = snapshot_name(bytes);
+        let mut files = self.files.lock().unwrap();
+        files.snapshots.insert(name.clone(), bytes.to_vec());
+        Ok(name)
+    }
+
+    fn delete_snapshot(&self, name: &str) -> Result<()> {
+        self.files.lock().unwrap().snapshots.remove(name);
+        Ok(())
+    }
+
+    fn root_head_file(&self) -> Result<Fetched<Vec<u8>>> {
+        let files = self.files.lock().unwrap();
+        Ok(files
+            .root_head
+            .clone()
+            .map_or(Fetched::Missing, Fetched::Ready))
+    }
+
+    fn put_root_head_file(&self, bytes: &[u8]) -> Result<()> {
+        self.files.lock().unwrap().root_head = Some(bytes.to_vec());
+        Ok(())
     }
 
     fn append(&self, segment: &[u8]) -> Result<AppendOutcome> {
@@ -172,6 +258,32 @@ mod tests {
             AppendOutcome::Conflict
         );
         assert!(t.append(b"junk").is_err());
+    }
+
+    #[test]
+    fn headers_and_snapshots_are_stored_by_name() {
+        let t = MemoryTransport::new();
+        t.put_header("00000001-aa.hdr", b"h1").unwrap();
+        assert_eq!(
+            t.headers().unwrap(),
+            vec![("00000001-aa.hdr".to_owned(), Fetched::Ready(b"h1".to_vec()))]
+        );
+        t.delete_header("00000001-aa.hdr").unwrap();
+        assert!(t.headers().unwrap().is_empty());
+        let snap = crate::snapshot::seal_snapshot(
+            &Key::from_bytes([1; 32]),
+            &SigningKey::from_bytes(&[2; 32]),
+            [7; 16],
+            Value::Null,
+            &mut rand::rngs::OsRng,
+        )
+        .unwrap();
+        let name = t.put_snapshot(&snap).unwrap();
+        assert_eq!(t.snapshots().unwrap(), vec![(name.clone(), [7; 16])]);
+        assert_eq!(t.get_snapshot(&name).unwrap(), Fetched::Ready(snap));
+        t.delete_snapshot(&name).unwrap();
+        assert_eq!(t.get_snapshot(&name).unwrap(), Fetched::Missing);
+        assert!(t.put_snapshot(b"junk").is_err());
     }
 
     #[test]

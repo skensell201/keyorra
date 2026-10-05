@@ -146,6 +146,42 @@ impl<T: Transport> Transport for Faulty<T> {
         self.inner.head(stream)
     }
 
+    fn headers(&self) -> Result<Vec<(String, Fetched<Vec<u8>>)>> {
+        self.inner.headers()
+    }
+
+    fn put_header(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        self.inner.put_header(name, bytes)
+    }
+
+    fn delete_header(&self, name: &str) -> Result<()> {
+        self.inner.delete_header(name)
+    }
+
+    fn snapshots(&self) -> Result<Vec<(String, DeviceId)>> {
+        self.inner.snapshots()
+    }
+
+    fn get_snapshot(&self, name: &str) -> Result<Fetched<Vec<u8>>> {
+        self.inner.get_snapshot(name)
+    }
+
+    fn put_snapshot(&self, bytes: &[u8]) -> Result<String> {
+        self.inner.put_snapshot(bytes)
+    }
+
+    fn delete_snapshot(&self, name: &str) -> Result<()> {
+        self.inner.delete_snapshot(name)
+    }
+
+    fn root_head_file(&self) -> Result<Fetched<Vec<u8>>> {
+        self.inner.root_head_file()
+    }
+
+    fn put_root_head_file(&self, bytes: &[u8]) -> Result<()> {
+        self.inner.put_root_head_file(bytes)
+    }
+
     fn append(&self, segment: &[u8]) -> Result<AppendOutcome> {
         let f = self.faults();
         if self.roll(f.fail_before_append) {
@@ -199,6 +235,42 @@ impl<T: Transport> Transport for Rollback<T> {
             head
         })
     }
+
+    fn headers(&self) -> Result<Vec<(String, Fetched<Vec<u8>>)>> {
+        self.inner.headers()
+    }
+
+    fn put_header(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        self.inner.put_header(name, bytes)
+    }
+
+    fn delete_header(&self, name: &str) -> Result<()> {
+        self.inner.delete_header(name)
+    }
+
+    fn snapshots(&self) -> Result<Vec<(String, DeviceId)>> {
+        self.inner.snapshots()
+    }
+
+    fn get_snapshot(&self, name: &str) -> Result<Fetched<Vec<u8>>> {
+        self.inner.get_snapshot(name)
+    }
+
+    fn put_snapshot(&self, bytes: &[u8]) -> Result<String> {
+        self.inner.put_snapshot(bytes)
+    }
+
+    fn delete_snapshot(&self, name: &str) -> Result<()> {
+        self.inner.delete_snapshot(name)
+    }
+
+    fn root_head_file(&self) -> Result<Fetched<Vec<u8>>> {
+        self.inner.root_head_file()
+    }
+
+    fn put_root_head_file(&self, bytes: &[u8]) -> Result<()> {
+        self.inner.put_root_head_file(bytes)
+    }
 }
 
 /// A store that shows one stream from another store: one side of a fork (two histories of
@@ -236,6 +308,41 @@ impl<T: Transport, U: Transport> Transport for Overlay<T, U> {
         } else {
             self.base.head(stream)
         }
+    }
+    fn headers(&self) -> Result<Vec<(String, Fetched<Vec<u8>>)>> {
+        self.base.headers()
+    }
+
+    fn put_header(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        self.base.put_header(name, bytes)
+    }
+
+    fn delete_header(&self, name: &str) -> Result<()> {
+        self.base.delete_header(name)
+    }
+
+    fn snapshots(&self) -> Result<Vec<(String, DeviceId)>> {
+        self.base.snapshots()
+    }
+
+    fn get_snapshot(&self, name: &str) -> Result<Fetched<Vec<u8>>> {
+        self.base.get_snapshot(name)
+    }
+
+    fn put_snapshot(&self, bytes: &[u8]) -> Result<String> {
+        self.base.put_snapshot(bytes)
+    }
+
+    fn delete_snapshot(&self, name: &str) -> Result<()> {
+        self.base.delete_snapshot(name)
+    }
+
+    fn root_head_file(&self) -> Result<Fetched<Vec<u8>>> {
+        self.base.root_head_file()
+    }
+
+    fn put_root_head_file(&self, bytes: &[u8]) -> Result<()> {
+        self.base.put_root_head_file(bytes)
     }
 }
 

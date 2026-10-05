@@ -225,6 +225,33 @@ impl Transport for NoHeads {
     fn head(&self, _: &DeviceId) -> Result<Option<u64>> {
         Err(Error::Transport("no metadata".into()))
     }
+    fn headers(&self) -> Result<Vec<(String, Fetched<Vec<u8>>)>> {
+        self.0.headers()
+    }
+    fn put_header(&self, name: &str, bytes: &[u8]) -> Result<()> {
+        self.0.put_header(name, bytes)
+    }
+    fn delete_header(&self, name: &str) -> Result<()> {
+        self.0.delete_header(name)
+    }
+    fn snapshots(&self) -> Result<Vec<(String, DeviceId)>> {
+        self.0.snapshots()
+    }
+    fn get_snapshot(&self, name: &str) -> Result<Fetched<Vec<u8>>> {
+        self.0.get_snapshot(name)
+    }
+    fn put_snapshot(&self, bytes: &[u8]) -> Result<String> {
+        self.0.put_snapshot(bytes)
+    }
+    fn delete_snapshot(&self, name: &str) -> Result<()> {
+        self.0.delete_snapshot(name)
+    }
+    fn root_head_file(&self) -> Result<Fetched<Vec<u8>>> {
+        self.0.root_head_file()
+    }
+    fn put_root_head_file(&self, bytes: &[u8]) -> Result<()> {
+        self.0.put_root_head_file(bytes)
+    }
 }
 
 #[test]
