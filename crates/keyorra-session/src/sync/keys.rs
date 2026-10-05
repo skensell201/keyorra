@@ -12,7 +12,9 @@ use zeroize::Zeroizing;
 
 pub trait DeviceKeyStore: Send {
     fn load(&self, device: &DeviceId) -> Option<SigningKey>;
-    fn store(&mut self, device: DeviceId, key: &SigningKey);
+    fn store(&mut self, device: DeviceId, key: &SigningKey) -> Result<(), String>;
+    /// The id is no longer used here (sync turned off, a join that failed).
+    fn forget(&mut self, device: &DeviceId);
     /// Another handle to the same keys (the engine keeps one to store a new id's key when it
     /// retires the old one).
     fn boxed_clone(&self) -> Box<dyn DeviceKeyStore>;
@@ -31,11 +33,16 @@ impl DeviceKeyStore for MemoryDeviceKeys {
             .map(|k| SigningKey::from_bytes(k))
     }
 
-    fn store(&mut self, device: DeviceId, key: &SigningKey) {
+    fn store(&mut self, device: DeviceId, key: &SigningKey) -> Result<(), String> {
         self.0
             .lock()
             .unwrap()
             .insert(device, Zeroizing::new(key.to_bytes()));
+        Ok(())
+    }
+
+    fn forget(&mut self, device: &DeviceId) {
+        self.0.lock().unwrap().remove(device);
     }
 
     fn boxed_clone(&self) -> Box<dyn DeviceKeyStore> {
@@ -50,7 +57,8 @@ impl DeviceKeys for EngineKeys {
     fn holds(&self, device: &DeviceId) -> bool {
         self.0.load(device).is_some()
     }
+    /// A failure leaves the new id without a stored key: the next restart retires it again.
     fn store(&mut self, device: DeviceId, key: &SigningKey) {
-        self.0.store(device, key);
+        let _ = self.0.store(device, key);
     }
 }

@@ -24,9 +24,10 @@ use std::collections::BTreeSet;
 use ed25519_dalek::{SigningKey, VerifyingKey};
 use keyorra_core::crypto::{KdfParams, Key};
 use keyorra_core::model::Item;
-use keyorra_core::store::{Change, ChangeKind, MetaWriter, Store};
+use keyorra_core::store::{Change, ChangeKind, ItemEntry, MetaWriter, Store};
 use keyorra_sync::account::{unlock_join_with, RootPin};
 use keyorra_sync::engine::{Engine, EngineMemo, Event, OutboxState, OutboxStore, Resumed};
+use keyorra_sync::fold::View;
 use keyorra_sync::header::{wrap_account_key, Header};
 use keyorra_sync::keys::derive_sync_keys;
 use keyorra_sync::present::ItemState;
@@ -75,6 +76,75 @@ impl OutboxStore for StoreOutbox {
     }
 }
 
+/// How a local change went.
+enum Outcome {
+    Written,
+    /// Sync can never take it: undone, with the reason.
+    Undone(String),
+}
+
+/// Whether the changed record still exists locally (live or in Recently Deleted).
+fn still_here(store: &Store, change: Change) -> Result<bool> {
+    Ok(match change.kind {
+        ChangeKind::Item => store.item_state(change.id)?.is_some(),
+        ChangeKind::Vault => store
+            .vault_rows()?
+            .iter()
+            .any(|(i, _, deleted)| i.id == change.id && !deleted),
+        ChangeKind::Attachment => false,
+    })
+}
+
+/// Writes `view` into `store`, except the records in `skip`. `vault_key` names the wrapped
+/// key a vault must keep. Returns the records that could not be written, with the reason.
+fn show_view(
+    store: &mut Store,
+    view: &View,
+    skip: &BTreeSet<Uuid>,
+    vault_key: impl Fn(Uuid) -> Option<Vec<u8>>,
+    now_secs: u64,
+) -> Vec<(Uuid, String)> {
+    let mut failed = Vec::new();
+    for (id, v) in &view.vaults {
+        if skip.contains(id) {
+            continue;
+        }
+        let Some(wrapped) = vault_key(*id) else {
+            failed.push((*id, "no usable vault key".to_owned()));
+            continue;
+        };
+        if let Err(e) = store.apply_remote_vault(*id, &v.name, &wrapped, v.deleted) {
+            failed.push((*id, e.to_string()));
+        }
+    }
+    for (id, v) in &view.items {
+        if skip.contains(id) {
+            continue;
+        }
+        let result = match (v.state, &v.payload, v.vault_id) {
+            (ItemState::Purged, _, _) => store.apply_remote_purge(*id),
+            (_, Some(p), Some(vault)) => {
+                let Ok(mut item) = serde_json::from_slice::<Item>(&p.item_json) else {
+                    failed.push((*id, "unreadable item".to_owned()));
+                    continue;
+                };
+                item.id = *id;
+                item.vault_id = vault;
+                let deleted_at = match v.state {
+                    ItemState::Trashed => Some(p.deleted_at.unwrap_or(now_secs) as i64),
+                    _ => None,
+                };
+                store.apply_remote_item(&item, deleted_at)
+            }
+            _ => Ok(()),
+        };
+        if let Err(e) = result {
+            failed.push((*id, e.to_string()));
+        }
+    }
+    failed
+}
+
 /// Sync of one store over one transport.
 pub struct Synced<T: Transport> {
     engine: Engine<OsRng>,
@@ -107,8 +177,10 @@ fn load_config(store: &Store) -> Result<SyncConfig> {
     serde_json::from_slice(&raw).map_err(|e| Error::Malformed(e.to_string()))
 }
 
-fn item_json(item: &Item) -> Result<Vec<u8>> {
-    serde_json::to_vec(item).map_err(|e| Error::Malformed(e.to_string()))
+fn item_json(item: &Item) -> Result<Zeroizing<Vec<u8>>> {
+    serde_json::to_vec(item)
+        .map(Zeroizing::new)
+        .map_err(|e| Error::Malformed(e.to_string()))
 }
 
 /// Whether sync is set up on this store.
@@ -116,8 +188,39 @@ pub fn is_enabled(store: &Store) -> Result<bool> {
     Ok(store.sync_tracking()? && store.sealed_meta(CONFIG)?.is_some())
 }
 
+/// Sync turned on: the store is the main device of a new account. `first_round` is the
+/// result of the first sync round; sync is on whatever it says (a failed round is retried).
+pub struct Enabled<T: Transport> {
+    pub synced: Synced<T>,
+    pub kit: EmergencyKit,
+    /// Items that could not be read here and so were not written to sync.
+    pub damaged: usize,
+    pub first_round: Result<RoundReport>,
+}
+
+/// A device that joined: its new store, waiting for approval. `first_round` as for
+/// [`Enabled`].
+pub struct Joined<T: Transport> {
+    pub store: Store,
+    pub synced: Synced<T>,
+    pub first_round: Result<RoundReport>,
+}
+
+/// What a round did besides the engine's events.
+#[derive(Debug, Default)]
+pub struct RoundReport {
+    pub events: Vec<Event>,
+    /// Local changes sync cannot take (deleting a vault that has items on another device):
+    /// undone here, and the account's state shown instead.
+    pub reverted: Vec<(Change, String)>,
+    /// Records sync shows that could not be written into the store, and local changes that
+    /// wait for something (both are tried again every round).
+    pub failed: Vec<(Uuid, String)>,
+}
+
 /// Turns `store` into the main device of a new synced account, writing everything it holds
 /// as first versions. The synced header uses `kdf` (the remote floor applies when joining).
+/// Nothing is changed in the store unless this returns `Ok` (review A1d I5).
 #[allow(clippy::too_many_arguments)]
 pub fn enable<T: Transport>(
     store: &mut Store,
@@ -127,14 +230,62 @@ pub fn enable<T: Transport>(
     password: &str,
     kdf: KdfParams,
     wall_ms: u64,
-) -> Result<(Synced<T>, EmergencyKit)> {
+) -> Result<Enabled<T>> {
     if is_enabled(store)? {
         return Err(Error::Refused("sync is already on".into()));
     }
     let account_id = random_id();
     let device = random_id();
     let signer = new_signer();
-    keys.store(device, &signer);
+    keys.store(device, &signer).map_err(Error::Refused)?;
+    let started = start_account(
+        store,
+        keys,
+        device,
+        signer,
+        device_name,
+        account_id,
+        password,
+        kdf,
+        wall_ms,
+    );
+    let (engine, config, kit, damaged) = match started {
+        Ok(x) => x,
+        Err(e) => {
+            keys.forget(&device);
+            let _ = store.delete_sealed_meta(OUTBOX);
+            return Err(e);
+        }
+    };
+    let mut synced = Synced {
+        engine,
+        transport,
+        config,
+    };
+    synced.commit(store)?;
+    let first_round = synced.round(store, wall_ms);
+    Ok(Enabled {
+        synced,
+        kit,
+        damaged,
+        first_round,
+    })
+}
+
+/// The new account's engine with everything of the store written, before anything is
+/// committed to the store.
+#[allow(clippy::too_many_arguments)]
+fn start_account(
+    store: &mut Store,
+    keys: &dyn DeviceKeyStore,
+    device: DeviceId,
+    signer: SigningKey,
+    device_name: &str,
+    account_id: AccountId,
+    password: &str,
+    kdf: KdfParams,
+    wall_ms: u64,
+) -> Result<(Engine<OsRng>, SyncConfig, EmergencyKit, usize)> {
     let (secret_key, secret_key_id) = SecretKey::generate(&mut OsRng);
     let account_key = store.account_key_copy()?;
     let root_key = signer.verifying_key();
@@ -148,6 +299,7 @@ pub fn enable<T: Transport>(
         wall_ms,
     );
     engine.set_outbox_store(Box::new(StoreOutbox(store.meta_writer()?)));
+    engine.set_device_keys(Box::new(keys::EngineKeys(keys.boxed_clone())));
     let mut salt = [0u8; 16];
     OsRng.fill_bytes(&mut salt);
     let sync_keys = derive_sync_keys(password, &salt, kdf, &secret_key, &account_id)?;
@@ -171,19 +323,20 @@ pub fn enable<T: Transport>(
             engine.adopt_vault(info.id, &info.name, &key, wall_ms)?;
         }
     }
+    let mut damaged = 0;
+    let mut entries = Vec::new();
     for vault in store.vaults()? {
-        for entry in store.list_items(Some(vault.id))? {
-            if let keyorra_core::store::ItemEntry::Ok(item) = entry {
-                engine.save_item(item.vault_id, item.id, &item_json(&item)?, wall_ms)?;
-            }
-        }
+        entries.extend(store.list_items(Some(vault.id))?);
     }
-    for entry in store.deleted_items()? {
-        if let keyorra_core::store::ItemEntry::Ok(item) = entry {
-            if let Some((_, Some(at))) = store.item_state(item.id)? {
-                engine.save_item(item.vault_id, item.id, &item_json(&item)?, wall_ms)?;
-                engine.trash_item(item.id, at.max(0) as u64, wall_ms)?;
-            }
+    entries.extend(store.deleted_items()?);
+    for entry in entries {
+        let ItemEntry::Ok(item) = entry else {
+            damaged += 1;
+            continue;
+        };
+        engine.save_item(item.vault_id, item.id, &item_json(&item)?, wall_ms)?;
+        if let Some((_, Some(at))) = store.item_state(item.id)? {
+            engine.trash_item(item.id, at.max(0) as u64, wall_ms)?;
         }
     }
     let config = SyncConfig {
@@ -195,26 +348,19 @@ pub fn enable<T: Transport>(
         secret_key: *secret_key.as_bytes(),
         secret_key_id: secret_key_id.clone(),
     };
-    save_config(store, &config)?;
-    store.set_sync_tracking(true)?;
     let kit = EmergencyKit {
         account_id: data_encoding::HEXLOWER.encode(&account_id),
         secret_key: secret_key.display(&secret_key_id),
     };
-    let mut synced = Synced {
-        engine,
-        transport,
-        config,
-    };
-    synced.round(store, wall_ms)?;
-    Ok((synced, kit))
+    Ok((engine, config, kit, damaged))
 }
 
 /// A new device joins a synced account it has no local vault for: a store is created at
 /// `path` with the account's key (unlocked with the local `password`), and the device
 /// self-joins; it waits for the main device's approval (comparing [`Synced::key_code`]).
 /// `unlock` opens a header with the master password and the Secret Key (the app passes
-/// `Header::unlock`, which refuses KDF parameters below the remote floor).
+/// `Header::unlock`, which refuses KDF parameters below the remote floor). On an error no
+/// file is left at `path`.
 #[allow(clippy::too_many_arguments)]
 pub fn join<T: Transport>(
     path: &std::path::Path,
@@ -228,7 +374,7 @@ pub fn join<T: Transport>(
     device_name: &str,
     unlock: impl FnMut(&Header) -> Result<Key>,
     wall_ms: u64,
-) -> Result<(Store, Synced<T>)> {
+) -> Result<Joined<T>> {
     let files = transport.headers()?;
     let root_head = match transport.root_head_file()? {
         Fetched::Ready(b) => Some(b),
@@ -239,40 +385,66 @@ pub fn join<T: Transport>(
     let mut store =
         Store::create_with_account_key(path, password, local_kdf, joined.account_key.clone())?;
     let device = random_id();
-    let signer = new_signer();
-    keys.store(device, &signer);
-    let root_key = VerifyingKey::from_bytes(&header.root_key)
-        .map_err(|_| Error::Malformed("main device key".into()))?;
-    let mut engine = Engine::join(
-        device,
-        signer,
-        device_name,
-        header.account_id,
-        joined.account_key,
-        header.root_device,
-        root_key,
-        OsRng,
-    );
-    engine.set_outbox_store(Box::new(StoreOutbox(store.meta_writer()?)));
-    engine.self_join(wall_ms)?;
-    let config = SyncConfig {
-        account_id: header.account_id,
-        device,
-        device_name: device_name.to_owned(),
-        root: header.root_device,
-        root_key: header.root_key,
-        secret_key: *secret_key.as_bytes(),
-        secret_key_id: secret_key_id.to_owned(),
+    let started = (|| -> Result<Synced<T>> {
+        let signer = new_signer();
+        keys.store(device, &signer).map_err(Error::Refused)?;
+        let root_key = VerifyingKey::from_bytes(&header.root_key)
+            .map_err(|_| Error::Malformed("main device key".into()))?;
+        let mut engine = Engine::join(
+            device,
+            signer,
+            device_name,
+            header.account_id,
+            joined.account_key,
+            header.root_device,
+            root_key,
+            OsRng,
+        );
+        engine.set_outbox_store(Box::new(StoreOutbox(store.meta_writer()?)));
+        engine.set_device_keys(Box::new(keys::EngineKeys(keys.boxed_clone())));
+        engine.self_join(wall_ms)?;
+        let config = SyncConfig {
+            account_id: header.account_id,
+            device,
+            device_name: device_name.to_owned(),
+            root: header.root_device,
+            root_key: header.root_key,
+            secret_key: *secret_key.as_bytes(),
+            secret_key_id: secret_key_id.to_owned(),
+        };
+        let mut synced = Synced {
+            engine,
+            transport,
+            config,
+        };
+        synced.commit(&mut store)?;
+        Ok(synced)
+    })();
+    let mut synced = match started {
+        Ok(s) => s,
+        Err(e) => {
+            drop(store);
+            keys.forget(&device);
+            remove_database(path);
+            return Err(e);
+        }
     };
-    save_config(&mut store, &config)?;
-    store.set_sync_tracking(true)?;
-    let mut synced = Synced {
-        engine,
-        transport,
-        config,
-    };
-    synced.round(&mut store, wall_ms)?;
-    Ok((store, synced))
+    let first_round = synced.round(&mut store, wall_ms);
+    Ok(Joined {
+        store,
+        synced,
+        first_round,
+    })
+}
+
+/// Removes a database file this module created, with SQLite's companions.
+fn remove_database(path: &std::path::Path) {
+    let _ = std::fs::remove_file(path);
+    for suffix in ["-journal", "-wal", "-shm"] {
+        let mut name = path.as_os_str().to_owned();
+        name.push(suffix);
+        let _ = std::fs::remove_file(std::path::PathBuf::from(name));
+    }
 }
 
 /// Continues sync after a restart (the store unlocked). The device key comes from `keys`; if
@@ -337,43 +509,78 @@ impl<T: Transport> Synced<T> {
     /// shown in the store.
     pub fn create_vault(&mut self, store: &mut Store, name: &str, wall_ms: u64) -> Result<Uuid> {
         let id = self.engine.create_vault(name, wall_ms)?;
-        self.show(store)?;
+        self.show(store, wall_ms)?;
         Ok(id)
     }
 
     /// One round: write the local changes, sync, show the result in the store, persist.
-    /// Returns the engine's events.
-    pub fn round(&mut self, store: &mut Store, wall_ms: u64) -> Result<Vec<Event>> {
-        self.write_changes(store, wall_ms)?;
+    /// The engine's state is persisted whatever else fails.
+    pub fn round(&mut self, store: &mut Store, wall_ms: u64) -> Result<RoundReport> {
+        let mut report = RoundReport::default();
+        let before = self.write_changes(store, wall_ms, &mut report);
         let synced = self.engine.sync(&self.transport, wall_ms);
         // What could not be written before (the engine was still reading its own stream).
-        self.write_changes(store, wall_ms)?;
-        self.show(store)?;
-        self.persist(store)?;
+        let after = self.write_changes(store, wall_ms, &mut report);
+        // While the engine reads its streams again after a restart, its view lacks this
+        // device's own latest versions: showing it would put older data back (review A1d I1).
+        let shown = if self.engine.is_rebuilding() {
+            Ok(Vec::new())
+        } else {
+            self.show(store, wall_ms)
+        };
+        let persisted = self.persist(store);
+        before?;
+        after?;
+        report.failed.extend(shown?);
+        persisted?;
         synced?;
-        Ok(self.engine.take_events())
+        report.events = self.engine.take_events();
+        Ok(report)
     }
 
-    /// The store's recorded changes, as versions. A change the engine cannot take yet (it
-    /// is still reading its own stream after a restart, or conflict copies are owed) stays.
-    fn write_changes(&mut self, store: &mut Store, wall_ms: u64) -> Result<()> {
+    /// The store's recorded changes, as versions. A change the engine cannot take yet stays
+    /// recorded: it is still reading its own stream after a restart, conflict copies are
+    /// owed, what it refers to is not in sync yet, or the outbox could not be saved (review
+    /// A1d C1, I3). A change it can never take is undone (review A1d I4).
+    fn write_changes(
+        &mut self,
+        store: &mut Store,
+        wall_ms: u64,
+        report: &mut RoundReport,
+    ) -> Result<()> {
         if !self.engine.can_write() {
             return Ok(());
         }
         let mut done = Vec::new();
         for change in store.pending_changes()? {
             match self.write_change(store, change, wall_ms) {
-                Ok(()) | Err(Error::NotFound(_)) => done.push(change),
+                Ok(Outcome::Written) => done.push(change),
+                Ok(Outcome::Undone(reason)) => {
+                    done.push(change);
+                    report.reverted.push((change, reason));
+                }
                 Err(Error::Refused(_)) => {}
+                Err(Error::NotFound(reason)) => {
+                    if still_here(store, change)? {
+                        report.failed.push((change.id, reason));
+                    } else {
+                        done.push(change);
+                    }
+                }
                 Err(e) => return Err(e),
             }
+        }
+        if self.engine.outbox_unsaved() {
+            // Written to the engine but not safe from a crash: written again next round.
+            return Ok(());
         }
         store.clear_changes(&done)?;
         Ok(())
     }
 
-    fn write_change(&mut self, store: &Store, change: Change, wall_ms: u64) -> Result<()> {
+    fn write_change(&mut self, store: &Store, change: Change, wall_ms: u64) -> Result<Outcome> {
         let view = self.engine.view();
+        let now_secs = wall_ms / 1000;
         match change.kind {
             ChangeKind::Vault => {
                 let Some((info, key, deleted)) = store
@@ -381,36 +588,47 @@ impl<T: Transport> Synced<T> {
                     .into_iter()
                     .find(|(i, _, _)| i.id == change.id)
                 else {
-                    return Ok(());
+                    return Ok(Outcome::Written);
                 };
                 match view.vaults.get(&change.id) {
-                    None if !deleted => self.engine.adopt_vault(info.id, &info.name, &key, wall_ms),
-                    None => Ok(()),
+                    None if !deleted => self
+                        .engine
+                        .adopt_vault(info.id, &info.name, &key, wall_ms)?,
+                    None => {}
                     Some(v) if deleted && !v.deleted => {
-                        self.engine.delete_vault(change.id, wall_ms)
+                        let live_elsewhere = view
+                            .items
+                            .values()
+                            .any(|i| i.state == ItemState::Live && i.vault_id == Some(change.id));
+                        if live_elsewhere {
+                            return Ok(Outcome::Undone(
+                                "the vault has items on another device; it was not deleted".into(),
+                            ));
+                        }
+                        self.engine.delete_vault(change.id, wall_ms)?
                     }
                     Some(v) if !deleted && v.name != info.name => {
-                        self.engine.rename_vault(change.id, &info.name, wall_ms)
+                        self.engine.rename_vault(change.id, &info.name, wall_ms)?
                     }
-                    Some(_) => Ok(()),
+                    Some(_) => {}
                 }
+                Ok(Outcome::Written)
             }
             ChangeKind::Item => {
                 let synced = view.items.get(&change.id);
+                let shown = |state: ItemState| {
+                    synced.filter(|v| v.state == state).and_then(|v| {
+                        let p = v.payload.as_ref()?;
+                        let mut item = serde_json::from_slice::<Item>(&p.item_json).ok()?;
+                        item.id = change.id;
+                        item.vault_id = v.vault_id?;
+                        Some(item)
+                    })
+                };
                 match store.item_state(change.id)? {
                     Some((item, None)) => {
-                        self.engine
-                            .save_item(item.vault_id, item.id, &item_json(&item)?, wall_ms)
-                    }
-                    Some((item, Some(at))) => {
-                        let live_same = synced.is_some_and(|v| {
-                            v.state == ItemState::Live
-                                && v.payload
-                                    .as_ref()
-                                    .and_then(|p| serde_json::from_slice::<Item>(&p.item_json).ok())
-                                    == Some(item.clone())
-                        });
-                        if !live_same && synced.is_none_or(|v| v.state != ItemState::Trashed) {
+                        // Written already (e.g. again after a failed outbox save).
+                        if shown(ItemState::Live).as_ref() != Some(&item) {
                             self.engine.save_item(
                                 item.vault_id,
                                 item.id,
@@ -418,65 +636,68 @@ impl<T: Transport> Synced<T> {
                                 wall_ms,
                             )?;
                         }
-                        match self.engine.view().items.get(&change.id).map(|v| v.state) {
-                            Some(ItemState::Live) => {
-                                self.engine.trash_item(change.id, at.max(0) as u64, wall_ms)
-                            }
-                            _ => Ok(()),
+                    }
+                    Some((item, Some(at))) => {
+                        let same = shown(ItemState::Live).as_ref() == Some(&item)
+                            || shown(ItemState::Trashed).as_ref() == Some(&item);
+                        if !same {
+                            self.engine.save_item(
+                                item.vault_id,
+                                item.id,
+                                &item_json(&item)?,
+                                wall_ms,
+                            )?;
+                        }
+                        if self.engine.view().items.get(&change.id).map(|v| v.state)
+                            == Some(ItemState::Live)
+                        {
+                            self.engine
+                                .trash_item(change.id, at.max(0) as u64, wall_ms)?;
                         }
                     }
                     None if store.item_purged(change.id)? => {
                         if synced.is_some_and(|v| v.state == ItemState::Live) {
-                            self.engine.trash_item(change.id, 0, wall_ms)?;
+                            self.engine.trash_item(change.id, now_secs, wall_ms)?;
                         }
-                        match self.engine.view().items.get(&change.id).map(|v| v.state) {
-                            Some(ItemState::Trashed) => self.engine.purge_item(change.id, wall_ms),
-                            _ => Ok(()),
+                        if self.engine.view().items.get(&change.id).map(|v| v.state)
+                            == Some(ItemState::Trashed)
+                        {
+                            self.engine.purge_item(change.id, wall_ms)?;
                         }
                     }
-                    None => Ok(()),
+                    None => {}
                 }
+                Ok(Outcome::Written)
             }
             // Attachment contents travel with the folder transport (plan A2).
-            ChangeKind::Attachment => Ok(()),
+            ChangeKind::Attachment => Ok(Outcome::Written),
         }
     }
 
     /// What sync shows, in the store. Records with local changes not yet written are left as
-    /// they are (they will be written, then shown).
-    fn show(&mut self, store: &mut Store) -> Result<()> {
+    /// they are (they will be written, then shown). A vault keeps the key the engine chose
+    /// (review A1d C3). A record that cannot be written is skipped and reported; the rest is
+    /// still shown.
+    fn show(&mut self, store: &mut Store, wall_ms: u64) -> Result<Vec<(Uuid, String)>> {
         let pending: BTreeSet<Uuid> = store.pending_changes()?.into_iter().map(|c| c.id).collect();
         let view = self.engine.view();
-        for (id, v) in &view.vaults {
-            if !pending.contains(id) {
-                store.apply_remote_vault(*id, &v.name, &v.wrapped_key, v.deleted)?;
-            }
-        }
-        for (id, v) in &view.items {
-            if pending.contains(id) {
-                continue;
-            }
-            match (v.state, &v.payload, v.vault_id) {
-                (ItemState::Purged, _, _) => store.apply_remote_purge(*id)?,
-                (_, Some(p), Some(vault)) => {
-                    let Ok(mut item) = serde_json::from_slice::<Item>(&p.item_json) else {
-                        continue;
-                    };
-                    item.id = *id;
-                    item.vault_id = vault;
-                    let deleted_at = match v.state {
-                        ItemState::Trashed => Some(p.deleted_at.unwrap_or(0) as i64),
-                        _ => None,
-                    };
-                    store.apply_remote_item(&item, deleted_at)?;
-                }
-                _ => {}
-            }
-        }
-        Ok(())
+        let engine = &self.engine;
+        Ok(show_view(
+            store,
+            &view,
+            &pending,
+            |v| engine.vault_key(v),
+            wall_ms / 1000,
+        ))
+    }
+    /// Everything the engine cannot read again from the streams.
+    /// Sync is on: the configuration, the change tracking and the engine's state, saved.
+    fn commit(&mut self, store: &mut Store) -> Result<()> {
+        save_config(store, &self.config)?;
+        store.set_sync_tracking(true)?;
+        self.persist(store)
     }
 
-    /// Everything the engine cannot read again from the streams.
     fn persist(&mut self, store: &mut Store) -> Result<()> {
         // A retired id: the device goes on under its new one.
         if self.engine.device() != self.config.device {
