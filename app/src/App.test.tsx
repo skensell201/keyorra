@@ -13,6 +13,7 @@ vi.mock("./api", async (importOriginal) => {
       lock: vi.fn(),
       vaults: vi.fn().mockResolvedValue([]),
       items: vi.fn().mockResolvedValue([]),
+      watchtower: vi.fn().mockRejectedValue({ kind: "locked", message: "locked" }),
       onLocked: vi.fn().mockResolvedValue(() => {}),
       onPairRequest: vi.fn().mockResolvedValue(() => {}),
       onItemsChanged: vi.fn().mockResolvedValue(() => {}),

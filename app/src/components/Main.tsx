@@ -1,5 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
-import { api, errorMessage, type Item, type ItemKind, type ItemSummary, type PairingRequest, type Vault } from "../api";
+import {
+  api,
+  errorMessage,
+  watchtowerCount,
+  type Item,
+  type ItemKind,
+  type ItemSummary,
+  type PairingRequest,
+  type Vault,
+  type WatchtowerReport,
+} from "../api";
 import { ConfirmDialog } from "./ConfirmDialog";
 import { ImportDialog } from "./ImportDialog";
 import { ItemDetail } from "./ItemDetail";
@@ -9,6 +19,7 @@ import { ItemList } from "./ItemList";
 import { TrashItem } from "./TrashItem";
 import { SettingsDialog } from "./SettingsDialog";
 import { Sidebar, type Selection } from "./Sidebar";
+import { Watchtower } from "./Watchtower";
 
 type Pane = { mode: "empty" } | { mode: "view"; id: string } | { mode: "edit"; item: Item; isNew: boolean };
 
@@ -22,6 +33,7 @@ export function Main({ onLock }: { onLock: () => void }) {
   const [showSettings, setShowSettings] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pairing, setPairing] = useState<PairingRequest | null>(null);
+  const [report, setReport] = useState<WatchtowerReport | null>(null);
   const [deletingVault, setDeletingVault] = useState<Vault | null>(null);
   /** Runs once the user agreed to drop unsaved edits. */
   const [pendingLeave, setPendingLeave] = useState<(() => void) | null>(null);
@@ -79,7 +91,18 @@ export function Main({ onLock }: { onLock: () => void }) {
         if (seq === itemsSeq.current) setError(errorMessage(e));
       });
   }, [query, selection]);
-  const refresh = useCallback(() => Promise.all([loadVaults(), loadItems()]), [loadVaults, loadItems]);
+  const loadWatchtower = useCallback(
+    () =>
+      api
+        .watchtower()
+        .then(setReport)
+        .catch(() => setReport(null)),
+    [],
+  );
+  const refresh = useCallback(
+    () => Promise.all([loadVaults(), loadItems(), loadWatchtower()]),
+    [loadVaults, loadItems, loadWatchtower],
+  );
 
   useEffect(() => {
     const unlisten = api.onPairRequest(setPairing);
@@ -96,13 +119,18 @@ export function Main({ onLock }: { onLock: () => void }) {
   }, [refresh]);
   useEffect(() => {
     loadVaults();
-  }, [loadVaults]);
+    loadWatchtower();
+  }, [loadVaults, loadWatchtower]);
   useEffect(() => {
     loadItems();
   }, [loadItems]);
 
   const targetVault =
-    selection.kind === "vault" ? selection.id : selection.kind === "trash" ? undefined : vaults[0]?.id;
+    selection.kind === "vault"
+      ? selection.id
+      : selection.kind === "trash" || selection.kind === "watchtower"
+        ? undefined
+        : vaults[0]?.id;
 
   async function newItem(kind: ItemKind) {
     if (!targetVault) return;
@@ -157,6 +185,7 @@ export function Main({ onLock }: { onLock: () => void }) {
       <Sidebar
         vaults={vaults}
         selection={selection}
+        watchtowerCount={report ? watchtowerCount(report) : undefined}
         onSelect={(s) =>
           leaveEditor(() => {
             setSelection(s);
@@ -170,15 +199,24 @@ export function Main({ onLock }: { onLock: () => void }) {
         onLock={() => leaveEditor(onLock)}
         onSettings={() => setShowSettings(true)}
       />
-      <ItemList
-        items={items}
-        query={query}
-        onQuery={setQuery}
-        selectedId={pane.mode === "view" ? pane.id : null}
-        onSelect={(id) => leaveEditor(() => setPane({ mode: "view", id }))}
-        onNew={(kind) => leaveEditor(() => void newItem(kind))}
-        canCreate={Boolean(targetVault)}
-      />
+      {selection.kind === "watchtower" ? (
+        <Watchtower
+          report={report}
+          selectedId={pane.mode === "view" ? pane.id : null}
+          onOpen={(id) => leaveEditor(() => setPane({ mode: "view", id }))}
+          onReport={setReport}
+        />
+      ) : (
+        <ItemList
+          items={items}
+          query={query}
+          onQuery={setQuery}
+          selectedId={pane.mode === "view" ? pane.id : null}
+          onSelect={(id) => leaveEditor(() => setPane({ mode: "view", id }))}
+          onNew={(kind) => leaveEditor(() => void newItem(kind))}
+          canCreate={Boolean(targetVault)}
+        />
+      )}
       <section className="detail">
         {error && (
           <div className="banner error" role="alert">

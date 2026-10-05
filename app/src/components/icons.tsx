@@ -90,6 +90,7 @@ export const IconEyeOff = icon(
   </>,
 );
 export const IconPencil = icon(<path d="M5 19l1-4.5L15.5 5a2.1 2.1 0 013 3L9 17.5zM13.5 7l3 3" />);
+export const IconShield = icon(<path d="M12 3.5l7 2.8v5.2c0 4.3-2.9 7.6-7 9-4.1-1.4-7-4.7-7-9V6.3z" />);
 export const IconClose = icon(<path d="M6 6l12 12M18 6L6 18" />);
 
 const KIND_ICON: Record<ItemKind, ReturnType<typeof icon>> = {

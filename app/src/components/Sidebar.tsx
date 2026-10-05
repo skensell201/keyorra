@@ -1,13 +1,15 @@
-import { IconGrid, IconImport, IconLock, IconPencil, IconPlus, IconSettings, IconStar, IconTrash, IconVault } from "./icons";
+import { IconGrid, IconImport, IconLock, IconPencil, IconPlus, IconSettings, IconShield, IconStar, IconTrash, IconVault } from "./icons";
 import { Keyhole } from "./Keyhole";
 import { useState, type FormEvent } from "react";
 import type { Vault } from "../api";
 
-export type Selection = { kind: "all" } | { kind: "favorites" } | { kind: "vault"; id: string } | { kind: "trash" };
+export type Selection = { kind: "all" } | { kind: "favorites" } | { kind: "vault"; id: string } | { kind: "trash" } | { kind: "watchtower" };
 
 interface Props {
   vaults: Vault[];
   selection: Selection;
+  /** Items with Watchtower findings; hidden while unknown. */
+  watchtowerCount?: number;
   onSelect: (selection: Selection) => void;
   onNewVault: (name: string) => void;
   onRenameVault: (id: string, name: string) => void;
@@ -18,7 +20,7 @@ interface Props {
 }
 
 export function Sidebar(props: Props) {
-  const { vaults, selection, onSelect, onNewVault, onRenameVault, onDeleteVault, onImport, onLock, onSettings } = props;
+  const { vaults, selection, watchtowerCount, onSelect, onNewVault, onRenameVault, onDeleteVault, onImport, onLock, onSettings } = props;
   const [renaming, setRenaming] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
   const [naming, setNaming] = useState(false);
@@ -61,6 +63,11 @@ export function Sidebar(props: Props) {
       <button className="nav" aria-current={isCurrent({ kind: "trash" })} onClick={() => onSelect({ kind: "trash" })}>
         <IconTrash />
         Recently Deleted
+      </button>
+      <button className="nav" aria-current={isCurrent({ kind: "watchtower" })} onClick={() => onSelect({ kind: "watchtower" })}>
+        <IconShield />
+        <span>Watchtower</span>
+        {watchtowerCount !== undefined && <span className="count">{watchtowerCount}</span>}
       </button>
       <div className="heading">Vaults</div>
       {vaults.map((v) =>

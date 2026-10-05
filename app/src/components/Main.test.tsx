@@ -19,6 +19,8 @@ vi.mock("../api", async (importOriginal) => {
       saveItem: vi.fn(),
       createVault: vi.fn(),
       renameVault: vi.fn(),
+      watchtower: vi.fn(),
+      checkBreaches: vi.fn(),
       deleteVault: vi.fn(),
       deletedItems: vi.fn(),
       restoreItem: vi.fn(),
@@ -62,6 +64,14 @@ beforeEach(() => {
   vi.mocked(api.newItem).mockReset().mockResolvedValue(loginItem({ id: "new", title: "" }));
   vi.mocked(api.saveItem).mockReset().mockImplementation(async (item) => item);
   vi.mocked(api.createVault).mockReset().mockResolvedValue({ id: "v3", name: "Home", itemCount: 0 });
+  vi.mocked(api.watchtower).mockReset().mockResolvedValue({
+    breached: [],
+    reused: [],
+    weak: [{ item: github, detail: "Weak password (strength 1 of 4)" }],
+    missingTwoFactor: [],
+    breachesChecked: false,
+    uncheckedPasswords: 1,
+  });
   vi.mocked(api.renameVault).mockReset().mockResolvedValue({ id: "v2", name: "Office", itemCount: 0 });
   vi.mocked(api.deleteVault).mockReset().mockResolvedValue(undefined);
   vi.mocked(api.deletedItems).mockReset().mockResolvedValue([{ ...github, id: "d1", title: "Old forum" }]);
@@ -232,4 +242,25 @@ test("leaving an unchanged editor does not ask", async () => {
   await user.click(screen.getByRole("button", { name: "Favorites" }));
   expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
   await waitFor(() => expect(lastFilter().favorites).toBe(true));
+});
+
+test("watchtower lists problems and opens the item", async () => {
+  const user = userEvent.setup();
+  render(<Main onLock={vi.fn()} />);
+  const entry = await screen.findByRole("button", { name: /Watchtower/ });
+  await waitFor(() => expect(entry).toHaveTextContent("1"));
+  await user.click(entry);
+  await user.click(screen.getByRole("tab", { name: "Weak (1)" }));
+  await user.click(screen.getByRole("button", { name: /GitHub/ }));
+  expect(await screen.findByRole("heading", { name: "GitHub" })).toBeInTheDocument();
+  expect(api.item).toHaveBeenCalledWith("i1");
+});
+
+test("saving an item refreshes the watchtower", async () => {
+  const user = userEvent.setup();
+  render(<Main onLock={vi.fn()} />);
+  await user.click(await screen.findByText("GitHub"));
+  await user.click(await screen.findByRole("button", { name: "Edit" }));
+  await user.click(screen.getByRole("button", { name: "Save" }));
+  await waitFor(() => expect(api.watchtower).toHaveBeenCalledTimes(2));
 });

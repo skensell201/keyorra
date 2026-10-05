@@ -76,3 +76,26 @@ test("Escape cancels a rename", async () => {
   expect(props.onRenameVault).not.toHaveBeenCalled();
   expect(screen.queryByLabelText("New name for Personal")).not.toBeInTheDocument();
 });
+
+test("watchtower entry with its count", async () => {
+  const user = userEvent.setup();
+  const onSelect = vi.fn();
+  render(
+    <Sidebar
+      vaults={vaults}
+      selection={{ kind: "all" }}
+      watchtowerCount={4}
+      onSelect={onSelect}
+      onNewVault={vi.fn()}
+      onRenameVault={vi.fn()}
+      onDeleteVault={vi.fn()}
+      onImport={vi.fn()}
+      onLock={vi.fn()}
+      onSettings={vi.fn()}
+    />,
+  );
+  const button = screen.getByRole("button", { name: /Watchtower/ });
+  expect(button).toHaveTextContent("4");
+  await user.click(button);
+  expect(onSelect).toHaveBeenCalledWith({ kind: "watchtower" });
+});
