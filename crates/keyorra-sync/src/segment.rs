@@ -183,6 +183,43 @@ pub fn seal_segment(
 
 /// Decrypts and fully verifies a segment written by the holder of `author`.
 pub fn open_segment(segment_key: &Key, author: &VerifyingKey, segment: &[u8]) -> Result<Segment> {
+    decrypt_segment(segment_key, segment)?.verify(author)
+}
+
+/// A decrypted segment whose signature is not checked yet: for streams whose key is carried
+/// by their own first entry (the root's `Genesis`, a `SelfJoin`; plan A1c).
+#[derive(Clone, Debug)]
+pub struct Unverified {
+    pub header: SegmentHeader,
+    pub entries: Vec<Value>,
+    entries_value: Value,
+    sig: [u8; 64],
+}
+
+impl Unverified {
+    /// Checks the signature, the entry count and the chain.
+    pub fn verify(self, author: &VerifyingKey) -> Result<Segment> {
+        author
+            .verify_strict(
+                &signed_message(&self.header.to_bytes(), &self.entries_value),
+                &Signature::from_bytes(&self.sig),
+            )
+            .map_err(|_| Error::BadSignature)?;
+        if self.entries.len() as u64 != self.header.entry_count() {
+            return Err(malformed("segment entry count"));
+        }
+        if chain(&self.header.prev_hash, &self.entries) != self.header.last_hash {
+            return Err(malformed("segment chain"));
+        }
+        Ok(Segment {
+            header: self.header,
+            entries: self.entries,
+        })
+    }
+}
+
+/// Decrypts and decodes a segment without checking who signed it.
+pub fn decrypt_segment(segment_key: &Key, segment: &[u8]) -> Result<Unverified> {
     let header = SegmentHeader::parse(segment)?;
     let header_bytes = header.to_bytes();
     let sealed = &segment[HEADER_LEN..];
@@ -198,25 +235,18 @@ pub fn open_segment(segment_key: &Key, author: &VerifyingKey, segment: &[u8]) ->
     }
     let payload = cbor::decode(content)?;
     let f = payload.fields(&["entries", "sig"])?;
-    let entries_value = f.get("entries")?;
+    let entries_value = f.get("entries")?.clone();
     let sig: [u8; 64] = f.get("sig")?.as_array_of()?;
-    author
-        .verify_strict(
-            &signed_message(&header_bytes, entries_value),
-            &Signature::from_bytes(&sig),
-        )
-        .map_err(|_| Error::BadSignature)?;
-    if cbor::encode(entries_value).len() > MAX_ENTRIES_LEN {
+    if cbor::encode(&entries_value).len() > MAX_ENTRIES_LEN {
         return Err(malformed("segment too large"));
     }
     let entries = entries_value.as_list()?.to_vec();
-    if entries.len() as u64 != header.entry_count() {
-        return Err(malformed("segment entry count"));
-    }
-    if chain(&header.prev_hash, &entries) != header.last_hash {
-        return Err(malformed("segment chain"));
-    }
-    Ok(Segment { header, entries })
+    Ok(Unverified {
+        header,
+        entries,
+        entries_value,
+        sig,
+    })
 }
 
 #[cfg(test)]
@@ -328,6 +358,21 @@ mod tests {
             open_segment(&k_seg(), &other, &sealed()),
             Err(Error::BadSignature)
         ));
+    }
+
+    #[test]
+    fn decrypt_then_verify_equals_open() {
+        let unverified = decrypt_segment(&k_seg(), &sealed()).unwrap();
+        assert_eq!(unverified.entries, entries());
+        let other = SigningKey::from_bytes(&[0x42; 32]).verifying_key();
+        assert!(matches!(
+            unverified.clone().verify(&other),
+            Err(Error::BadSignature)
+        ));
+        assert_eq!(
+            unverified.verify(&signer().verifying_key()).unwrap(),
+            open_segment(&k_seg(), &signer().verifying_key(), &sealed()).unwrap()
+        );
     }
 
     #[test]
