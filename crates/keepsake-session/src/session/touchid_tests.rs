@@ -17,7 +17,7 @@ fn touch(s: &mut Session, enclave: &FakeEnclave, now: u64) -> CmdResult<()> {
     let request = s.touch_id_request(now)?;
     assert_eq!(request.enclave_key, b"blob");
     let shared = enclave.agree(&request.ephemeral_public);
-    s.unlock_with_touch_id(&shared, now)
+    s.unlock_with_touch_id(&request, &shared, now)
 }
 
 #[test]
@@ -101,7 +101,7 @@ fn a_wrong_enclave_answer_forgets_touch_id() {
     s.lock();
     let request = s.touch_id_request(2_000).unwrap();
     let wrong = FakeEnclave::new().agree(&request.ephemeral_public);
-    let err = s.unlock_with_touch_id(&wrong, 2_000).unwrap_err();
+    let err = s.unlock_with_touch_id(&request, &wrong, 2_000).unwrap_err();
     assert_eq!(err.kind, ErrorKind::PasswordRequired);
     assert!(keyring.load().is_none(), "the record is removed");
     assert_eq!(s.status(), Status::Locked);
@@ -140,4 +140,89 @@ fn creating_a_vault_forgets_an_old_record() {
     s.set_keyring(Box::new(keyring.clone()));
     s.create(PW, 1_000).unwrap();
     assert!(keyring.load().is_none());
+}
+
+/// Another app can create the keychain item while Touch ID is off. A record it planted must
+/// never make Keepsake wrap the account key to the planter's public key.
+fn plant(keyring: &MemKeyring, attacker: &FakeEnclave, at: u64) {
+    let fake = touchid::wrap(
+        &keepsake_core::crypto::Key::random(),
+        b"evil".to_vec(),
+        &attacker.public(),
+        at,
+    )
+    .unwrap();
+    keyring.save(&fake.to_bytes()).unwrap();
+}
+
+fn attacker_can_unwrap(keyring: &MemKeyring, attacker: &FakeEnclave) -> bool {
+    keyring
+        .load()
+        .and_then(|b| touchid::Record::from_bytes(&b))
+        .is_some_and(|r| touchid::unwrap(&r, &attacker.agree(&r.ephemeral_public)).is_ok())
+}
+
+#[test]
+fn a_password_unlock_never_rewraps_a_planted_record() {
+    let (_dir, mut s) = unlocked_session();
+    let keyring = MemKeyring::default();
+    s.set_keyring(Box::new(keyring.clone()));
+    s.lock();
+    let attacker = FakeEnclave::new();
+    plant(&keyring, &attacker, 1_500);
+
+    s.unlock(PW, 2_000).unwrap();
+    assert!(!attacker_can_unwrap(&keyring, &attacker));
+    assert!(keyring.load().is_none(), "the planted record is removed");
+}
+
+#[test]
+fn a_password_change_never_rewraps_a_planted_record() {
+    let (_dir, mut s, keyring, _enclave) = with_touch_id();
+    let attacker = FakeEnclave::new();
+    plant(&keyring, &attacker, 1_500);
+    s.change_password(PW, "a brand new password", 2_000)
+        .unwrap();
+    assert!(!attacker_can_unwrap(&keyring, &attacker));
+    assert!(keyring.load().is_none());
+}
+
+#[test]
+fn a_record_with_a_swapped_enclave_key_is_not_rewrapped() {
+    let (_dir, mut s, keyring, _enclave) = with_touch_id();
+    // Keep the genuine proof, swap in the attacker's enclave key.
+    let mut record = touchid::Record::from_bytes(&keyring.load().unwrap()).unwrap();
+    let attacker = FakeEnclave::new();
+    record.enclave_public = attacker.public();
+    keyring.save(&record.to_bytes()).unwrap();
+    s.lock();
+    s.unlock(PW, 2_000).unwrap();
+    assert!(!attacker_can_unwrap(&keyring, &attacker));
+}
+
+#[test]
+fn a_genuine_record_is_still_rewrapped_after_a_password_unlock() {
+    let (_dir, mut s, keyring, enclave) = with_touch_id();
+    s.lock();
+    s.unlock(PW, 9_000).unwrap();
+    let record = touchid::Record::from_bytes(&keyring.load().unwrap()).unwrap();
+    assert_eq!(record.verified_at, 9_000);
+    s.lock();
+    touch(&mut s, &enclave, 9_001).unwrap();
+}
+
+#[test]
+fn a_stale_touch_id_answer_keeps_the_newer_record() {
+    let (_dir, mut s, keyring, enclave) = with_touch_id();
+    s.lock();
+    let stale = s.touch_id_request(2_000).unwrap();
+    // Meanwhile the password was typed (the record is re-wrapped) and the vault locked again.
+    s.unlock(PW, 2_001).unwrap();
+    s.lock();
+    let shared = enclave.agree(&stale.ephemeral_public);
+    let err = s.unlock_with_touch_id(&stale, &shared, 2_002).unwrap_err();
+    assert_ne!(err.kind, ErrorKind::PasswordRequired, "{}", err.message);
+    assert!(keyring.load().is_some(), "the newer record is kept");
+    assert_eq!(s.status(), Status::Locked);
+    touch(&mut s, &enclave, 2_003).unwrap();
 }

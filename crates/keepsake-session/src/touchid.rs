@@ -6,6 +6,11 @@
 //! enclave does the same ECDH with the ephemeral public key after Touch ID. The time of the
 //! last master-password entry is bound into the ciphertext, so the 14-day limit can't be
 //! extended by editing the record.
+//!
+//! Any app of the same user can create a keychain item under our service name while Touch ID
+//! is off. So the record also carries a tag made with the account key over the enclave key:
+//! before re-wrapping (after a password entry) we check it, and never wrap the account key
+//! to a public key someone else put there.
 
 use data_encoding::BASE64;
 use keepsake_core::crypto::{self, Key};
@@ -22,7 +27,8 @@ use crate::error::{CmdError, CmdResult, ErrorKind};
 /// The master password is required again this long after it was last entered.
 pub const MAX_AGE_SECS: u64 = 14 * 24 * 60 * 60;
 const LABEL: &str = "keepsake-touchid-v1";
-const VERSION: u32 = 1;
+/// 2 added `auth`; older records are ignored (Touch ID must be turned on again).
+const VERSION: u32 = 2;
 
 /// What the keychain holds. Useless without this Mac's Secure Enclave and a matching finger.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -41,16 +47,29 @@ pub struct Record {
     pub verified_at: u64,
     #[serde(with = "b64")]
     pub sealed: Vec<u8>,
+    /// AEAD tag under the account key over the enclave key blob and public key.
+    #[serde(with = "b64")]
+    pub auth: Vec<u8>,
 }
 
 impl Record {
     pub fn expires_at(&self) -> u64 {
-        self.verified_at + MAX_AGE_SECS
+        self.verified_at.saturating_add(MAX_AGE_SECS)
     }
 
     /// Expired, or stamped in the future (clock moved back): either way ask for the password.
     pub fn is_expired(&self, now: u64) -> bool {
-        now >= self.expires_at() || self.verified_at > now + 300
+        now >= self.expires_at() || self.verified_at > now.saturating_add(300)
+    }
+
+    /// Made by someone holding `account` (this vault), for exactly this enclave key.
+    pub fn is_authentic(&self, account: &Key) -> bool {
+        crypto::open(
+            account,
+            &self.auth,
+            &auth_aad(&self.enclave_key, &self.enclave_public),
+        )
+        .is_ok()
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -142,6 +161,7 @@ pub fn wrap(
     let key = wrapping_key(&secret, &ephemeral_public, enclave_public);
     Ok(Record {
         version: VERSION,
+        auth: crypto::seal(account, &[], &auth_aad(&enclave_key, enclave_public)),
         enclave_key,
         enclave_public: enclave_public.to_vec(),
         sealed: crypto::seal(&key, account.as_bytes(), &aad(verified_at)),
@@ -174,6 +194,14 @@ fn wrapping_key(shared: &[u8; 32], ephemeral_public: &[u8], enclave_public: &[u8
 fn aad(verified_at: u64) -> Vec<u8> {
     let mut aad = format!("{LABEL}/account-key/").into_bytes();
     aad.extend_from_slice(&verified_at.to_be_bytes());
+    aad
+}
+
+fn auth_aad(enclave_key: &[u8], enclave_public: &[u8]) -> Vec<u8> {
+    let mut aad = format!("{LABEL}/record-auth/").into_bytes();
+    aad.extend_from_slice(&(enclave_key.len() as u64).to_be_bytes());
+    aad.extend_from_slice(enclave_key);
+    aad.extend_from_slice(enclave_public);
     aad
 }
 
@@ -289,6 +317,30 @@ mod tests {
             .unwrap()
             .contains("\"enclaveKey\":\"AQID\""));
         assert_eq!(Record::from_bytes(b"{}"), None);
+    }
+
+    #[test]
+    fn only_the_account_key_holder_can_vouch_for_a_record() {
+        let account = Key::random();
+        let enclave = FakeEnclave::new();
+        let record = wrap(&account, b"blob".to_vec(), &enclave.public(), 5).unwrap();
+        assert!(record.is_authentic(&account));
+        assert!(!record.is_authentic(&Key::random()));
+
+        let mut swapped = record.clone();
+        swapped.enclave_public = FakeEnclave::new().public();
+        assert!(!swapped.is_authentic(&account), "public key swapped");
+        let mut reblobbed = record.clone();
+        reblobbed.enclave_key = b"other".to_vec();
+        assert!(!reblobbed.is_authentic(&account), "blob swapped");
+    }
+
+    #[test]
+    fn absurd_timestamps_are_expired_not_a_panic() {
+        let mut record = wrap(&Key::random(), vec![], &FakeEnclave::new().public(), 1).unwrap();
+        record.verified_at = u64::MAX;
+        assert!(record.is_expired(1_000));
+        assert!(record.is_expired(u64::MAX));
     }
 
     #[test]

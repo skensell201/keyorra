@@ -334,7 +334,7 @@ pub fn unlock_with_touch_id(app: AppHandle, state: State<'_, AppState>) -> CmdRe
             ))
         }
     };
-    lock_session(&state).unlock_with_touch_id(&shared, now())?;
+    lock_session(&state).unlock_with_touch_id(&request, &shared, now())?;
     let _ = app.emit("unlocked", ());
     Ok(())
 }

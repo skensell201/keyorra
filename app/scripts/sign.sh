@@ -20,6 +20,17 @@ if [ "$signed_team" != "$team" ]; then
   echo "Keepsake.app is signed by team '$signed_team', expected $team" >&2
   exit 1
 fi
+# The keychain item trusts this signature, and the Touch ID prompt names this app: code injected
+# into it would inherit both. Refuse a build that allows injection or debugging.
+if ! codesign -dv "$built" 2>&1 | grep -q '^CodeDirectory.*flags=.*runtime'; then
+  echo "Keepsake.app is not signed with the hardened runtime" >&2
+  exit 1
+fi
+if codesign -d --entitlements - "$built" 2>/dev/null |
+  grep -Eq 'get-task-allow|disable-library-validation|allow-dyld-environment-variables'; then
+  echo "Keepsake.app has an entitlement that allows code injection or debugging" >&2
+  exit 1
+fi
 rm -rf /Applications/Keepsake.app
 ditto "$built" /Applications/Keepsake.app
 echo "Installed /Applications/Keepsake.app (team $team)"

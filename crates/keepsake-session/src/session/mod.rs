@@ -252,8 +252,13 @@ impl Session {
         })
     }
 
-    /// Second half: `shared` is the enclave's ECDH result after Touch ID.
-    pub fn unlock_with_touch_id(&mut self, shared: &[u8; 32], now: u64) -> CmdResult<()> {
+    /// Second half: `shared` is the enclave's ECDH result for `request` after Touch ID.
+    pub fn unlock_with_touch_id(
+        &mut self,
+        request: &UnlockRequest,
+        shared: &[u8; 32],
+        now: u64,
+    ) -> CmdResult<()> {
         if self.store.is_some() {
             return Ok(());
         }
@@ -262,6 +267,14 @@ impl Session {
             .ok_or_else(|| CmdError::new(ErrorKind::PasswordRequired, "Touch ID is off"))?;
         if record.is_expired(now) {
             return Err(password_due());
+        }
+        if record.ephemeral_public != request.ephemeral_public {
+            // Re-wrapped while the prompt was up: the answer is for the old record, and the
+            // new one must not be thrown away for it.
+            return Err(CmdError::new(
+                ErrorKind::Invalid,
+                "Touch ID was updated in the meantime. Try again.",
+            ));
         }
         let forget = |s: &mut Self, e: CmdError| {
             s.keyring.delete();
@@ -292,7 +305,9 @@ impl Session {
     }
 
     /// After a master-password entry: re-wrap the record so the 14 days start again. Reuses
-    /// the enclave key, so no prompt. Failures leave the old record.
+    /// the enclave key, so no prompt. A record this vault did not make (planted by another app,
+    /// or left from another vault) is removed instead: the account key is never wrapped to a
+    /// public key we can't vouch for.
     fn rearm_touch_id(&mut self, now: u64) {
         let Some(record) = self.touch_id_record() else {
             return;
@@ -300,6 +315,10 @@ impl Session {
         let Ok(account) = self.store().and_then(|s| Ok(s.account_key()?.clone())) else {
             return;
         };
+        if !record.is_authentic(&account) {
+            self.keyring.delete();
+            return;
+        }
         if let Ok(new) = touchid::wrap(&account, record.enclave_key, &record.enclave_public, now) {
             let _ = self.keyring.save(&new.to_bytes());
         }
