@@ -1,4 +1,3 @@
-#![allow(unused_imports, dead_code)] // TEMPORARY: removed in Task 10 (later tasks use these)
 //! Plan A1c-2: retiring the id, account headers and the root's advertised head, snapshots,
 //! restore, the outbox hook. All under root-only authority (spec §4.3).
 
@@ -387,4 +386,87 @@ fn a_rollback_a_snapshot_already_covers_raises_no_alarm() {
         .take_events()
         .iter()
         .any(|e| matches!(e, Event::RollbackRepaired { .. })));
+}
+
+#[test]
+fn another_copy_writing_makes_this_device_continue_under_a_new_id_pending_approval() {
+    let (mut c, vault) = shared(2);
+    let old = c.devices[1].device();
+    let mut twin = clone_of(&c.devices[1]);
+    twin.save_item(
+        vault,
+        ITEM,
+        &Cluster::item_json(ITEM, "twin", &[]),
+        c.clocks[1],
+    )
+    .unwrap();
+    twin.push(&c.store);
+    save(&mut c, 1, vault, ITEM, "me");
+    c.sync(1).unwrap();
+    let events = c.devices[1].take_events();
+    assert!(events.contains(&Event::OwnStreamConflict));
+    assert!(events.iter().any(|e| matches!(
+        e,
+        Event::Retired { old: o, reason: RetireReason::OtherCopyWrote, .. } if *o == old
+    )));
+    assert_ne!(c.devices[1].device(), old);
+    // Pending: it writes, but nothing of the new id counts for others until approved.
+    assert!(c.devices[1].can_write());
+    c.sync(1).unwrap();
+    c.sync(0).unwrap();
+    assert_eq!(c.devices[0].alarms(), vec![Alarm::Unapproved { count: 1 }]);
+    assert!(!titles(&c.devices[0].view()).contains("me"));
+    approve_retired(&mut c, 1);
+    c.heal();
+    c.assert_converged();
+    // Both copies' changes survive: one shown, the other as a conflict copy.
+    let seen = titles(&c.devices[0].view());
+    assert!(seen.contains("twin") && seen.contains("me"), "{seen:?}");
+}
+#[test]
+fn the_main_device_never_retires_it_asks_to_start_over() {
+    let (mut c, vault) = shared(2);
+    let mut twin = clone_of(&c.devices[0]);
+    twin.save_item(
+        vault,
+        ITEM,
+        &Cluster::item_json(ITEM, "twin", &[]),
+        c.clocks[0],
+    )
+    .unwrap();
+    twin.push(&c.store);
+    save(&mut c, 0, vault, ITEM, "me");
+    c.sync(0).unwrap();
+    assert_eq!(c.devices[0].device(), device_id(0));
+    assert!(c.devices[0]
+        .take_events()
+        .iter()
+        .any(|e| matches!(e, Event::RootMustStartOver { .. })));
+    let before = c.devices[0].sent.seq;
+    save(&mut c, 0, vault, ITEM, "after");
+    c.sync(0).unwrap();
+    assert_eq!(c.devices[0].sent.seq, before, "it writes nothing more");
+}
+#[test]
+fn a_missing_device_key_retires_the_id() {
+    let (mut c, vault) = shared(2);
+    let old = c.devices[1].device();
+    let keys = MemoryKeys::default();
+    c.devices[1].set_device_keys(Box::new(keys.clone()));
+    save(&mut c, 1, vault, ITEM, "after restore");
+    c.sync(1).unwrap();
+    let new = c.devices[1].device();
+    assert_ne!(new, old);
+    assert!(keys.holds(&new), "the new key went to the key store");
+    assert!(c.devices[1].take_events().iter().any(|e| matches!(
+        e,
+        Event::Retired {
+            reason: RetireReason::KeyMissing,
+            ..
+        }
+    )));
+    approve_retired(&mut c, 1);
+    c.heal();
+    c.assert_converged();
+    assert!(titles(&c.devices[0].view()).contains("after restore"));
 }

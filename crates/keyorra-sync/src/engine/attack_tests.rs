@@ -778,6 +778,17 @@ fn review_w3_approval_checks_the_key_shown_on_the_joining_device() {
         .unwrap();
     c.sync(0).unwrap();
     joiner.sync(&c.store, START_MS).unwrap();
-    assert!(!joiner.can_write());
-    assert!(joiner.alarms().contains(&Alarm::ApprovedWithAnotherKey));
+    // The joiner finds its id taken by another key: it does not write under it (plan A1c-2:
+    // the store already holds someone else's segment there, so it retires to a new id and
+    // asks for approval again).
+    let retired = joiner
+        .take_events()
+        .iter()
+        .any(|e| matches!(e, Event::Retired { .. }));
+    assert!(
+        retired || joiner.alarms().contains(&Alarm::ApprovedWithAnotherKey),
+        "{:?}",
+        joiner.alarms()
+    );
+    assert!(joiner.device() != device_id(5) || !joiner.can_write());
 }

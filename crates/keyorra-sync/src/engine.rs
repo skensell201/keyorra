@@ -310,7 +310,6 @@ struct Observation {
     heads: Heads,
 }
 
-#[allow(dead_code)] // TEMPORARY: removed in Task 10 (stubs until Tasks 8-10)
 pub struct Engine<R> {
     device: DeviceId,
     signer: SigningKey,
