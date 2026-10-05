@@ -20,3 +20,6 @@ pub use error::{Error, Result};
 pub type AccountId = [u8; 16];
 /// 16 random bytes per device.
 pub type DeviceId = [u8; 16];
+
+#[cfg(test)]
+mod vectors;
