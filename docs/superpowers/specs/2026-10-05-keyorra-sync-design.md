@@ -199,9 +199,13 @@ version_hash(v) = SHA-256("keyorra/sync/v1/version\0" ‖ canonical([kind, recor
   says "MacBook Air's clock is 3 h ahead; its edits win conflicts until that is fixed".
 - **Validation** of a Put from stream D (rejecting the whole segment with an alarm if it
   fails, since a live device signed it): `v.author == D`; `v.vector[D]` equals
-  `1 + (D's previous accepted version of this record).vector[D]` (or 1); for every other
-  device X, `v.vector[X]` ≤ the number of X's versions of this record already applied
-  (guaranteed checkable by causal delivery, §4.4).
+  `1 + (D's previous accepted version of this record).vector[D]` (or 1); an item's
+  `content_from` ≤ `v.vector`; a version hash seen before must come with the same content and
+  vault (else **equivocation**, an alarm, never first-wins); for every other device X,
+  `v.vector[X]` ≤ X's highest applied counter for this record. That last rule is a wait,
+  not a rejection, while X's versions may still be in transit: A1b holds back the segment
+  until they are applied; A1c's causal delivery (§4.4) makes it hold by construction, and
+  from then on a violation is a rejection.
 
 Vectors stay small (one entry per device that ever edited the record). Entries of revoked
 devices are never removed.

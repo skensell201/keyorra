@@ -207,9 +207,12 @@ A new version of record `r` by device `D`: `vector = join(vectors of r's sibling
 A segment's versions are accepted together or not at all. For each version carried by the
 stream of device `S`: `version.author = S`; `vector[S]` is exactly one more than the
 highest `vector[S]` among `S`'s versions of the same record already accepted (or in the same
-segment), or 1; the payload decodes as the envelope's kind; a vault is never a tombstone. A
-version already accepted (same version hash) is ignored. A violation rejects the segment and
-stops reading that stream (an alarm).
+segment), or 1; the payload decodes as the envelope's kind; a vault is never a tombstone; an
+item's `content_from` is covered by its own vector. A version already accepted (same version
+hash) is ignored if its payload and `vault_id` are identical and is an equivocation
+otherwise. A violation rejects the segment and stops reading that stream (an alarm). A
+segment containing a version whose `vector[X]` (X ≠ `S`) exceeds X's highest accepted counter
+for that record waits until X's earlier versions have been applied.
 
 ### 9.4 Sibling sets and the fold
 

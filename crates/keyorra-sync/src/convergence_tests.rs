@@ -194,8 +194,16 @@ proptest! {
         let mut state = shuffle;
         while streams.iter().any(|s| !s.is_empty()) {
             state = state.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
-            let live: Vec<usize> = (0..streams.len()).filter(|i| !streams[*i].is_empty()).collect();
-            let pick = live[(state >> 33) as usize % live.len()];
+            // Any stream whose next version's dependencies are applied (causal delivery).
+            let ready: Vec<usize> = (0..streams.len())
+                .filter(|i| {
+                    streams[*i].first().is_some_and(|a| {
+                        fold.missing_dependency(std::slice::from_ref(a)) == Ok(None)
+                    })
+                })
+                .collect();
+            prop_assert!(!ready.is_empty(), "no stream can make progress");
+            let pick = ready[(state >> 33) as usize % ready.len()];
             let next = streams[pick].remove(0);
             fold.accept(next, &AdmitAll).unwrap();
         }

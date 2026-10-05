@@ -4,7 +4,7 @@
 //! that the [`Admission`] policy admits. Plan A1c supplies the real policy (endorsement and
 //! revocation cuts) and calls [`Fold::refold`] when it changes; until then [`AdmitAll`].
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::fmt;
 
 use uuid::Uuid;
@@ -18,7 +18,7 @@ use crate::present::{
     copy_attachment_id, present_attachment, present_item, present_vault, ItemState,
 };
 use crate::siblings::{Sibling, SiblingSet};
-use crate::vv::{join, Vector};
+use crate::vv::{compare, join, Causality, Vector};
 use crate::DeviceId;
 
 pub type RecordKey = (RecordKind, Uuid);
@@ -81,6 +81,14 @@ pub enum Rejection {
     KindMismatch,
     /// Vaults are deleted with a flag, never purged.
     VaultTombstone,
+    /// The same version (same version hash) arrived with different content or vault: the
+    /// author signed two different things under one version. An alarm, never first-wins.
+    Equivocation,
+    /// An item's `content_from` is not covered by its own version.
+    ContentFromAhead,
+    /// The version claims more writes of `device` to this record than have been applied.
+    /// Not a rejection when reading: the engine waits (see [`Fold::missing_dependency`]).
+    AheadOfApplied { device: DeviceId },
 }
 
 impl fmt::Display for Rejection {
@@ -92,6 +100,13 @@ impl fmt::Display for Rejection {
             }
             Rejection::KindMismatch => f.write_str("payload does not match the record kind"),
             Rejection::VaultTombstone => f.write_str("vault tombstone"),
+            Rejection::Equivocation => f.write_str("one version with two different contents"),
+            Rejection::ContentFromAhead => f.write_str("content_from is ahead of the version"),
+            Rejection::AheadOfApplied { device } => write!(
+                f,
+                "depends on changes of {} not applied yet",
+                data_encoding::HEXLOWER.encode(&device[..4])
+            ),
         }
     }
 }
@@ -175,28 +190,36 @@ impl View {
 
 #[derive(Clone, Debug, Default)]
 pub struct Fold {
-    retained: BTreeMap<RecordKey, Vec<Accepted>>,
+    /// Every accepted version, with whether the current admission policy admits it.
+    retained: BTreeMap<RecordKey, Vec<(Accepted, bool)>>,
+    /// Built from the admitted versions only; a record is "known" iff it has a set.
     sets: BTreeMap<RecordKey, SiblingSet>,
 }
 
 impl Fold {
     /// Validates and retains `a`; it joins the sibling set if `admission` admits its position.
-    pub fn accept(&mut self, a: Accepted, admission: &impl Admission) -> Result<Accept, Rejection> {
-        check_shape(&a)?;
-        let hash = a.hash();
-        let versions = self.retained.entry(a.key()).or_default();
-        if versions.iter().any(|v| v.hash() == hash) {
-            return Ok(Accept::Duplicate);
-        }
-        let expected = own_counter(versions, &a.stream) + 1;
+    /// Nothing is stored when it is rejected.
+    pub fn accept(&mut self, a: Accepted, admission: &dyn Admission) -> Result<Accept, Rejection> {
+        let expected = {
+            let retained = self.retained_of(&a.key());
+            check_version(&a, &retained)?;
+            if let Some(existing) = retained.iter().find(|v| v.hash() == a.hash()) {
+                return same_or_equivocation(existing, &a).map(|_| Accept::Duplicate);
+            }
+            own_counter(&retained, &a.stream) + 1
+        };
         let got = a.version.vector.get(&a.stream).copied().unwrap_or(0);
         if got != expected {
             return Err(Rejection::CounterNotNext { expected, got });
         }
-        if admission.admits(&a.stream, a.seq) {
+        let admitted = admission.admits(&a.stream, a.seq);
+        if admitted {
             self.sets.entry(a.key()).or_default().insert(a.sibling());
         }
-        versions.push(a);
+        self.retained
+            .entry(a.key())
+            .or_default()
+            .push((a, admitted));
         Ok(Accept::New)
     }
 
@@ -205,20 +228,25 @@ impl Fold {
     pub fn accept_batch(
         &mut self,
         batch: Vec<Accepted>,
-        admission: &impl Admission,
+        admission: &dyn Admission,
     ) -> Result<usize, Rejection> {
         let mut counters: BTreeMap<(RecordKey, DeviceId), u64> = BTreeMap::new();
-        let mut seen = BTreeSet::new();
+        let mut seen: BTreeMap<[u8; 32], &Accepted> = BTreeMap::new();
         for a in &batch {
-            check_shape(a)?;
+            let retained = self.retained_of(&a.key());
+            check_version(a, &retained)?;
             let hash = a.hash();
-            let retained = self.retained.get(&a.key()).map_or(&[][..], |v| v);
-            if seen.contains(&hash) || retained.iter().any(|v| v.hash() == hash) {
+            if let Some(existing) = retained.iter().find(|v| v.hash() == hash) {
+                same_or_equivocation(existing, a)?;
+                continue;
+            }
+            if let Some(earlier) = seen.get(&hash) {
+                same_or_equivocation(earlier, a)?;
                 continue;
             }
             let counter = counters
                 .entry((a.key(), a.stream))
-                .or_insert_with(|| own_counter(retained, &a.stream));
+                .or_insert_with(|| own_counter(&retained, &a.stream));
             let got = a.version.vector.get(&a.stream).copied().unwrap_or(0);
             if got != *counter + 1 {
                 return Err(Rejection::CounterNotNext {
@@ -227,7 +255,7 @@ impl Fold {
                 });
             }
             *counter = got;
-            seen.insert(hash);
+            seen.insert(hash, a);
         }
         let mut new = 0;
         for a in batch {
@@ -238,16 +266,43 @@ impl Fold {
         Ok(new)
     }
 
+    /// Checks a batch before it is accepted: a rule violation is a rejection; otherwise the
+    /// first device whose earlier writes the batch depends on but which are not applied yet
+    /// (spec §3.3: `vector[X]` may not exceed X's applied versions of the record). The engine
+    /// waits for those instead of rejecting; plan A1c replaces this with causal delivery.
+    pub fn missing_dependency(&self, batch: &[Accepted]) -> Result<Option<DeviceId>, Rejection> {
+        for a in batch {
+            check_shape(a)?;
+        }
+        Ok(batch.iter().find_map(|a| {
+            let retained = self.retained_of(&a.key());
+            a.version
+                .vector
+                .iter()
+                .filter(|(d, _)| **d != a.stream)
+                .find(|(d, n)| **n > own_counter(&retained, d))
+                .map(|(d, _)| *d)
+        }))
+    }
+
     /// Rebuilds every sibling set from the retained versions under a new admission policy.
-    pub fn refold(&mut self, admission: &impl Admission) {
+    pub fn refold(&mut self, admission: &dyn Admission) {
         self.sets.clear();
-        for (key, versions) in &self.retained {
-            for v in versions {
-                if admission.admits(&v.stream, v.seq) {
+        for (key, versions) in &mut self.retained {
+            for (v, admitted) in versions.iter_mut() {
+                *admitted = admission.admits(&v.stream, v.seq);
+                if *admitted {
                     self.sets.entry(*key).or_default().insert(v.sibling());
                 }
             }
         }
+    }
+
+    fn retained_of(&self, key: &RecordKey) -> Vec<&Accepted> {
+        self.retained
+            .get(key)
+            .map(|v| v.iter().map(|(a, _)| a).collect())
+            .unwrap_or_default()
     }
 
     pub fn set(&self, kind: RecordKind, id: Uuid) -> Option<&SiblingSet> {
@@ -259,11 +314,12 @@ impl Fold {
     }
 
     pub fn retained(&self) -> impl Iterator<Item = &Accepted> {
-        self.retained.values().flatten()
+        self.retained.values().flatten().map(|(a, _)| a)
     }
 
+    /// Whether the record has an admitted version.
     pub fn contains(&self, kind: RecordKind, id: Uuid) -> bool {
-        self.retained.contains_key(&(kind, id))
+        self.sets.contains_key(&(kind, id))
     }
 
     /// The version a new local write by `author` gets: it dominates every sibling.
@@ -274,7 +330,7 @@ impl Fold {
             .get(&key)
             .map(|s| join(s.siblings().iter().map(|x| &x.version.vector)))
             .unwrap_or_default();
-        let own = own_counter(self.retained.get(&key).map_or(&[][..], |v| v), &author);
+        let own = own_counter(&self.retained_of(&key), &author);
         let counter = vector.get(&author).copied().unwrap_or(0).max(own) + 1;
         vector.insert(author, counter);
         Version {
@@ -391,18 +447,46 @@ impl Fold {
     }
 }
 
+/// Spec §3.3: the shape checks, and no claim beyond the applied versions of other devices.
+fn check_version(a: &Accepted, retained: &[&Accepted]) -> Result<(), Rejection> {
+    check_shape(a)?;
+    for (device, n) in &a.version.vector {
+        if *device != a.stream && *n > own_counter(retained, device) {
+            return Err(Rejection::AheadOfApplied { device: *device });
+        }
+    }
+    Ok(())
+}
+
 fn check_shape(a: &Accepted) -> Result<(), Rejection> {
     if a.version.author != a.stream {
         return Err(Rejection::WrongAuthor);
     }
     match a.doc.kind() {
-        Some(k) if k != a.kind => Err(Rejection::KindMismatch),
-        None if a.kind == RecordKind::Vault => Err(Rejection::VaultTombstone),
-        _ => Ok(()),
+        Some(k) if k != a.kind => return Err(Rejection::KindMismatch),
+        None if a.kind == RecordKind::Vault => return Err(Rejection::VaultTombstone),
+        _ => {}
+    }
+    if let Doc::Item(p) = &a.doc {
+        if !matches!(
+            compare(&p.content_from, &a.version.vector),
+            Causality::Equal | Causality::Before
+        ) {
+            return Err(Rejection::ContentFromAhead);
+        }
+    }
+    Ok(())
+}
+
+fn same_or_equivocation(existing: &Accepted, a: &Accepted) -> Result<(), Rejection> {
+    if existing.doc == a.doc && existing.vault_id == a.vault_id {
+        Ok(())
+    } else {
+        Err(Rejection::Equivocation)
     }
 }
 
-fn own_counter(versions: &[Accepted], author: &DeviceId) -> u64 {
+fn own_counter(versions: &[&Accepted], author: &DeviceId) -> u64 {
     versions
         .iter()
         .filter(|v| &v.version.author == author)
@@ -438,8 +522,8 @@ mod tests {
                 .into_bytes(),
             ),
             deleted_at: None,
-            // A device that never writes here: every test version counts as a fresh edit.
-            content_from: [([9; 16], 1)].into_iter().collect(),
+            // Set to the version's own vector by `item`.
+            content_from: Vector::new(),
         })
     }
 
@@ -450,6 +534,12 @@ mod tests {
         hlc: u64,
         doc: Doc,
     ) -> Accepted {
+        let vector: Vector = vector.iter().copied().collect();
+        let mut doc = doc;
+        if let Doc::Item(p) = &mut doc {
+            // Every test version is a fresh edit.
+            p.content_from = vector.clone();
+        }
         Accepted {
             stream,
             seq,
@@ -457,7 +547,7 @@ mod tests {
             record_id: ITEM,
             vault_id: Some(VAULT),
             version: Version {
-                vector: vector.iter().copied().collect(),
+                vector,
                 hlc,
                 author: stream,
             },
@@ -549,6 +639,87 @@ mod tests {
         assert_eq!(
             f.accept(item(A, 2, &[(A, 2)], 2, json("b", &[])), &AdmitAll),
             Ok(Accept::New)
+        );
+    }
+
+    #[test]
+    fn one_version_with_two_contents_is_an_equivocation() {
+        let mut f = Fold::default();
+        f.accept(item(A, 1, &[(A, 1)], 1, json("a", &[])), &AdmitAll)
+            .unwrap();
+        let same = item(A, 1, &[(A, 1)], 1, json("a", &[]));
+        assert_eq!(f.accept(same, &AdmitAll), Ok(Accept::Duplicate));
+        let forked = item(A, 1, &[(A, 1)], 1, json("b", &[]));
+        assert_eq!(
+            f.accept(forked.clone(), &AdmitAll),
+            Err(Rejection::Equivocation)
+        );
+        let mut moved = item(A, 1, &[(A, 1)], 1, json("a", &[]));
+        moved.vault_id = Some(Uuid::from_bytes([0x63; 16]));
+        assert_eq!(f.accept(moved, &AdmitAll), Err(Rejection::Equivocation));
+        // Inside one batch, too.
+        let mut g = Fold::default();
+        let first = item(A, 1, &[(A, 1)], 1, json("a", &[]));
+        assert_eq!(
+            g.accept_batch(vec![first, forked], &AdmitAll),
+            Err(Rejection::Equivocation)
+        );
+        assert_eq!(g.retained().count(), 0);
+    }
+
+    #[test]
+    fn rejected_versions_leave_no_trace_and_contains_follows_admission() {
+        let mut f = Fold::default();
+        let skipped = item(A, 1, &[(A, 2)], 1, json("a", &[]));
+        assert!(f.accept(skipped, &AdmitAll).is_err());
+        assert!(!f.contains(RecordKind::Item, ITEM));
+        assert_eq!(f.retained().count(), 0);
+        f.accept(item(A, 1, &[(A, 1)], 1, json("a", &[])), &AdmitAll)
+            .unwrap();
+        assert!(f.contains(RecordKind::Item, ITEM));
+        struct Nothing;
+        impl Admission for Nothing {
+            fn admits(&self, _: &DeviceId, _: u64) -> bool {
+                false
+            }
+        }
+        f.refold(&Nothing);
+        assert!(!f.contains(RecordKind::Item, ITEM));
+        assert_eq!(f.retained().count(), 1);
+    }
+
+    #[test]
+    fn content_from_may_not_run_ahead_of_the_version() {
+        let mut f = Fold::default();
+        let mut a = item(A, 1, &[(A, 1)], 1, json("a", &[]));
+        if let Doc::Item(p) = &mut a.doc {
+            p.content_from = [(A, 2)].into_iter().collect();
+        }
+        assert_eq!(f.accept(a, &AdmitAll), Err(Rejection::ContentFromAhead));
+    }
+
+    #[test]
+    fn a_version_may_not_claim_writes_that_were_not_applied() {
+        let mut f = Fold::default();
+        let early = item(B, 1, &[(A, 1), (B, 1)], 2, json("b", &[]));
+        assert_eq!(
+            f.missing_dependency(std::slice::from_ref(&early)),
+            Ok(Some(A))
+        );
+        assert_eq!(
+            f.accept(early.clone(), &AdmitAll),
+            Err(Rejection::AheadOfApplied { device: A })
+        );
+        f.accept(item(A, 1, &[(A, 1)], 1, json("a", &[])), &AdmitAll)
+            .unwrap();
+        assert_eq!(f.missing_dependency(std::slice::from_ref(&early)), Ok(None));
+        assert_eq!(f.accept(early, &AdmitAll), Ok(Accept::New));
+        // Shape violations are reported before dependencies.
+        let mut wrong = item(B, 2, &[(A, 5), (B, 2)], 3, json("x", &[]));
+        wrong.version.author = A;
+        assert_eq!(
+            f.missing_dependency(std::slice::from_ref(&wrong)),
+            Err(Rejection::WrongAuthor)
         );
     }
 
@@ -750,8 +921,8 @@ mod tests {
             }
             f.view()
         };
-        // Any order that keeps each stream's own order.
-        let orders: [&[usize]; 3] = [&[3, 0, 1, 2, 4], &[0, 3, 1, 4, 2], &[3, 0, 1, 4, 2]];
+        // Any causal order (B's version needs A's first; each stream keeps its own order).
+        let orders: [&[usize]; 3] = [&[0, 1, 3, 2, 4], &[1, 3, 0, 4, 2], &[1, 2, 4, 3, 0]];
         for order in orders {
             let mut f = Fold::default();
             for &i in order {

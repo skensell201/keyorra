@@ -472,6 +472,24 @@ impl<R: RngCore + CryptoRng> Engine<R> {
             }
             match self.decode_segment(stream, &segment.header, &segment.entries) {
                 Ok((batch, keys)) => {
+                    let ready = match self.fold.missing_dependency(&batch) {
+                        Ok(ready) => ready,
+                        Err(rejection) => {
+                            self.reject(stream, want, rejection.to_string());
+                            return Ok(applied);
+                        }
+                    };
+                    if let Some(device) = ready {
+                        self.events.push(Event::Waiting {
+                            from: *stream,
+                            first_seq: want,
+                            reason: format!(
+                                "needs earlier changes from {}",
+                                data_encoding::HEXLOWER.encode(&device[..4])
+                            ),
+                        });
+                        return Ok(applied);
+                    }
                     let observed: Vec<u64> = batch.iter().map(|a| a.version.hlc).collect();
                     match self.fold.accept_batch(batch, &AdmitAll) {
                         Ok(n) => {

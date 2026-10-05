@@ -429,11 +429,12 @@ fn a_failed_listing_is_an_event_and_other_streams_are_still_read() {
         )
         .unwrap();
     c.sync(1).unwrap();
+    let other = Uuid::from_bytes([0x61; 16]);
     c.devices[2]
         .save_item(
             vault,
-            ITEM,
-            &Cluster::item_json(ITEM, "c", &[]),
+            other,
+            &Cluster::item_json(other, "c", &[]),
             c.clocks[2],
         )
         .unwrap();
