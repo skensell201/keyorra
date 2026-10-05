@@ -40,6 +40,9 @@ Every label is used as `label ‖ 0x00 ‖ parts…`, so no label is a prefix of
 | `keyorra/sync/v1/chain` | every further link |
 | `keyorra/sync/v1/conflict-copy` | ids of conflict copies and of their attachment records |
 | `keyorra/sync/v1/endorse` | endorsement and self-join statements |
+| `keyorra/sync/v1/vault-id` | vault ids (commit to creator and vault key) |
+| `keyorra/sync/v1/key-fingerprint` | the key code compared on approval |
+| `keyorra/sync/v1/root-head` | signature of the root's head file |
 
 ## 3. Canonical CBOR
 
@@ -328,11 +331,24 @@ A device that is not approved can read but does not write (after `self_join`: wr
 pending). A device whose cut is set or that was removed does not write any more, nor does a
 device approved with a key that is not its own (an alarm).
 
-**Advertised root head.** A small file signed by the root (`root.head`, rewritten after every
-confirmed append) and the setup code carry the root's head `(seq, hash)`. A device compares it with the root's stream as
-received: if behind, other devices' records are **unconfirmed** and an alarm says so
-(pausing nothing) until the stream catches up; a different hash at that position is a fork
-of the root. The advertised head only moves forward.
+**Advertised root head.** A small file signed by the root and the setup code carry the
+root's head `(seq, hash)`:
+
+```
+root.head = canonical({ "account_id": bytes16, "seq": uint, "hash": bytes32, "at_ms": uint, "sig": bytes64 })
+sig       = Ed25519(root_sk, "keyorra/sync/v1/root-head\0" ‖ account_id ‖ seq:u64be ‖ hash ‖ at_ms:u64be)
+```
+
+The root rewrites it after every confirmed append and at least daily while online (`at_ms`
+is its wall time). A device compares the head with the root's stream as received: if
+behind, other devices' records are **unconfirmed** and an alarm says so (pausing nothing)
+until the stream catches up; a different hash at that position is a fork of the root. The
+advertised head only moves forward. If `at_ms` has not advanced for 7 days while other
+streams advanced, the device warns that the root looks silent (a frozen or replayed file).
+
+**Snapshots** count only if the root wrote them: bootstrap and anchoring use root snapshots
+only. A device restores its own rolled-back stream by appending its original segments
+again.
 
 **Vault keys.** `vault_id = UUIDv8(SHA-256("keyorra/sync/v1/vault-id\0" ‖ creator ‖
 vault_key)[0..16])`. A vault's key is the one an admitted version carries whose unwrapped key
@@ -381,6 +397,13 @@ received; at most 64 unmet claims per claimant; dropped if the checkpoint's posi
 counting); each claim unmet for 24 hours is reported once as withheld (a warning). A root `revoke`
 whose `last_valid_hash` differs from the received chain hash at `last_valid_seq` is a fork.
 Forks and disputes at positions after the stream's cut raise nothing.
+
+**Own stream occupied**: if the append at the next own position conflicts, or the stored
+head of the own stream is ahead, the device looks at what is there: only a segment that
+verifies with its own key (or the root's checkpoint) proves another copy of it and makes it
+retire; anything else raises an own-stream-tampered alarm, the id is kept and nothing is
+pushed until the user removes the file and retries, or leaves the id. The root never halts
+on unverified evidence.
 
 **Rollback**: before reading, a device compares each stream's stored head (`Transport::head`)
 with its own received position, and before writing, the stored head of its own stream with

@@ -410,7 +410,8 @@ remote head:
 |---|---|---|
 | equal | normal | append |
 | remote behind local | rollback of the store (§4.5) | alarm, offer restore |
-| remote ahead, or same seq with another hash | another copy of this device (clone, restored backup) wrote to the stream | **retire**: never write with this id again |
+| remote ahead, or same seq with another hash, **and** a segment there verifies with this device's own key (or the main device's checkpoint says so) | another copy of this device (clone, restored backup) wrote to the stream | **retire**: never write with this id again |
+| remote ahead, or something else at the next position, that does **not** verify with the own key | a store or keyless folder writer tampered with the stream (review K1) | alarm "own stream tampered", keep the id, push nothing until the user removes the file (retry) or chooses to leave the id; the main device never halts on this |
 | device key missing from the Keychain | database restored or copied to another Mac | **retire** |
 
 Retiring: local unsynced edits are kept; the device generates a new id and key and joins with `SelfJoin`, pending until the main device approves it (comparing the key code); its first entries are the queued edits as new versions. Only the main device removes the old id (A3 suggests it). **The main device never retires**: its id and key anchor the account. If another copy of it wrote, or its key is gone, it stops writing and the user is asked to start a new account from a device and carry the data over (A1d/A3 flow, §4.3).
@@ -455,8 +456,12 @@ other device's approvals or removals count; there is nothing to resolve between 
   in the root's own latest checkpoint before the `Revoke`, counted only where that position
   matches the reader's chain. Removing a device that was never approved means none of its
   entries count. A cut is set once and never moves.
-- **The root's head is advertised** (review W1): a small file signed by the main device (`root.head`, rewritten after every confirmed append) and the setup
-  code carry the root's current head `(seq, hash)`; a reader only moves it forward. (The header itself cannot carry the head: it is bound into the wrapped account key and changes only with the password.) Every device compares it with the root's
+- **The root's head is advertised** (review W1): a small file signed by the main device (`root.head`, rewritten after every confirmed append and at least daily while it is online, carrying its wall time) and the setup
+  code carry the root's current head `(seq, hash)`; a reader only moves it forward. If the
+  main device's time in the file does not advance for a week while other devices' streams
+  move on, a device warns: the store may be freezing or replaying the file while hiding the
+  main device's newest entries (review I1). (The main device may also just be switched
+  off; hence a warning, not an alarm.) (The header itself cannot carry the head: it is bound into the wrapped account key and changes only with the password.) Every device compares it with the root's
   stream as received: behind is an alarm ("the main device's changes are not all here")
   that pauses nothing but marks other devices' records as **unconfirmed** until the root's
   stream catches up (a removal could be withheld); another hash at that position is a fork
@@ -552,11 +557,13 @@ removed device past its cut raise nothing: neither counts.
 Alarm UI: the affected device's changes pause with a plain explanation and two actions:
 **Restore from this Mac** and **Stop syncing**. Nothing is silently "fixed".
 
-**Restore** (after a rollback): the device publishes a fresh snapshot (§4.8) of its full
-fold with its frontier (including its own stream at the local head), then continues its
-stream with new entries. Readers that lack the rolled-back segments accept the snapshot
-(signed by a live device) as the anchor for every stream it covers and continue from
-there. Other devices whose own streams were rolled back do the same when they notice.
+**Restore** (after a rollback): a device whose own stream was rolled back appends its lost
+segments again, byte for byte (it keeps its confirmed segments; A1d persists them), so
+readers verify them like any other segment. A rollback of another device's stream is
+restored on the main device, which publishes a fresh snapshot (§4.8) of its full fold;
+readers that lack the rolled-back segments anchor on it. A snapshot of any other device
+never anchors anything (review S1: its versions are tied to positions only through its own
+word).
 
 Limits, documented: a device that never saw the newer state cannot detect a rollback (a
 fresh device joining a folder restored from an old backup). Two devices can be kept on
@@ -601,7 +608,14 @@ sig          = Ed25519(author_sk, "keyorra/sync/v1/header\0" ‖ author ‖ cano
   another stream is ignored. A joining device takes the main device's id and key from the
   header it unlocked, never from the streams. Old header files are deleted once every
   approved device has adopted the new epoch (`HeaderSeen`).
-- **Joining** uses only the highest epoch present. If several files share it, they are
+- **Joining with a setup code** from an existing device pins the main device (its id and key
+  code): only headers naming it are considered, the highest such epoch first. **Joining with
+  the Emergency Kit alone** trusts the newest header, whichever main device it names; if the
+  header files disagree about the main device, the app warns. Someone with the master
+  password and Secret Key can publish such a header (review I2); existing devices raise an
+  alarm for any header file naming another main device. (C1 note: a replayed old header
+  still opens with an old password until key rotation.)
+- **Joining** otherwise uses only the highest epoch present. If several files share it, they are
   tried in ascending author order. There is no fallback to lower epochs, even if the
   password fails: an old password must not open the account. (Consequence: someone with
   write access to the folder can block joining by planting a bogus high epoch; they can
@@ -626,7 +640,11 @@ pad(canonical({body, sig})), aad = header ‖ nonce)`, `sig = Ed25519(author_sk,
 bytes.
 
 - Written after ~500 new entries or 7 days, after a restore, and after accepting a Revoke.
-- What a snapshot vouches for depends on its author. A device with nothing yet bootstraps only from a snapshot of the main device (verified with the key from the header). A snapshot of the main device anchors any stream; a snapshot of another approved device anchors only its own stream. Restoring another device's rolled-back stream is done on the main device.
+- Only snapshots of the main device count: a device with nothing yet bootstraps only from
+  one (verified with the key from the header), and only they anchor streams after a
+  rollback. A snapshot of another device is ignored by readers (review S1). A snapshot whose
+  author's log does not mention it within three segments is a fork, checked when the reader
+  had not read past its frontier already.
 - **Bootstrap**: a joining device takes the newest snapshot that verifies against a live
   device and whose frontier respects every revocation cut it later learns of (otherwise it
   falls back to an older snapshot or one written after the revocation), then reads all
@@ -888,8 +906,10 @@ The Ed25519 device key is in the Keychain (§4.2). The Secret Key is sealed unde
 ### 7.3 Joining (another Mac)
 
 1. "Join a synced account": pick the folder or enter the server URL, then paste the
-   **setup code** (`KY1-<account_id>-<secret key>[-<pin>]`) shown by a device that is
-   already set up, or type account id and Secret Key from the Emergency Kit.
+   **setup code** (`KY1-<account_id>-<secret key>-<main device id>-<main device key code>-<main device head seq>[-<pin>]`)
+   shown by a device that is already set up (it pins the main device and its current head),
+   or type account id and Secret Key from the Emergency Kit (then the newest header is
+   trusted, with a warning if headers disagree about the main device).
 2. Master password → `KEK_sync` → AK from the highest-epoch header (§4.7).
 3. Approval: with the main device available, the commitment exchange of §6.4 runs through
    the transport (server) or through `join/` request files in the folder (same messages,
