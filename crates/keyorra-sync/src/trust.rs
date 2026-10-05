@@ -293,7 +293,11 @@ impl Trust {
                     }
                 }
             }
-            Entry::Put(_) | Entry::Checkpoint(_) => Ok(false),
+            Entry::Put(_)
+            | Entry::Checkpoint(_)
+            | Entry::Header(_)
+            | Entry::HeaderSeen { .. }
+            | Entry::Snapshot { .. } => Ok(false),
         }
     }
 }

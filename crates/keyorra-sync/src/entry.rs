@@ -5,9 +5,12 @@
 //!       | { "checkpoint": { bytes16 → [seq, hash] } }        heads of other streams applied by the writer
 //!       | { "genesis": { "account_id", "key", "name" } }     the root device, first entry of its stream
 //!       | { "self_join": { "key", "name", "sig" } }          a device that joined with the Emergency Kit
-//!       | { "endorse": { "device", "key", "name", "sig" } }  a live device vouches for another one
+//!       | { "endorse": { "device", "key", "name", "sig" } }  the main device approves a device
 //!       | { "revoke": { "device", "last_valid_seq", "last_valid_hash" } }
 //!                                                          entries of `device` after the cut stop counting
+//!       | { "header": Header }                               an account header (plan A1c-2)
+//!       | { "header_seen": epoch }                           the writer adopted this header epoch
+//!       | { "snapshot": { "name", "frontier" } }             the writer published this snapshot
 //! sig   = Ed25519(signer, "keyorra/sync/v1/endorse\0" ‖ account_id ‖ device ‖ key)
 //! ```
 //!
@@ -21,6 +24,7 @@ use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use crate::cbor::Value;
 use crate::envelope::Envelope;
 use crate::error::{malformed, Error, Result};
+use crate::header::Header;
 use crate::labels::{self, tagged};
 use crate::{AccountId, DeviceId};
 
@@ -61,6 +65,46 @@ pub enum Entry {
         /// refers to (zeros for a cut at 0).
         last_valid_hash: [u8; 32],
     },
+    Header(Header),
+    HeaderSeen {
+        epoch: u32,
+    },
+    Snapshot {
+        /// SHA-256 of the snapshot file.
+        name: [u8; 32],
+        frontier: Heads,
+    },
+}
+
+pub(crate) fn heads_value(heads: &Heads) -> Value {
+    Value::Map(
+        heads
+            .iter()
+            .map(|(d, h)| {
+                (
+                    Value::bytes(d),
+                    Value::Array(vec![Value::Uint(h.seq), Value::bytes(h.hash)]),
+                )
+            })
+            .collect(),
+    )
+}
+
+pub(crate) fn heads_from(value: &Value) -> Result<Heads> {
+    let mut heads = Heads::new();
+    for (d, h) in value.as_map()? {
+        let [seq, hash] = h.as_list()? else {
+            return Err(malformed("head"));
+        };
+        heads.insert(
+            d.as_array_of()?,
+            Head {
+                seq: seq.as_uint()?,
+                hash: hash.as_array_of()?,
+            },
+        );
+    }
+    Ok(heads)
 }
 
 /// What an endorsement (or a self-join) signs.
@@ -98,20 +142,7 @@ impl Entry {
     pub fn to_value(&self) -> Value {
         let (tag, body) = match self {
             Entry::Put(env) => ("put", env.to_value()),
-            Entry::Checkpoint(heads) => (
-                "checkpoint",
-                Value::Map(
-                    heads
-                        .iter()
-                        .map(|(d, h)| {
-                            (
-                                Value::bytes(d),
-                                Value::Array(vec![Value::Uint(h.seq), Value::bytes(h.hash)]),
-                            )
-                        })
-                        .collect(),
-                ),
-            ),
+            Entry::Checkpoint(heads) => ("checkpoint", heads_value(heads)),
             Entry::Genesis {
                 account_id,
                 key,
@@ -158,6 +189,15 @@ impl Entry {
                     ("last_valid_hash", Value::bytes(last_valid_hash)),
                 ]),
             ),
+            Entry::Header(header) => ("header", header.to_value()),
+            Entry::HeaderSeen { epoch } => ("header_seen", Value::Uint((*epoch).into())),
+            Entry::Snapshot { name, frontier } => (
+                "snapshot",
+                Value::map(vec![
+                    ("name", Value::bytes(name)),
+                    ("frontier", heads_value(frontier)),
+                ]),
+            ),
         };
         Value::map(vec![(tag, body)])
     }
@@ -171,22 +211,7 @@ impl Entry {
         let tag = tag.as_text()?;
         Ok(match tag {
             "put" => Entry::Put(Envelope::from_value(body)?),
-            "checkpoint" => {
-                let mut heads = Heads::new();
-                for (d, h) in body.as_map()? {
-                    let [seq, hash] = h.as_list()? else {
-                        return Err(malformed("checkpoint head"));
-                    };
-                    heads.insert(
-                        d.as_array_of()?,
-                        Head {
-                            seq: seq.as_uint()?,
-                            hash: hash.as_array_of()?,
-                        },
-                    );
-                }
-                Entry::Checkpoint(heads)
-            }
+            "checkpoint" => Entry::Checkpoint(heads_from(body)?),
             "genesis" => {
                 let f = body.fields(&["account_id", "key", "name"])?;
                 Entry::Genesis {
@@ -218,6 +243,17 @@ impl Entry {
                     device: f.get("device")?.as_array_of()?,
                     last_valid_seq: f.get("last_valid_seq")?.as_uint()?,
                     last_valid_hash: f.get("last_valid_hash")?.as_array_of()?,
+                }
+            }
+            "header" => Entry::Header(Header::from_value(body)?),
+            "header_seen" => Entry::HeaderSeen {
+                epoch: body.as_u32()?,
+            },
+            "snapshot" => {
+                let f = body.fields(&["name", "frontier"])?;
+                Entry::Snapshot {
+                    name: f.get("name")?.as_array_of()?,
+                    frontier: heads_from(f.get("frontier")?)?,
                 }
             }
             other => return Err(Error::Unsupported(format!("entry type {other}"))),
@@ -291,6 +327,20 @@ mod tests {
                 last_valid_seq: 12,
                 last_valid_hash: [6; 32],
             },
+            Entry::Header(crate::header::tests::sample_header()),
+            Entry::HeaderSeen { epoch: 3 },
+            Entry::Snapshot {
+                name: [5; 32],
+                frontier: [(
+                    [2; 16],
+                    Head {
+                        seq: 9,
+                        hash: [8; 32],
+                    },
+                )]
+                .into_iter()
+                .collect(),
+            },
         ]
     }
 
@@ -335,6 +385,9 @@ mod tests {
     #[test]
     fn only_first_entries_carry_their_own_key() {
         let keys: Vec<bool> = samples().iter().map(|e| e.own_key().is_some()).collect();
-        assert_eq!(keys, [false, false, true, true, false, false]);
+        assert_eq!(
+            keys,
+            [false, false, true, true, false, false, false, false, false]
+        );
     }
 }

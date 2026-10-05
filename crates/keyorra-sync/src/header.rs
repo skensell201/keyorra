@@ -251,7 +251,6 @@ pub(crate) mod tests {
     use super::*;
 
     /// A valid header for other modules' tests.
-    #[allow(dead_code)] // used from Task 2 on
     pub(crate) fn sample_header() -> Header {
         header_for("pw", &Key::from_bytes([0x30; 32]), 1)
     }
