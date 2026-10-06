@@ -17,6 +17,8 @@ import { PairingDialog } from "./PairingDialog";
 import { ItemList } from "./ItemList";
 import { TrashItem } from "./TrashItem";
 import { SettingsDialog } from "./SettingsDialog";
+import { SyncBanner } from "./SyncBanner";
+import { SyncDialog } from "./SyncDialog";
 import { Sidebar, type Selection } from "./Sidebar";
 import { Watchtower } from "./Watchtower";
 
@@ -30,6 +32,7 @@ export function Main({ onLock }: { onLock: () => void }) {
   const [pane, setPane] = useState<Pane>({ mode: "empty" });
   const [importing, setImporting] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
+  const [showSync, setShowSync] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [pairing, setPairing] = useState<PairingRequest | null>(null);
   const [report, setReport] = useState<WatchtowerReport | null>(null);
@@ -239,6 +242,7 @@ export function Main({ onLock }: { onLock: () => void }) {
         />
       )}
       <section className="detail">
+        <SyncBanner onOpen={() => setShowSync(true)} onSynced={refresh} />
         {error && (
           <div className="banner error" role="alert">
             {error}
@@ -282,7 +286,16 @@ export function Main({ onLock }: { onLock: () => void }) {
         )}
       </section>
       {importing && <ImportDialog onClose={() => setImporting(false)} onImported={refresh} />}
-      {showSettings && <SettingsDialog onClose={() => setShowSettings(false)} />}
+      {showSettings && (
+        <SettingsDialog
+          onClose={() => setShowSettings(false)}
+          onOpenSync={() => {
+            setShowSettings(false);
+            setShowSync(true);
+          }}
+        />
+      )}
+      {showSync && <SyncDialog onClose={() => setShowSync(false)} onChanged={() => void refresh()} />}
       {deletingVault && (
         <ConfirmDialog
           title={`Delete vault "${deletingVault.name}"?`}

@@ -6,11 +6,12 @@ import { Setup } from "./Setup";
 
 vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
-  return { ...actual, api: { ...actual.api, create: vi.fn() } };
+  return { ...actual, api: { ...actual.api, create: vi.fn(), joinSync: vi.fn() } };
 });
 
 beforeEach(() => {
   vi.mocked(api.create).mockReset();
+  vi.mocked(api.joinSync).mockReset();
 });
 
 test("creates the vault once both passwords match and are long enough", async () => {
@@ -43,4 +44,24 @@ test("shows a backend error", async () => {
   await user.type(screen.getByLabelText("Confirm password"), "correct horse battery");
   await user.click(screen.getByRole("button", { name: "Create vault" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("A vault already exists on this Mac");
+});
+
+test("a new Mac can join a synced account instead", async () => {
+  const user = userEvent.setup();
+  const onDone = vi.fn();
+  vi.mocked(api.joinSync).mockResolvedValue({
+    mode: "new",
+    keyCode: "0a1b-2c3d-4e5f",
+    copied: 0,
+    trashedLeft: 0,
+    damaged: 0,
+  });
+  render(<Setup onDone={onDone} />);
+  await user.click(screen.getByRole("button", { name: /Join your synced account/ }));
+  await user.type(screen.getByLabelText("Master password"), "correct horse battery");
+  await user.type(screen.getByLabelText("Setup code or Secret Key"), "KEYORRA-SETUP-1-XYZ");
+  await user.click(screen.getByRole("button", { name: "Join" }));
+  expect(await screen.findByTestId("key-code")).toHaveTextContent("0a1b-2c3d-4e5f");
+  await user.click(screen.getByRole("button", { name: "Continue" }));
+  expect(onDone).toHaveBeenCalled();
 });
