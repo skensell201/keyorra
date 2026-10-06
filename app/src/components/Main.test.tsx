@@ -3,6 +3,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 import { api, type ItemSummary, type PairingRequest } from "../api";
 import { loginItem } from "../test/fixtures";
+import { syncScreen } from "../test/sync";
 import { Main } from "./Main";
 
 vi.mock("../api", async (importOriginal) => {
@@ -314,4 +315,19 @@ test("deleting a vault asks about unsaved edits first", async () => {
   await user.click(screen.getByRole("button", { name: "Delete Work" }));
   await user.click(screen.getByRole("button", { name: "Discard" }));
   expect(screen.getByRole("alertdialog", { name: 'Delete vault "Work"?' })).toBeInTheDocument();
+});
+
+test("the sync banner opens Settings on Sync, at the devices to review", async () => {
+  const user = userEvent.setup();
+  const s = syncScreen();
+  s.status!.devices.push({ id: "d2", name: "New Mac", approved: false, main: false, thisDevice: false, removed: false });
+  vi.mocked(api.syncScreen).mockResolvedValue(s);
+  render(<Main onLock={vi.fn()} />);
+  await user.click(await screen.findByRole("button", { name: "Review" }));
+  const settings = await screen.findByRole("dialog", { name: "Settings" });
+  expect(within(settings).getByRole("tab", { name: /^Sync/ })).toHaveAttribute("aria-selected", "true");
+  expect(await within(settings).findByRole("tab", { name: /^Devices/ })).toHaveAttribute("aria-selected", "true");
+  expect(screen.getByRole("button", { name: "Settings" })).toHaveAttribute("aria-expanded", "true");
+  // One window: Sync is not opened on its own.
+  expect(screen.getAllByRole("dialog")).toHaveLength(1);
 });

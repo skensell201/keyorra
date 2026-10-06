@@ -4,7 +4,8 @@ import { open } from "@tauri-apps/plugin-dialog";
 import { beforeEach, expect, test, vi } from "vitest";
 import { api } from "../api";
 import { syncScreen } from "../test/sync";
-import { SyncDialog } from "./SyncDialog";
+import { SettingsDialog } from "./SettingsDialog";
+import { groupLog } from "./SyncSettings";
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("../api", async (importOriginal) => {
@@ -31,6 +32,9 @@ vi.mock("../api", async (importOriginal) => {
       deleteBackup: vi.fn(),
       approveDevice: vi.fn(),
       copySetupCode: vi.fn(),
+      settings: vi.fn(),
+      touchIdState: vi.fn(),
+      pairedBrowsers: vi.fn(),
     },
   };
 });
@@ -38,9 +42,15 @@ vi.mock("../api", async (importOriginal) => {
 const off = syncScreen({ enabled: false, running: false, status: null, log: [] });
 const kit = { accountId: "0101".repeat(8), secretKey: "A3KX-ABCDE-FGHJK", location: "/sync/Keyorra/0101" };
 
-/** Opens a category of the Sync dialog (a vertical tab; its name may carry a count). */
+/** Opens a section of Settings → Sync (a tab; its name may carry a count). */
 async function openPane(user: ReturnType<typeof userEvent.setup>, label: string) {
-  await user.click(await screen.findByRole("tab", { name: new RegExp(`^${label}`) }));
+  const sections = await screen.findByRole("tablist", { name: "Sync sections" });
+  await user.click(within(sections).getByRole("tab", { name: new RegExp(`^${label}`) }));
+}
+
+/** Settings, opened on Sync as the banner opens it. */
+function renderSync(onClose: () => void = vi.fn()) {
+  return render(<SettingsDialog onClose={onClose} initial={{ category: "sync" }} />);
 }
 
 beforeEach(() => {
@@ -52,6 +62,9 @@ beforeEach(() => {
     warning: null,
   });
   vi.mocked(api.backups).mockReset().mockResolvedValue([]);
+  vi.mocked(api.settings).mockReset().mockResolvedValue({ autoLockMinutes: 10, clipboardSeconds: 90 });
+  vi.mocked(api.touchIdState).mockReset().mockResolvedValue({ available: false, enabled: false, passwordDue: false });
+  vi.mocked(api.pairedBrowsers).mockReset().mockResolvedValue([]);
   for (const f of [
     api.syncNow, api.setSyncPlace, api.enableSync, api.joinSync, api.disableSync, api.syncAlarmAction,
     api.removeSyncDevice, api.verifySync, api.syncFolderFiles, api.emergencyKit, api.startNewSyncAccount,
@@ -65,7 +78,7 @@ test("turning sync on shows the Emergency Kit to print", async () => {
   const user = userEvent.setup();
   vi.mocked(api.syncScreen).mockResolvedValue(off);
   vi.mocked(api.enableSync).mockResolvedValue(kit);
-  render(<SyncDialog onClose={vi.fn()} />);
+  renderSync();
   expect(await screen.findByText(/CloudDocs\/Keyorra/)).toBeInTheDocument();
   await user.type(screen.getByLabelText("Master password"), "correct horse battery");
   await user.click(screen.getByRole("button", { name: "Turn on sync" }));
@@ -88,7 +101,7 @@ test("another folder can be chosen, with its warning", async () => {
     kind: "cloudStorage",
     warning: "Set this folder to stay downloaded",
   });
-  render(<SyncDialog onClose={vi.fn()} />);
+  renderSync();
   await user.click(await screen.findByRole("button", { name: "Choose another folder" }));
   expect(api.setSyncPlace).toHaveBeenCalledWith("/Users/a/Library/CloudStorage/Dropbox");
   expect(await screen.findByText("Set this folder to stay downloaded")).toBeInTheDocument();
@@ -112,7 +125,7 @@ test("an alarm offers its actions", async () => {
     }),
   );
   vi.mocked(api.syncAlarmAction).mockResolvedValue(undefined);
-  render(<SyncDialog onClose={vi.fn()} />);
+  renderSync();
   const alarms = await screen.findByRole("region", { name: "Alarms" });
   expect(within(alarms).getByText(/went missing/)).toBeInTheDocument();
   await user.click(within(alarms).getByRole("button", { name: "Restore from this Mac" }));
@@ -128,7 +141,7 @@ test("an alarm offers its actions", async () => {
 test("the main Mac removes a device after confirming", async () => {
   const user = userEvent.setup();
   vi.mocked(api.removeSyncDevice).mockResolvedValue(undefined);
-  render(<SyncDialog onClose={vi.fn()} />);
+  renderSync();
   await openPane(user, "Devices");
   const devices = await screen.findByRole("region", { name: "Devices" });
   await user.click(within(devices).getByRole("button", { name: "Remove" }));
@@ -142,7 +155,7 @@ test("a device waiting for approval is reviewed with its code", async () => {
   s.status!.devices.push({ id: "d2", name: "New Mac", approved: false, main: false, thisDevice: false, removed: false });
   vi.mocked(api.syncScreen).mockResolvedValue(s);
   vi.mocked(api.approveDevice).mockResolvedValue(undefined);
-  render(<SyncDialog onClose={vi.fn()} />);
+  renderSync();
   const approvals = await screen.findByRole("region", { name: "Approvals" });
   await user.click(within(approvals).getByRole("button", { name: "Review" }));
   const approve = screen.getByRole("button", { name: "Approve" });
@@ -158,9 +171,9 @@ test("the Emergency Kit asks for the password when it was not entered lately", a
   vi.mocked(api.emergencyKit)
     .mockRejectedValueOnce({ kind: "passwordRequired", message: "Enter your master password" })
     .mockResolvedValueOnce(kit);
-  render(<SyncDialog onClose={vi.fn()} />);
+  renderSync();
   await openPane(user, "Safety");
-  await user.click(await screen.findByRole("button", { name: "Emergency Kit" }));
+  await user.click(await screen.findByRole("button", { name: "Open kit" }));
   await user.type(await screen.findByLabelText("Master password for the Emergency Kit"), "correct horse battery");
   await user.click(screen.getByRole("button", { name: "Show" }));
   expect(api.emergencyKit).toHaveBeenLastCalledWith("correct horse battery");
@@ -181,11 +194,11 @@ test("verify, folder files and the log", async () => {
     { path: "streams/0101/0000000000000001.seg", size: 2048, counted: true },
     { path: "streams/0101/x (1).seg", size: 10, counted: false },
   ]);
-  render(<SyncDialog onClose={vi.fn()} />);
+  renderSync();
   await openPane(user, "Safety");
-  await user.click(await screen.findByRole("button", { name: "Verify everything" }));
+  await user.click(await screen.findByRole("button", { name: "Verify" }));
   expect(await screen.findByRole("status", { name: "Verify" })).toHaveTextContent("12 items and 2 attachments checked. Everything matches.");
-  await user.click(screen.getByRole("button", { name: "What the folder sees" }));
+  await user.click(screen.getByRole("button", { name: "List files" }));
   const table = await screen.findByRole("table", { name: "Folder files" });
   expect(within(table).getByText("2.0 KB")).toBeInTheDocument();
   expect(within(table).getByText("unknown, ignored")).toBeInTheDocument();
@@ -197,7 +210,7 @@ test("turning sync off and starting a new account", async () => {
   const user = userEvent.setup();
   vi.mocked(api.disableSync).mockResolvedValue(undefined);
   vi.mocked(api.startNewSyncAccount).mockResolvedValue(kit);
-  render(<SyncDialog onClose={vi.fn()} />);
+  renderSync();
   await openPane(user, "Advanced");
   await user.click(await screen.findByRole("button", { name: "Turn off sync" }));
   await user.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Turn off sync" }));
@@ -217,7 +230,7 @@ test("backup copies can be deleted", async () => {
     { name: "keyorra.db.bak-v1", size: 4096, modified: 1_790_000_000, kind: "migration" },
   ]);
   vi.mocked(api.deleteBackup).mockResolvedValue(undefined);
-  render(<SyncDialog onClose={vi.fn()} />);
+  renderSync();
   await openPane(user, "Safety");
   const backups = await screen.findByRole("region", { name: "Backups" });
   expect(within(backups).getByText(/Before an upgrade/)).toBeInTheDocument();
@@ -238,7 +251,7 @@ test("review A3 I6: removing and leaving from an alarm are confirmed; Cancel doe
   const user = userEvent.setup();
   vi.mocked(api.syncScreen).mockResolvedValue(alarm(["remove", "leave", "accept"]));
   vi.mocked(api.syncAlarmAction).mockResolvedValue(undefined);
-  render(<SyncDialog onClose={vi.fn()} />);
+  renderSync();
   const alarms = await screen.findByRole("region", { name: "Alarms" });
   await user.click(within(alarms).getByRole("button", { name: "Remove device" }));
   expect(within(screen.getByRole("alertdialog")).getByText(/stop counting/)).toBeInTheDocument();
@@ -258,7 +271,7 @@ test("review A3 I6: removing and leaving from an alarm are confirmed; Cancel doe
 test("review A3 I7: Escape while starting a new account does not close Sync", async () => {
   const user = userEvent.setup();
   const onClose = vi.fn();
-  render(<SyncDialog onClose={onClose} />);
+  renderSync(onClose);
   await openPane(user, "Advanced");
   await user.click(await screen.findByRole("button", { name: "Start a new account" }));
   await user.type(within(screen.getByRole("alertdialog")).getByLabelText("Master password"), "correct horse");
@@ -274,7 +287,7 @@ test("review A3 I7: Escape while starting a new account does not close Sync", as
 test("review A3 I7: Escape in a confirmation closes only the confirmation", async () => {
   const user = userEvent.setup();
   const onClose = vi.fn();
-  render(<SyncDialog onClose={onClose} />);
+  renderSync(onClose);
   await openPane(user, "Advanced");
   await user.click(await screen.findByRole("button", { name: "Turn off sync" }));
   fireEvent.keyDown(window, { key: "Escape" });
@@ -288,13 +301,13 @@ test("review A3 I7: Escape does not close Sync while the kit is shown or a comma
   vi.mocked(api.emergencyKit).mockResolvedValue(kit);
   let finish: (r: Awaited<ReturnType<typeof api.verifySync>>) => void = () => {};
   vi.mocked(api.verifySync).mockReturnValue(new Promise((r) => (finish = r)));
-  render(<SyncDialog onClose={onClose} />);
+  renderSync(onClose);
   await openPane(user, "Safety");
-  await user.click(await screen.findByRole("button", { name: "Verify everything" }));
+  await user.click(await screen.findByRole("button", { name: "Verify" }));
   fireEvent.keyDown(window, { key: "Escape" });
   expect(onClose).not.toHaveBeenCalled();
   // Minor: the other tools wait meanwhile, in every category.
-  for (const name of ["Emergency Kit", "Verify everything", "What the folder sees"]) {
+  for (const name of ["Open kit", "Verify", "List files"]) {
     expect(screen.getByRole("button", { name })).toBeDisabled();
   }
   await openPane(user, "Devices");
@@ -303,8 +316,8 @@ test("review A3 I7: Escape does not close Sync while the kit is shown or a comma
   expect(screen.getByRole("button", { name: "Sync now" })).toBeDisabled();
   await openPane(user, "Safety");
   finish({ items: 1, damaged: 0, attachments: 0, damagedAttachments: 0, differing: [], missing: 0 });
-  await waitFor(() => expect(screen.getByRole("button", { name: "Emergency Kit" })).toBeEnabled());
-  await user.click(screen.getByRole("button", { name: "Emergency Kit" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Open kit" })).toBeEnabled());
+  await user.click(screen.getByRole("button", { name: "Open kit" }));
   await screen.findByRole("region", { name: "Emergency Kit" });
   fireEvent.keyDown(window, { key: "Escape" });
   expect(onClose).not.toHaveBeenCalled();
@@ -316,12 +329,12 @@ test("review A3: the folder table has headers; a wrong kit password is cleared",
   vi.mocked(api.emergencyKit)
     .mockRejectedValueOnce({ kind: "passwordRequired", message: "Enter your master password" })
     .mockRejectedValueOnce({ kind: "wrongPassword", message: "Wrong" });
-  render(<SyncDialog onClose={vi.fn()} />);
+  renderSync();
   await openPane(user, "Safety");
-  await user.click(await screen.findByRole("button", { name: "What the folder sees" }));
+  await user.click(await screen.findByRole("button", { name: "List files" }));
   const table = await screen.findByRole("table", { name: "Folder files" });
   expect(within(table).getAllByRole("columnheader").map((h) => h.textContent)).toEqual(["Name", "Size", "Status"]);
-  await user.click(screen.getByRole("button", { name: "Emergency Kit" }));
+  await user.click(screen.getByRole("button", { name: "Open kit" }));
   const input = await screen.findByLabelText("Master password for the Emergency Kit");
   await user.type(input, "wrong password");
   await user.click(screen.getByRole("button", { name: "Show" }));
@@ -331,13 +344,13 @@ test("review A3: the folder table has headers; a wrong kit password is cleared",
   expect(screen.queryByLabelText("Master password for the Emergency Kit")).not.toBeInTheDocument();
 });
 
-// ---- wide dialog with categories ----
+// ---- Sync inside Settings, with sections ----
 
-test("opens on Overview; the categories switch with a click and with the arrow keys", async () => {
+test("opens on Overview; the sections switch with a click and with the arrow keys", async () => {
   const user = userEvent.setup();
-  render(<SyncDialog onClose={vi.fn()} />);
+  renderSync();
   const nav = await screen.findByRole("tablist", { name: "Sync sections" });
-  expect(nav).toHaveAttribute("aria-orientation", "vertical");
+  expect(nav).toHaveAttribute("aria-orientation", "horizontal");
   expect(within(nav).getAllByRole("tab").map((t) => t.textContent)).toEqual([
     "Overview",
     "Devices",
@@ -349,8 +362,8 @@ test("opens on Overview; the categories switch with a click and with the arrow k
   expect(screen.getByRole("tabpanel", { name: "Overview" })).toContainElement(
     screen.getByRole("button", { name: "Sync now" }),
   );
-  // One category at a time.
-  expect(screen.queryByRole("button", { name: "Verify everything" })).not.toBeInTheDocument();
+  // One section at a time.
+  expect(screen.queryByRole("button", { name: "Verify" })).not.toBeInTheDocument();
 
   await user.click(screen.getByRole("tab", { name: "Safety" }));
   expect(screen.getByRole("tab", { name: "Safety" })).toHaveAttribute("aria-selected", "true");
@@ -362,12 +375,15 @@ test("opens on Overview; the categories switch with a click and with the arrow k
   expect(screen.getByRole("tab", { name: "Safety" })).toHaveAttribute("tabindex", "0");
   expect(overview).toHaveAttribute("tabindex", "-1");
   screen.getByRole("tab", { name: "Safety" }).focus();
-  await user.keyboard("{ArrowDown}");
+  await user.keyboard("{ArrowRight}");
   expect(screen.getByRole("tab", { name: "Advanced" })).toHaveFocus();
   expect(screen.getByRole("button", { name: "Turn off sync" })).toBeInTheDocument();
-  await user.keyboard("{ArrowDown}");
+  await user.keyboard("{ArrowRight}");
   expect(overview).toHaveFocus();
-  await user.keyboard("{ArrowUp}");
+  await user.keyboard("{ArrowLeft}");
+  expect(screen.getByRole("tab", { name: "Advanced" })).toHaveFocus();
+  // Up and Down belong to the Settings categories, not to these tabs.
+  await user.keyboard("{ArrowDown}");
   expect(screen.getByRole("tab", { name: "Advanced" })).toHaveFocus();
   await user.keyboard("{Home}");
   expect(overview).toHaveAttribute("aria-selected", "true");
@@ -375,43 +391,51 @@ test("opens on Overview; the categories switch with a click and with the arrow k
   expect(screen.getByRole("tab", { name: "Advanced" })).toHaveAttribute("aria-selected", "true");
 });
 
-test("what needs attention is counted on the categories and shown on Overview at once", async () => {
+test("what needs attention is counted on the sections, on Sync in Settings, and shown on Overview", async () => {
   const user = userEvent.setup();
   const s = alarm(["accept"]);
   s.status!.devices.push({ id: "d2", name: "New Mac", approved: false, main: false, thisDevice: false, removed: false });
   vi.mocked(api.syncScreen).mockResolvedValue(s);
-  render(<SyncDialog onClose={vi.fn()} />);
+  renderSync();
   const overview = await screen.findByRole("tab", { name: "Overview, 2 need attention" });
   expect(overview).toHaveAttribute("aria-selected", "true");
   expect(within(overview).getByText("2")).toBeInTheDocument();
   expect(screen.getByRole("tab", { name: "Devices, 1 needs attention" })).toBeInTheDocument();
   expect(screen.getByRole("tab", { name: "Safety" })).toBeInTheDocument();
-  expect(screen.getByRole("region", { name: "Approvals" })).toBeInTheDocument();
-  expect(screen.getByRole("region", { name: "Alarms" })).toBeInTheDocument();
-  // The device waiting is also reviewed from Devices.
+  expect(await screen.findByRole("tab", { name: "Sync, 2 need attention" })).toHaveAttribute("aria-selected", "true");
+  const attention = screen.getByRole("region", { name: "Attention" });
+  expect(within(attention).getByRole("region", { name: "Approvals" })).toBeInTheDocument();
+  expect(within(attention).getByRole("region", { name: "Alarms" })).toBeInTheDocument();
+  // The device waiting is also reviewed from Devices, first in the list.
   await openPane(user, "Devices");
-  expect(within(screen.getByRole("region", { name: "Approvals" })).getByText("New Mac")).toBeInTheDocument();
+  const rows = within(screen.getByRole("region", { name: "Devices" })).getAllByRole("listitem");
+  expect(rows[0]).toHaveTextContent("New Mac");
+  expect(within(rows[0]).getByText("Waiting")).toBeInTheDocument();
+  await user.click(within(rows[0]).getByRole("button", { name: "Review" }));
+  expect(screen.getByRole("dialog", { name: "Approve “New Mac”?" })).toBeInTheDocument();
 });
 
-test("nothing to count: no badges, and Overview says nothing needs attention", async () => {
-  render(<SyncDialog onClose={vi.fn()} />);
+test("nothing to count: no badges, and Overview is calm", async () => {
+  renderSync();
   await screen.findByRole("tab", { name: "Overview" });
   for (const tab of screen.getAllByRole("tab")) expect(tab.querySelector(".badge")).toBeNull();
-  expect(screen.getByRole("region", { name: "Attention" })).toHaveTextContent(/Nothing/);
+  expect(screen.getByRole("region", { name: "Attention" })).toHaveTextContent(/All clear/);
+  expect(screen.getByRole("region", { name: "Sync status" })).toHaveTextContent(/Up to date/);
   // A Mac that is not the main Mac has nothing to approve: its waiting devices are not counted.
   cleanup();
   const s = syncScreen();
   s.status!.mainDevice = false;
   s.status!.devices.push({ id: "d2", name: "New Mac", approved: false, main: false, thisDevice: false, removed: false });
   vi.mocked(api.syncScreen).mockResolvedValue(s);
-  render(<SyncDialog onClose={vi.fn()} />);
+  renderSync();
   expect(await screen.findByRole("tab", { name: "Devices" })).toBeInTheDocument();
   expect(screen.queryByRole("region", { name: "Approvals" })).not.toBeInTheDocument();
+  expect(screen.queryByRole("button", { name: "Review" })).not.toBeInTheDocument();
 });
 
 test("the long folder path is shortened in the middle, kept whole in its title, and copied", async () => {
   const user = userEvent.setup();
-  render(<SyncDialog onClose={vi.fn()} />);
+  renderSync();
   const location = syncScreen().location!;
   const path = await screen.findByTitle(location);
   // Read out in full once; drawn as a cut start and a kept end.
@@ -425,9 +449,9 @@ test("the long folder path is shortened in the middle, kept whole in its title, 
 test("with sync off, the folder and the actions sit side by side", async () => {
   const user = userEvent.setup();
   vi.mocked(api.syncScreen).mockResolvedValue(off);
-  render(<SyncDialog onClose={vi.fn()} />);
+  renderSync();
   expect(await screen.findByRole("region", { name: "Where" })).toBeInTheDocument();
-  expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
+  expect(screen.queryByRole("tablist", { name: "Sync sections" })).not.toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "Join a synced account" }));
   expect(screen.getByRole("form", { name: "Join a synced account" })).toBeInTheDocument();
   expect(screen.getAllByRole("region", { name: "Where" })).toHaveLength(1);
@@ -435,16 +459,82 @@ test("with sync off, the folder and the actions sit side by side", async () => {
   expect(screen.getByRole("button", { name: "Turn on sync" })).toBeInTheDocument();
 });
 
-test("an approved Mac is marked Approved, the main Mac is not", async () => {
+test("devices: icon rows with their roles; removed ones are muted and folded away at the bottom", async () => {
   const user = userEvent.setup();
   const s = syncScreen();
-  s.status!.devices.push({ id: "d3", name: "Studio", approved: true, main: false, thisDevice: false, removed: false });
+  s.status!.devices.push(
+    { id: "d3", name: "Studio", approved: true, main: false, thisDevice: false, removed: false },
+    { id: "d4", name: "Old iMac", approved: true, main: false, thisDevice: false, removed: true },
+  );
   vi.mocked(api.syncScreen).mockResolvedValue(s);
-  render(<SyncDialog onClose={vi.fn()} />);
+  renderSync();
   await openPane(user, "Devices");
-  const rows = screen.getByRole("region", { name: "Devices" }).querySelectorAll("li");
-  const studio = [...rows].find((r) => r.textContent?.startsWith("Studio"))!;
-  expect(within(studio as HTMLElement).getByText("Approved")).toBeInTheDocument();
-  const main = [...rows].find((r) => within(r as HTMLElement).queryByText("This Mac"))!;
-  expect(within(main as HTMLElement).queryByText("Approved")).toBeNull();
+  const devices = screen.getByRole("region", { name: "Devices" });
+  const rows = [...devices.querySelectorAll("li")];
+  const studio = rows.find((r) => r.textContent?.startsWith("Studio"))!;
+  expect(within(studio).getByText("Approved")).toBeInTheDocument();
+  expect(within(studio).getByRole("button", { name: "Remove" })).toBeInTheDocument();
+  const main = rows.find((r) => within(r).queryByText("This Mac"))!;
+  expect(within(main).getByText("Main Mac", { selector: ".tag" })).toBeInTheDocument();
+  expect(within(main).queryByText("Approved")).toBeNull();
+  expect(within(main).queryByRole("button")).toBeNull();
+  // Removed: in a closed group after the others, with no action.
+  const removed = devices.querySelector("details")!;
+  expect(removed).not.toHaveAttribute("open");
+  expect(within(removed).getByText("Removed (1)")).toBeInTheDocument();
+  const old = within(removed).getByText("Old iMac").closest("li")!;
+  expect(old).toHaveClass("muted-row");
+  expect(within(old).queryByRole("button", { hidden: true })).toBeNull();
+});
+
+test("the log: newest first, with repeated lines folded into one with a count", async () => {
+  const user = userEvent.setup();
+  vi.mocked(api.syncScreen).mockResolvedValue(
+    syncScreen({
+      log: [
+        { at: 1_790_000_000, text: "Re-read 1 change this Mac made earlier" },
+        { at: 1_790_000_010, text: "Re-read 1 change this Mac made earlier" },
+        { at: 1_790_000_020, text: "Re-read 1 change this Mac made earlier" },
+        { at: 1_790_000_030, text: "Sent 2 changes" },
+      ],
+    }),
+  );
+  renderSync();
+  await openPane(user, "Advanced");
+  const log = screen.getByRole("table", { name: "Sync log" });
+  const rows = within(log).getAllByRole("row").slice(1);
+  expect(rows).toHaveLength(2);
+  expect(rows[0]).toHaveTextContent("Sent 2 changes");
+  expect(rows[1]).toHaveTextContent("Re-read 1 change this Mac made earlier");
+  expect(within(rows[1]).getByLabelText("3 times")).toHaveTextContent("×3");
+  const danger = screen.getByRole("region", { name: "Danger zone" });
+  expect(within(danger).getByRole("button", { name: "Turn off sync" })).toBeInTheDocument();
+  expect(within(danger).getByRole("button", { name: "Start a new account" })).toBeInTheDocument();
+});
+
+test("groupLog folds only lines repeated one after another", () => {
+  const groups = groupLog([
+    { at: 1, text: "a" },
+    { at: 2, text: "a" },
+    { at: 3, text: "b" },
+    { at: 4, text: "a" },
+  ]);
+  expect(groups).toEqual([
+    { text: "a", at: 4, firstAt: 4, count: 1 },
+    { text: "b", at: 3, firstAt: 3, count: 1 },
+    { text: "a", at: 2, firstAt: 1, count: 2 },
+  ]);
+});
+
+test("Safety: each tool shows its result inside its own card", async () => {
+  const user = userEvent.setup();
+  vi.mocked(api.verifySync).mockResolvedValue({
+    items: 1, damaged: 0, attachments: 0, damagedAttachments: 1, differing: [], missing: 0,
+  });
+  renderSync();
+  await openPane(user, "Safety");
+  await user.click(screen.getByRole("button", { name: "Verify" }));
+  const result = await screen.findByRole("status", { name: "Verify" });
+  expect(result).toHaveTextContent("1 item and 0 attachments checked. 1 unreadable attachment");
+  expect(result.closest(".tool")).toHaveTextContent("Verify everything");
 });

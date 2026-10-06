@@ -49,7 +49,7 @@ export function JoinSync({
       <SyncPlaceChooser onPlace={setPlace} />
       <form className="join-sync" onSubmit={submit} aria-label="Join a synced account">
         <p className="muted">
-          On a Mac where Keyorra already syncs, open Settings → Sync → Emergency Kit and copy the setup code. Paste it
+          On a Mac where Keyorra already syncs, open Settings → Sync → Safety → Emergency Kit and copy the setup code. Paste it
           here with your master password.
         </p>
         <label>

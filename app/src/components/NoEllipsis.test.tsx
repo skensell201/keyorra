@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, expect, test, vi } from "vitest";
 import { api } from "../api";
@@ -7,7 +7,6 @@ import { ImportDialog } from "./ImportDialog";
 import { Main } from "./Main";
 import { SettingsDialog } from "./SettingsDialog";
 import { Setup } from "./Setup";
-import { SyncDialog } from "./SyncDialog";
 import { Unlock } from "./Unlock";
 
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
@@ -57,22 +56,23 @@ test("the main window", async () => {
   expectNoEllipsis();
 });
 
-test("Settings", async () => {
-  render(<SettingsDialog onClose={vi.fn()} onOpenSync={vi.fn()} />);
-  await screen.findByLabelText("Lock after");
-  expectNoEllipsis();
-});
-
-test("Sync, on and off, in every category", async () => {
+test("Settings, every category and every Sync section, with sync on and off", async () => {
   const user = userEvent.setup();
-  const { unmount } = render(<SyncDialog onClose={vi.fn()} />);
+  const { unmount } = render(<SettingsDialog onClose={vi.fn()} />);
+  await screen.findByLabelText("Lock after");
+  for (const category of ["General", "Security", "Browsers", "Sync"]) {
+    const nav = screen.getByRole("tablist", { name: "Settings sections" });
+    await user.click(within(nav).getByRole("tab", { name: new RegExp(`^${category}`) }));
+    expectNoEllipsis();
+  }
   for (const name of ["Overview", "Devices", "Safety", "Advanced"]) {
-    await user.click(await screen.findByRole("tab", { name: new RegExp(`^${name}`) }));
+    const sections = await screen.findByRole("tablist", { name: "Sync sections" });
+    await user.click(within(sections).getByRole("tab", { name: new RegExp(`^${name}`) }));
     expectNoEllipsis();
   }
   unmount();
   vi.mocked(api.syncScreen).mockResolvedValue(syncScreen({ enabled: false, status: null }));
-  render(<SyncDialog onClose={vi.fn()} />);
+  render(<SettingsDialog onClose={vi.fn()} initial={{ category: "sync" }} />);
   await user.click(await screen.findByRole("button", { name: "Join a synced account" }));
   expectNoEllipsis();
 });

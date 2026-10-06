@@ -67,7 +67,7 @@ turn Touch ID on again with your master password.
 
 ## Browser extension setup
 
-1. In Keyorra: Settings… → Browsers → **Connect browsers**. This installs the native-messaging
+1. In Keyorra: Settings → Browsers → **Connect browsers**. This installs the native-messaging
    host for every browser it finds; run it again if you move the app.
 2. Install the extension:
    - **Chrome / Chromium browsers** (until the store listing is live): unzip

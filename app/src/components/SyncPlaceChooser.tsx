@@ -40,8 +40,8 @@ export function SyncPlaceChooser({ onPlace }: { onPlace?: (place: SyncPlace | nu
   }
 
   return (
-    <section className="modal-section" aria-label="Where">
-      <h3>Where</h3>
+    <section className="panel" aria-label="Where">
+      <h3>Where the account lives</h3>
       {place ? (
         <>
           <PathText path={place.path} label="folder path" />
