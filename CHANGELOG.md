@@ -4,6 +4,17 @@ All notable changes to Keyorra are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.1] - 2026-10-06
+
+### Changed
+- **Settings is one wide window** with categories: General, Security, Sync and Browsers. Sync
+  lives inside it (Overview, Devices, Safety, Advanced) instead of a separate window.
+- Settings save as you change them; no "Save settings" button.
+- Sync screens reorganised into cards: status and attention on Overview, device rows with
+  roles, safety tools with their results, a compact grouped log and a Danger zone.
+- No trailing "…" on buttons and menu items; busy buttons show a spinner.
+- Counts read correctly ("1 change", "3 changes").
+
 ## [0.2.0] - 2026-10-06
 
 ### Added

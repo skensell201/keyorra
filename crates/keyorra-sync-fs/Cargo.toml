@@ -1,6 +1,6 @@
 [package]
 name = "keyorra-sync-fs"
-version = "0.2.0"
+version = "0.2.1"
 edition = "2021"
 license = "GPL-3.0-or-later"
 description = "Keyorra sync over a folder (iCloud Drive or any synced folder)"

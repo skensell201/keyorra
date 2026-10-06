@@ -10,7 +10,7 @@ const icons = { 16: "icons/16.png", 32: "icons/32.png", 48: "icons/48.png", 128:
 const base = {
   manifest_version: 3,
   name: "Keyorra",
-  version: "0.2.0",
+  version: "0.2.1",
   description: "Fill passwords and one-time codes from the Keyorra app on your Mac.",
   icons,
   permissions: ["nativeMessaging", "storage", "activeTab"],
