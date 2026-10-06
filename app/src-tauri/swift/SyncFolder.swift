@@ -142,11 +142,17 @@ public func ks_computer_name(_ out: UnsafeMutablePointer<UInt8>, _ cap: Int) -> 
 /// managers skip it (nspasteboard.org markers).
 @_cdecl("ks_pasteboard_set_concealed")
 public func ks_pasteboard_set_concealed(_ text: UnsafePointer<CChar>) -> Int32 {
-    let pasteboard = NSPasteboard.general
-    pasteboard.clearContents()
-    let item = NSPasteboardItem()
-    item.setString(String(cString: text), forType: .string)
-    item.setString("", forType: NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"))
-    item.setString("", forType: NSPasteboard.PasteboardType("org.nspasteboard.TransientType"))
-    return pasteboard.writeObjects([item]) ? SF_READY : SF_FAILED
+    let string = String(cString: text)
+    // AppKit's pasteboard belongs to the main thread; commands run on others.
+    let write = { () -> Bool in
+        let pasteboard = NSPasteboard.general
+        pasteboard.clearContents()
+        let item = NSPasteboardItem()
+        item.setString(string, forType: .string)
+        item.setString("", forType: NSPasteboard.PasteboardType("org.nspasteboard.ConcealedType"))
+        item.setString("", forType: NSPasteboard.PasteboardType("org.nspasteboard.TransientType"))
+        return pasteboard.writeObjects([item])
+    }
+    let ok = Thread.isMainThread ? write() : DispatchQueue.main.sync(execute: write)
+    return ok ? SF_READY : SF_FAILED
 }

@@ -215,22 +215,56 @@ pub fn describe_place(path: &Path) -> PlaceInfo {
 /// Where accounts live (`<chosen folder>/Keyorra`): iCloud Drive unless the user chose
 /// another folder, which is kept in `sync-place` next to the vault.
 pub struct SyncPlace {
+    app_data: PathBuf,
     file: PathBuf,
     temp: PathBuf,
+    icloud: Box<dyn Fn() -> Option<PathBuf> + Send + Sync>,
     current: std::sync::Mutex<Option<PathBuf>>,
+}
+
+/// The folder accounts go in for a chosen folder: the folder itself when it is already
+/// named `Keyorra`, otherwise `Keyorra` inside it.
+fn place_in(dir: &Path) -> PathBuf {
+    if dir.file_name().is_some_and(|n| n == "Keyorra") {
+        dir.to_path_buf()
+    } else {
+        dir.join("Keyorra")
+    }
+}
+
+/// `path` with links resolved as far as it exists (the rest appended as is).
+fn resolved(path: &Path) -> PathBuf {
+    if let Ok(p) = path.canonicalize() {
+        return p;
+    }
+    match (path.parent(), path.file_name()) {
+        (Some(parent), Some(name)) => resolved(parent).join(name),
+        _ => path.to_path_buf(),
+    }
 }
 
 impl SyncPlace {
     pub fn load(app_data: &Path) -> SyncPlace {
+        Self::with_icloud(app_data, icloud_place)
+    }
+
+    /// As [`SyncPlace::load`], with iCloud Drive found by `icloud` (tests).
+    pub fn with_icloud(
+        app_data: &Path,
+        icloud: impl Fn() -> Option<PathBuf> + Send + Sync + 'static,
+    ) -> SyncPlace {
         let file = app_data.join("sync-place");
         let chosen = std::fs::read_to_string(&file)
             .ok()
             .map(|t| PathBuf::from(t.trim()))
             .filter(|p| p.is_absolute());
+        let current = chosen.or_else(&icloud);
         SyncPlace {
+            app_data: app_data.to_path_buf(),
             file,
             temp: app_data.join("sync-tmp"),
-            current: std::sync::Mutex::new(chosen.or_else(icloud_place)),
+            icloud: Box::new(icloud),
+            current: std::sync::Mutex::new(current),
         }
     }
 
@@ -238,26 +272,80 @@ impl SyncPlace {
         self.current.lock().unwrap().clone()
     }
 
-    /// Chooses the folder accounts go in (`None`: iCloud Drive). The folder must exist.
+    /// Chooses the folder accounts go in (`None`: iCloud Drive). The folder must exist, be
+    /// given by an absolute path without `..`, and lie outside Keyorra's own folders (the
+    /// app's data, the current place, an account folder); it is kept as its real path.
     pub fn set(&self, chosen: Option<&Path>) -> Result<PathBuf, String> {
         let place = match chosen {
             None => {
-                let _ = std::fs::remove_file(&self.file);
-                icloud_place().ok_or("iCloud Drive is not set up on this Mac")?
+                let place = (self.icloud)().ok_or("iCloud Drive is not set up on this Mac")?;
+                match std::fs::remove_file(&self.file) {
+                    Ok(()) => {}
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                    Err(e) => return Err(e.to_string()),
+                }
+                place
             }
             Some(dir) => {
-                let meta = std::fs::symlink_metadata(dir).map_err(|e| e.to_string())?;
-                if !meta.is_dir() {
-                    return Err(format!("{} is not a folder", dir.display()));
-                }
-                let place = dir.join("Keyorra");
-                std::fs::write(&self.file, place.to_string_lossy().as_bytes())
-                    .map_err(|e| e.to_string())?;
+                let place = self.check_chosen(dir)?;
+                self.write_file(&place)?;
                 place
             }
         };
         *self.current.lock().unwrap() = Some(place.clone());
         Ok(place)
+    }
+
+    fn check_chosen(&self, dir: &Path) -> Result<PathBuf, String> {
+        use std::path::Component;
+        if !dir.is_absolute()
+            || dir
+                .components()
+                .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+        {
+            return Err(format!("{} is not a full folder path", dir.display()));
+        }
+        let real = dir
+            .canonicalize()
+            .map_err(|e| format!("{}: {e}", dir.display()))?;
+        if !real.is_dir() {
+            return Err(format!("{} is not a folder", dir.display()));
+        }
+        if real.starts_with(resolved(&self.app_data)) {
+            return Err("Choose a folder outside Keyorra's own data folder".into());
+        }
+        if real
+            .components()
+            .any(|c| c.as_os_str().to_str().is_some_and(is_account_folder))
+        {
+            return Err("This is a folder of a sync account; choose the folder above it".into());
+        }
+        let place = place_in(&real);
+        if let Some(current) = self.current() {
+            let current = resolved(&current);
+            if real.starts_with(&current) && place != current {
+                return Err(
+                    "This folder is inside the current sync folder; choose another one".into(),
+                );
+            }
+        }
+        Ok(place)
+    }
+
+    /// Keeps the chosen place: written next to the file and renamed over it.
+    fn write_file(&self, place: &Path) -> Result<(), String> {
+        let tmp = self.file.with_extension("tmp");
+        let written = (|| {
+            use std::io::Write;
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(place.to_string_lossy().as_bytes())?;
+            f.sync_all()?;
+            std::fs::rename(&tmp, &self.file)
+        })();
+        if written.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        written.map_err(|e| e.to_string())
     }
 
     /// The session's link to the current place.
@@ -359,6 +447,10 @@ impl SyncLink for FolderLink {
         }
         std::fs::create_dir_all(&folder).map_err(|e| e.to_string())?;
         self.open(&folder)
+    }
+
+    fn location(&self, account: &AccountId) -> Option<String> {
+        Some(self.folder(account).display().to_string())
     }
 
     fn join_candidates(&self) -> Result<Vec<(String, BoxedTransport)>, String> {
@@ -519,6 +611,18 @@ mod tests {
         assert_eq!(link.join_candidates().unwrap().len(), 1);
     }
 
+    /// Review A3 I5: the Sync screen and the Emergency Kit say where the account lives.
+    #[test]
+    fn review_a3_the_link_tells_the_account_folder() {
+        let base = tempfile::tempdir().unwrap();
+        let place = base.path().join("Keyorra");
+        let link = link(&place, &base.path().join("tmp"));
+        assert_eq!(
+            link.location(&[1u8; 16]),
+            Some(place.join("01".repeat(16)).display().to_string())
+        );
+    }
+
     #[test]
     fn coordinated_access_runs_the_body_and_returns_its_result() {
         let dir = tempfile::tempdir().unwrap();
@@ -565,12 +669,111 @@ mod tests {
     fn the_chosen_place_is_kept() {
         let data = tempfile::tempdir().unwrap();
         let chosen = tempfile::tempdir().unwrap();
-        let places = SyncPlace::load(data.path());
+        let places = SyncPlace::with_icloud(data.path(), || None);
         let place = places.set(Some(chosen.path())).unwrap();
-        assert_eq!(place, chosen.path().join("Keyorra"));
+        let real = chosen.path().canonicalize().unwrap();
+        assert_eq!(place, real.join("Keyorra"));
         assert!(places.set(Some(&chosen.path().join("missing"))).is_err());
-        let again = SyncPlace::load(data.path());
-        assert_eq!(again.current(), Some(chosen.path().join("Keyorra")));
+        let again = SyncPlace::with_icloud(data.path(), || None);
+        assert_eq!(again.current(), Some(real.join("Keyorra")));
+    }
+
+    /// Review A3 I3: only a real folder, named plainly, outside Keyorra's own folders.
+    #[test]
+    fn review_a3_the_chosen_folder_is_checked_and_stored_canonical() {
+        let data = tempfile::tempdir().unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let places = SyncPlace::with_icloud(data.path(), || None);
+        let real = base.path().canonicalize().unwrap();
+        std::fs::create_dir_all(real.join("a/b")).unwrap();
+
+        assert!(places.set(Some(Path::new("relative/folder"))).is_err());
+        assert!(
+            places.set(Some(&real.join("a/b/..").join("b"))).is_err(),
+            "no .. in the path"
+        );
+        assert!(
+            places.set(Some(data.path())).is_err(),
+            "not the app's own folder"
+        );
+        std::fs::create_dir_all(data.path().join("inside")).unwrap();
+        assert!(places.set(Some(&data.path().join("inside"))).is_err());
+
+        // A link to a folder is stored as the folder it points to.
+        std::os::unix::fs::symlink(real.join("a"), real.join("link")).unwrap();
+        let place = places.set(Some(&real.join("link"))).unwrap();
+        assert_eq!(place, real.join("a/Keyorra"));
+        assert_eq!(
+            std::fs::read_to_string(data.path().join("sync-place")).unwrap(),
+            real.join("a/Keyorra").to_string_lossy()
+        );
+        assert!(
+            !data.path().join("sync-place.tmp").exists(),
+            "written through a temporary file"
+        );
+    }
+
+    #[test]
+    fn review_a3_a_folder_named_keyorra_is_used_as_is() {
+        let data = tempfile::tempdir().unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let real = base.path().canonicalize().unwrap();
+        std::fs::create_dir_all(real.join("Keyorra")).unwrap();
+        let places = SyncPlace::with_icloud(data.path(), || None);
+        assert_eq!(
+            places.set(Some(&real.join("Keyorra"))).unwrap(),
+            real.join("Keyorra"),
+            "not Keyorra/Keyorra"
+        );
+        // Choosing the current place again is fine.
+        assert_eq!(
+            places.set(Some(&real.join("Keyorra"))).unwrap(),
+            real.join("Keyorra")
+        );
+    }
+
+    #[test]
+    fn review_a3_not_inside_the_current_place_or_an_account_folder() {
+        let data = tempfile::tempdir().unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let real = base.path().canonicalize().unwrap();
+        let places = SyncPlace::with_icloud(data.path(), || None);
+        places.set(Some(&real)).unwrap();
+        std::fs::create_dir_all(real.join("Keyorra/sub")).unwrap();
+        assert!(
+            places.set(Some(&real.join("Keyorra/sub"))).is_err(),
+            "inside the current place"
+        );
+        let elsewhere = tempfile::tempdir().unwrap();
+        let account = elsewhere
+            .path()
+            .canonicalize()
+            .unwrap()
+            .join("ab".repeat(16));
+        std::fs::create_dir_all(account.join("streams")).unwrap();
+        assert!(places.set(Some(&account)).is_err());
+        assert!(places.set(Some(&account.join("streams"))).is_err());
+        assert_eq!(places.current(), Some(real.join("Keyorra")), "unchanged");
+    }
+
+    /// Review A3 I3: going back to iCloud Drive keeps the chosen folder when iCloud Drive is
+    /// not there.
+    #[test]
+    fn review_a3_back_to_icloud_only_when_it_is_there() {
+        let data = tempfile::tempdir().unwrap();
+        let base = tempfile::tempdir().unwrap();
+        let real = base.path().canonicalize().unwrap();
+        let places = SyncPlace::with_icloud(data.path(), || None);
+        places.set(Some(&real)).unwrap();
+        assert!(places.set(None).is_err());
+        assert!(data.path().join("sync-place").exists(), "kept");
+        assert_eq!(places.current(), Some(real.join("Keyorra")));
+
+        let fake_icloud = real.join("iCloud/Keyorra");
+        let icloud = fake_icloud.clone();
+        let places = SyncPlace::with_icloud(data.path(), move || Some(icloud.clone()));
+        assert_eq!(places.set(None).unwrap(), fake_icloud);
+        assert!(!data.path().join("sync-place").exists());
     }
 
     #[test]

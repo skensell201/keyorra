@@ -447,12 +447,8 @@ pub fn set_sync_place(
     path: Option<String>,
 ) -> CmdResult<PlaceInfo> {
     let mut session = lock_session(&state);
-    if session.sync_status().is_ok_and(|s| s.enabled) {
-        return Err(CmdError::new(
-            ErrorKind::Invalid,
-            "Turn sync off before choosing another folder",
-        ));
-    }
+    // Locked, whether sync is on is not known: refused (review A3 I2).
+    session.may_change_sync_place()?;
     let place = places
         .set(path.as_deref().map(std::path::Path::new))
         .map_err(|e| CmdError::new(ErrorKind::Invalid, e))?;
@@ -462,12 +458,17 @@ pub fn set_sync_place(
     Ok(describe_place(&place))
 }
 
-/// A secret (the setup code) on the clipboard, concealed from clipboard managers and
-/// cleared after 90 seconds at most.
+/// The setup code on the clipboard, concealed from clipboard managers and cleared after 90
+/// seconds at most. It is read here, under the same rule as the Emergency Kit (unlocked, the
+/// master password entered in the last few minutes or given now), so it never reaches the
+/// web view.
 #[tauri::command(async)]
-pub fn copy_secret(state: State<'_, AppState>, text: String) -> CmdResult<()> {
+pub fn copy_setup_code(state: State<'_, AppState>, password: Option<String>) -> CmdResult<()> {
     let mut session = lock_session(&state);
-    crate::syncfolder::copy_concealed(&text).map_err(|e| CmdError::new(ErrorKind::Other, e))?;
-    session.copied_secret(&text, now());
+    let t = now();
+    let kit = session.emergency_kit(password.as_deref(), t)?;
+    let code = zeroize::Zeroizing::new(kit.setup_code);
+    crate::syncfolder::copy_concealed(&code).map_err(|e| CmdError::new(ErrorKind::Other, e))?;
+    session.copied_secret(&code, t);
     Ok(())
 }
