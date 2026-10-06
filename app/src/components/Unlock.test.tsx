@@ -115,9 +115,12 @@ test("Touch ID unlocks right away when the window is in front", async () => {
 test("Touch ID waits until the window comes to the front", async () => {
   vi.spyOn(document, "hasFocus").mockReturnValue(false);
   vi.mocked(api.touchIdState).mockResolvedValue(touchOn);
+  const listening = vi.spyOn(window, "addEventListener");
   render(<Unlock onUnlocked={vi.fn()} onStartOver={vi.fn()} />);
   expect(await screen.findByRole("button", { name: "Unlock with Touch ID" })).toBeInTheDocument();
   expect(api.unlockWithTouchId).not.toHaveBeenCalled();
+  // The focus listener is added after Touch ID's state arrives: dispatch only once it is there.
+  await waitFor(() => expect(listening).toHaveBeenCalledWith("focus", expect.any(Function)));
   act(() => {
     window.dispatchEvent(new Event("focus"));
   });

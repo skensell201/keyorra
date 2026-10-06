@@ -6,12 +6,21 @@ import { Setup } from "./Setup";
 
 vi.mock("../api", async (importOriginal) => {
   const actual = await importOriginal<typeof import("../api")>();
-  return { ...actual, api: { ...actual.api, create: vi.fn(), joinSync: vi.fn() } };
+  return {
+    ...actual,
+    api: { ...actual.api, create: vi.fn(), joinSync: vi.fn(), syncPlace: vi.fn(), setSyncPlace: vi.fn() },
+  };
 });
+vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 
 beforeEach(() => {
   vi.mocked(api.create).mockReset();
   vi.mocked(api.joinSync).mockReset();
+  vi.mocked(api.syncPlace).mockReset().mockResolvedValue({
+    path: "/Users/a/Library/Mobile Documents/com~apple~CloudDocs/Keyorra",
+    kind: "icloud",
+    warning: null,
+  });
 });
 
 test("creates the vault once both passwords match and are long enough", async () => {
@@ -58,6 +67,9 @@ test("a new Mac can join a synced account instead", async () => {
   });
   render(<Setup onDone={onDone} />);
   await user.click(screen.getByRole("button", { name: /Join your synced account/ }));
+  // Review A3: where to look for the account is shown (and can be changed) on first run too.
+  expect(await screen.findByRole("button", { name: "Choose another folder…" })).toBeInTheDocument();
+  expect(await screen.findByText(/CloudDocs\/Keyorra/)).toBeInTheDocument();
   await user.type(screen.getByLabelText("Master password"), "correct horse battery");
   await user.type(screen.getByLabelText("Setup code or Secret Key"), "KEYORRA-SETUP-1-XYZ");
   await user.click(screen.getByRole("button", { name: "Join" }));

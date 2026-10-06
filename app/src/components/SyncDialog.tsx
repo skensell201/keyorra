@@ -1,5 +1,4 @@
-import { open } from "@tauri-apps/plugin-dialog";
-import { useCallback, useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
 import {
   api,
   errorMessage,
@@ -9,6 +8,7 @@ import {
   type EmergencyKit as Kit,
   type FolderFile,
   type JoinOutcome,
+  type SyncAlarm,
   type SyncDevice,
   type SyncPlace,
   type SyncScreen,
@@ -19,12 +19,44 @@ import { ConfirmDialog } from "./ConfirmDialog";
 import { EmergencyKit } from "./EmergencyKit";
 import { IconClose } from "./icons";
 import { JoinResult, JoinSync } from "./JoinSync";
+import { SyncPlaceChooser } from "./SyncPlaceChooser";
 
 export const ACTION_LABEL: Record<AlarmAction, string> = {
   accept: "Accept",
   restore: "Restore from this Mac",
   remove: "Remove device",
   leave: "Continue as a new device",
+};
+
+/** What an alarm action does, asked before it is done (all but "accept" change the account). */
+const ACTION_CONFIRM: Record<Exclude<AlarmAction, "accept">, { title: string; body: ReactNode }> = {
+  restore: {
+    title: "Restore the missing changes from this Mac?",
+    body: (
+      <>
+        This Mac writes the changes that went missing back into the sync folder from its own copy. Do it only if
+        nobody meant to roll the folder back.
+      </>
+    ),
+  },
+  remove: {
+    title: "Remove this device?",
+    body: (
+      <>
+        It can no longer read what is written from now on, and its paused changes are not taken. What it already has
+        stays on it. If you do not recognise it, change your master password too.
+      </>
+    ),
+  },
+  leave: {
+    title: "Continue as a new device?",
+    body: (
+      <>
+        This Mac stops writing under its current identity and asks to join again as a new device. Your main Mac has to
+        approve it again, comparing the code shown here.
+      </>
+    ),
+  },
 };
 
 export function formatTime(secs: number) {
@@ -43,6 +75,15 @@ export function SyncDialog({ onClose, onChanged }: { onClose: () => void; onChan
   const [error, setError] = useState<string | null>(null);
   const [kit, setKit] = useState<Kit | null>(null);
   const [joined, setJoined] = useState<JoinOutcome | null>(null);
+  const dialog = useRef<HTMLDivElement>(null);
+  // Escape closes Sync only when nothing is under way (review A3 I7): not while the kit is
+  // shown, a dialog inside is open, or a command runs.
+  const busy = useRef(false);
+  const kitShown = useRef(false);
+  kitShown.current = kit !== null;
+  const onBusy = useCallback((b: boolean) => {
+    busy.current = b;
+  }, []);
 
   const load = useCallback(
     () =>
@@ -63,7 +104,11 @@ export function SyncDialog({ onClose, onChanged }: { onClose: () => void; onChan
     };
   }, [load]);
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key !== "Escape" || busy.current || kitShown.current) return;
+      if (dialog.current?.querySelector('[aria-modal="true"]')) return;
+      onClose();
+    };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
   }, [onClose]);
@@ -75,7 +120,7 @@ export function SyncDialog({ onClose, onChanged }: { onClose: () => void; onChan
 
   return (
     <div className="modal-backdrop">
-      <div className="card modal sync" role="dialog" aria-modal="true" aria-labelledby="sync-title">
+      <div className="card modal sync" role="dialog" aria-modal="true" aria-labelledby="sync-title" ref={dialog}>
         <header className="modal-header">
           <h2 id="sync-title">Sync</h2>
           <button className="icon" aria-label="Close" onClick={onClose}>
@@ -90,7 +135,6 @@ export function SyncDialog({ onClose, onChanged }: { onClose: () => void; onChan
         {kit ? (
           <EmergencyKit
             kit={kit}
-            location={screen?.location ?? null}
             onDone={() => {
               setKit(null);
               changed();
@@ -107,40 +151,32 @@ export function SyncDialog({ onClose, onChanged }: { onClose: () => void; onChan
         ) : screen === null ? (
           <p className="muted">Loading…</p>
         ) : screen.enabled ? (
-          <SyncOn screen={screen} onKit={setKit} onChanged={changed} />
+          <SyncOn screen={screen} onKit={setKit} onChanged={changed} onBusy={onBusy} />
         ) : (
-          <SyncOff onKit={setKit} onJoined={setJoined} />
+          <SyncOff onKit={setKit} onJoined={setJoined} onBusy={onBusy} />
         )}
       </div>
     </div>
   );
 }
 
-function SyncOff({ onKit, onJoined }: { onKit: (kit: Kit) => void; onJoined: (o: JoinOutcome) => void }) {
+function SyncOff({
+  onKit,
+  onJoined,
+  onBusy,
+}: {
+  onKit: (kit: Kit) => void;
+  onJoined: (o: JoinOutcome) => void;
+  onBusy: (busy: boolean) => void;
+}) {
   const [place, setPlace] = useState<SyncPlace | null>(null);
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [joining, setJoining] = useState(false);
-  useEffect(() => {
-    api
-      .syncPlace()
-      .then(setPlace)
-      .catch(() => setPlace(null));
-  }, []);
+  useEffect(() => onBusy(busy), [busy, onBusy]);
+  useEffect(() => () => onBusy(false), [onBusy]);
 
-  async function choose(path: string | null) {
-    setError(null);
-    try {
-      setPlace(await api.setSyncPlace(path));
-    } catch (e) {
-      setError(errorMessage(e));
-    }
-  }
-  async function chooseFolder() {
-    const picked = await open({ directory: true, multiple: false, title: "Where Keyorra keeps synced accounts" });
-    if (typeof picked === "string") await choose(picked);
-  }
   async function enable(e: FormEvent) {
     e.preventDefault();
     if (!password || busy) return;
@@ -159,33 +195,13 @@ function SyncOff({ onKit, onJoined }: { onKit: (kit: Kit) => void; onJoined: (o:
     return (
       <section className="modal-section">
         <h3>Join a synced account</h3>
-        <JoinSync onJoined={onJoined} onCancel={() => setJoining(false)} />
+        <JoinSync onJoined={onJoined} onCancel={() => setJoining(false)} onBusy={onBusy} />
       </section>
     );
   }
   return (
     <>
-      <section className="modal-section">
-        <h3>Where</h3>
-        {place ? (
-          <>
-            <p className="mono">{place.path}</p>
-            {place.warning && <p className="muted">{place.warning}</p>}
-          </>
-        ) : (
-          <p className="muted">iCloud Drive isn't set up on this Mac. Choose a folder that a sync app keeps in step.</p>
-        )}
-        <div className="modal-actions">
-          {place && place.kind !== "icloud" && (
-            <button className="secondary" onClick={() => choose(null)}>
-              Use iCloud Drive
-            </button>
-          )}
-          <button className="secondary" onClick={chooseFolder}>
-            Choose another folder…
-          </button>
-        </div>
-      </section>
+      <SyncPlaceChooser onPlace={setPlace} />
       <form className="modal-section" onSubmit={enable}>
         <h3>Turn on sync</h3>
         <p className="muted">
@@ -222,10 +238,12 @@ function SyncOn({
   screen,
   onKit,
   onChanged,
+  onBusy,
 }: {
   screen: SyncScreen;
   onKit: (kit: Kit) => void;
   onChanged: () => void;
+  onBusy: (busy: boolean) => void;
 }) {
   const status = screen.status;
   const [error, setError] = useState<string | null>(null);
@@ -239,6 +257,11 @@ function SyncOn({
   const [report, setReport] = useState<VerifyReport | null>(null);
   const [backups, setBackups] = useState<BackupFile[]>([]);
   const [deleting, setDeleting] = useState<BackupFile | null>(null);
+  const [confirming, setConfirming] = useState<{ alarm: SyncAlarm; action: Exclude<AlarmAction, "accept"> } | null>(
+    null,
+  );
+  useEffect(() => onBusy(busy), [busy, onBusy]);
+  useEffect(() => () => onBusy(false), [onBusy]);
 
   const loadBackups = useCallback(
     () =>
@@ -266,12 +289,19 @@ function SyncOn({
   }
   async function openKit(password: string | null) {
     setError(null);
+    setBusy(true);
     try {
       onKit(await api.emergencyKit(password));
       setKitPassword(null);
     } catch (e) {
+      // The typed password is not kept after a failure.
       if (isCmdError(e) && e.kind === "passwordRequired") setKitPassword("");
-      else setError(isCmdError(e) && e.kind === "wrongPassword" ? "The master password is wrong" : errorMessage(e));
+      else {
+        setKitPassword((p) => (p === null ? null : ""));
+        setError(isCmdError(e) && e.kind === "wrongPassword" ? "The master password is wrong" : errorMessage(e));
+      }
+    } finally {
+      setBusy(false);
     }
   }
 
@@ -315,7 +345,7 @@ function SyncOn({
             {waiting.map((d) => (
               <li key={d.id}>
                 <span>{d.name}</span>
-                <button className="primary" onClick={() => setApproving(d)}>
+                <button className="primary" disabled={busy} onClick={() => setApproving(d)}>
                   Review
                 </button>
               </li>
@@ -338,7 +368,11 @@ function SyncOn({
                       key={action}
                       className={action === "accept" ? "secondary" : "primary"}
                       disabled={busy}
-                      onClick={() => run(() => api.syncAlarmAction(a.id, action))}
+                      onClick={() =>
+                        action === "accept"
+                          ? run(() => api.syncAlarmAction(a.id, action))
+                          : setConfirming({ alarm: a, action })
+                      }
                     >
                       {ACTION_LABEL[action]}
                     </button>
@@ -377,7 +411,7 @@ function SyncOn({
                   {d.removed && <span className="chip">Removed</span>}
                 </span>
                 {status.mainDevice && !d.thisDevice && d.approved && !d.removed && (
-                  <button className="secondary" onClick={() => setRemoving(d)}>
+                  <button className="secondary" disabled={busy} onClick={() => setRemoving(d)}>
                     Remove
                   </button>
                 )}
@@ -401,19 +435,30 @@ function SyncOn({
               Master password for the Emergency Kit
               <input type="password" autoFocus value={kitPassword} onChange={(e) => setKitPassword(e.target.value)} />
             </label>
-            <button type="submit" className="primary" disabled={!kitPassword}>
+            <button type="button" onClick={() => setKitPassword(null)}>
+              Cancel
+            </button>
+            <button type="submit" className="primary" disabled={!kitPassword || busy}>
               Show
             </button>
           </form>
         )}
         <div className="modal-actions">
-          <button className="secondary" onClick={() => openKit(null)}>
+          <button className="secondary" disabled={busy} onClick={() => openKit(null)}>
             Emergency Kit…
           </button>
-          <button className="secondary" onClick={() => run(async () => setReport(await api.verifySync()))}>
+          <button
+            className="secondary"
+            disabled={busy}
+            onClick={() => run(async () => setReport(await api.verifySync()))}
+          >
             Verify everything
           </button>
-          <button className="secondary" onClick={() => run(async () => setFiles(await api.syncFolderFiles()))}>
+          <button
+            className="secondary"
+            disabled={busy}
+            onClick={() => run(async () => setFiles(await api.syncFolderFiles()))}
+          >
             What the folder sees
           </button>
         </div>
@@ -434,6 +479,13 @@ function SyncOn({
         )}
         {files && (
           <table className="folder-files" aria-label="Folder files">
+            <thead>
+              <tr>
+                <th scope="col">Name</th>
+                <th scope="col">Size</th>
+                <th scope="col">Status</th>
+              </tr>
+            </thead>
             <tbody>
               {files.map((f) => (
                 <tr key={f.path} className={f.counted ? undefined : "unknown"}>
@@ -458,7 +510,7 @@ function SyncOn({
                   {b.kind === "migration" ? "Before an upgrade" : "Before joining an account"} ·{" "}
                   {formatTime(b.modified)} · {formatSize(b.size)}
                 </span>
-                <button className="secondary" onClick={() => setDeleting(b)}>
+                <button className="secondary" disabled={busy} onClick={() => setDeleting(b)}>
                   Delete
                 </button>
               </li>
@@ -561,6 +613,25 @@ function SyncOn({
           }}
         >
           It is an older copy of your vault, encrypted with your master password at that time.
+        </ConfirmDialog>
+      )}
+      {confirming && (
+        <ConfirmDialog
+          title={ACTION_CONFIRM[confirming.action].title}
+          confirmLabel={ACTION_LABEL[confirming.action]}
+          danger
+          focusCancel
+          onCancel={() => setConfirming(null)}
+          onConfirm={() => {
+            const { alarm, action } = confirming;
+            setConfirming(null);
+            void run(() => api.syncAlarmAction(alarm.id, action));
+          }}
+        >
+          <p>
+            <strong>{confirming.alarm.title}</strong>
+          </p>
+          <p>{ACTION_CONFIRM[confirming.action].body}</p>
         </ConfirmDialog>
       )}
       {startingOver && (

@@ -211,10 +211,12 @@ export interface SyncScreen {
   log: LogLine[];
 }
 
+/** The setup code stays in Rust: `copySetupCode` puts it on the clipboard. */
 export interface EmergencyKit {
   accountId: string;
   secretKey: string;
-  setupCode: string;
+  /** The account's folder, when known. */
+  location: string | null;
 }
 
 export interface JoinOutcome {
@@ -322,8 +324,11 @@ export const api = {
   syncPlace: () => invoke<SyncPlace | null>("sync_place"),
   /** `null`: iCloud Drive. Only while sync is off. */
   setSyncPlace: (path: string | null) => invoke<SyncPlace>("set_sync_place", { path }),
-  /** Concealed from clipboard managers, cleared after 90 s at most. */
-  copySecret: (text: string) => invoke<void>("copy_secret", { text }),
+  /**
+   * The setup code on the clipboard, concealed from clipboard managers and cleared after 90 s
+   * at most. Same rule as `emergencyKit` (else "passwordRequired").
+   */
+  copySetupCode: (password: string | null = null) => invoke<void>("copy_setup_code", { password }),
   onSynced: (callback: () => void): Promise<UnlistenFn> => listen("synced", () => callback()),
   /** The main Mac: how many devices wait for approval (sent when it changes). */
   onSyncApproval: (callback: (waiting: number) => void): Promise<UnlistenFn> =>

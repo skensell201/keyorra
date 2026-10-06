@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { api, type SyncScreen } from "../api";
 
 /**
@@ -7,6 +7,9 @@ import { api, type SyncScreen } from "../api";
  */
 export function SyncBanner({ onOpen, onSynced }: { onOpen: () => void; onSynced?: () => void }) {
   const [screen, setScreen] = useState<SyncScreen | null>(null);
+  // The latest callback, without subscribing again whenever the parent passes a new one.
+  const synced = useRef(onSynced);
+  synced.current = onSynced;
   useEffect(() => {
     const load = () =>
       api
@@ -17,14 +20,14 @@ export function SyncBanner({ onOpen, onSynced }: { onOpen: () => void; onSynced?
     const subscriptions = [
       api.onSynced(() => {
         void load();
-        onSynced?.();
+        synced.current?.();
       }),
       api.onSyncApproval(() => void load()),
     ];
     return () => {
       subscriptions.forEach((p) => p.then((stop) => stop()));
     };
-  }, [onSynced]);
+  }, []);
 
   if (!screen?.enabled) return null;
   const status = screen.status;

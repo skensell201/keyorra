@@ -52,3 +52,18 @@ test("changes not yet confirmed by the main Mac", async () => {
   render(<SyncBanner onOpen={vi.fn()} />);
   expect(await screen.findByRole("status")).toHaveTextContent("aren't confirmed by your main Mac yet");
 });
+
+test("review A3: a new onSynced from the parent does not subscribe again", async () => {
+  vi.mocked(api.syncScreen).mockReset().mockResolvedValue(syncScreen());
+  const first = vi.fn();
+  const second = vi.fn();
+  const { rerender } = render(<SyncBanner onOpen={vi.fn()} onSynced={first} />);
+  await act(async () => {});
+  rerender(<SyncBanner onOpen={vi.fn()} onSynced={second} />);
+  await act(async () => {});
+  expect(api.onSynced).toHaveBeenCalledTimes(1);
+  expect(api.syncScreen).toHaveBeenCalledTimes(1);
+  await act(async () => synced?.());
+  expect(second).toHaveBeenCalled();
+  expect(first).not.toHaveBeenCalled();
+});

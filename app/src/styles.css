@@ -321,4 +321,15 @@ button.link { background: none; border: none; color: var(--brand); padding: 4px 
   .kit, .kit * { visibility: visible; }
   .kit { position: absolute; inset: 0; padding: 24px; background: white; color: black; }
   .kit .modal-actions, .kit .status { display: none; }
+  /* Black on white whatever the theme (review A3), and nothing clipped or scrolled away. */
+  .kit, .kit * { color: black !important; border-color: black !important; background: transparent; }
+  .kit { background: white !important; }
+  .modal-backdrop, .modal {
+    position: static !important;
+    overflow: visible !important;
+    max-height: none !important;
+    transform: none !important;
+    backdrop-filter: none !important;
+    -webkit-backdrop-filter: none !important;
+  }
 }

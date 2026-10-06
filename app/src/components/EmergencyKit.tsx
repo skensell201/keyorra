@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { api, errorMessage, type EmergencyKit as Kit } from "../api";
+import { api, errorMessage, isCmdError, type EmergencyKit as Kit } from "../api";
 
 /** Formats an account id (32 hex digits) in groups of four for reading aloud or copying. */
 export function groupHex(hex: string) {
@@ -10,14 +10,20 @@ export function groupHex(hex: string) {
  * The Emergency Kit (spec §7.6): printing is the main action. The page holds the Secret Key:
  * it must not end up next to the encrypted data.
  */
-export function EmergencyKit({ kit, location, onDone }: { kit: Kit; location: string | null; onDone: () => void }) {
+export function EmergencyKit({ kit, onDone }: { kit: Kit; onDone: () => void }) {
   const [note, setNote] = useState("");
+  const location = kit.location;
   async function copySetupCode() {
     try {
-      await api.copySecret(kit.setupCode);
+      // Read and copied in Rust: the setup code never reaches this page.
+      await api.copySetupCode();
       setNote("Setup code copied. It clears from the clipboard in 90 seconds.");
     } catch (e) {
-      setNote(errorMessage(e));
+      setNote(
+        isCmdError(e) && e.kind === "passwordRequired"
+          ? "Open the Emergency Kit again with your master password to copy the setup code."
+          : errorMessage(e),
+      );
     }
   }
   return (
@@ -48,7 +54,7 @@ export function EmergencyKit({ kit, location, onDone }: { kit: Kit; location: st
         undo what the Secret Key protects.
       </p>
       <div className="modal-actions">
-        <span className="status" role="status" aria-label="Emergency Kit">
+        <span className="status" role="status">
           {note}
         </span>
         <button className="secondary" onClick={copySetupCode}>

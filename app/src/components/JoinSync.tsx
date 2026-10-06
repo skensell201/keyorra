@@ -1,17 +1,29 @@
-import { useState, type FormEvent } from "react";
-import { api, errorMessage, isCmdError, type JoinOutcome } from "../api";
+import { useEffect, useState, type FormEvent } from "react";
+import { api, errorMessage, isCmdError, type JoinOutcome, type SyncPlace } from "../api";
+import { SyncPlaceChooser } from "./SyncPlaceChooser";
 
 /**
  * Joining a synced account with the master password and the setup code shown on a Mac that
  * is set up (or the Secret Key from the Emergency Kit). Then this Mac waits until the main
  * Mac approves it, comparing the code shown here.
  */
-export function JoinSync({ onJoined, onCancel }: { onJoined: (outcome: JoinOutcome) => void; onCancel?: () => void }) {
+export function JoinSync({
+  onJoined,
+  onCancel,
+  onBusy,
+}: {
+  onJoined: (outcome: JoinOutcome) => void;
+  onCancel?: () => void;
+  onBusy?: (busy: boolean) => void;
+}) {
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const valid = password.length > 0 && code.trim().length > 0 && !busy;
+  // The account is looked for in the sync place: iCloud Drive or a chosen folder.
+  const [place, setPlace] = useState<SyncPlace | null>(null);
+  useEffect(() => onBusy?.(busy), [busy, onBusy]);
+  const valid = password.length > 0 && code.trim().length > 0 && !busy && place !== null;
 
   async function submit(e: FormEvent) {
     e.preventDefault();
@@ -32,41 +44,44 @@ export function JoinSync({ onJoined, onCancel }: { onJoined: (outcome: JoinOutco
   }
 
   return (
-    <form className="join-sync" onSubmit={submit} aria-label="Join a synced account">
-      <p className="muted">
-        On a Mac where Keyorra already syncs, open Settings → Sync → Emergency Kit and copy the setup code. Paste it
-        here with your master password.
-      </p>
-      <label>
-        Master password
-        <input type="password" autoFocus value={password} onChange={(e) => setPassword(e.target.value)} />
-      </label>
-      <label>
-        Setup code or Secret Key
-        <input
-          className="mono"
-          spellCheck={false}
-          autoCapitalize="characters"
-          value={code}
-          onChange={(e) => setCode(e.target.value)}
-        />
-      </label>
-      {error && (
-        <p className="error" role="alert">
-          {error}
+    <>
+      <SyncPlaceChooser onPlace={setPlace} />
+      <form className="join-sync" onSubmit={submit} aria-label="Join a synced account">
+        <p className="muted">
+          On a Mac where Keyorra already syncs, open Settings → Sync → Emergency Kit and copy the setup code. Paste it
+          here with your master password.
         </p>
-      )}
-      <div className="modal-actions">
-        {onCancel && (
-          <button type="button" onClick={onCancel} disabled={busy}>
-            Cancel
-          </button>
+        <label>
+          Master password
+          <input type="password" autoFocus value={password} onChange={(e) => setPassword(e.target.value)} />
+        </label>
+        <label>
+          Setup code or Secret Key
+          <input
+            className="mono"
+            spellCheck={false}
+            autoCapitalize="characters"
+            value={code}
+            onChange={(e) => setCode(e.target.value)}
+          />
+        </label>
+        {error && (
+          <p className="error" role="alert">
+            {error}
+          </p>
         )}
-        <button type="submit" className="primary" disabled={!valid}>
-          {busy ? "Joining…" : "Join"}
-        </button>
-      </div>
-    </form>
+        <div className="modal-actions">
+          {onCancel && (
+            <button type="button" onClick={onCancel} disabled={busy}>
+              Cancel
+            </button>
+          )}
+          <button type="submit" className="primary" disabled={!valid}>
+            {busy ? "Joining…" : "Join"}
+          </button>
+        </div>
+      </form>
+    </>
   );
 }
 
