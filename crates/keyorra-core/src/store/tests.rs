@@ -562,6 +562,7 @@ fn saving_fabricated_attachment_refs_does_not_store_them() {
         id: Uuid::new_v4(),
         name: "x".into(),
         size: 1,
+        extra: Default::default(),
     };
     let mut fresh = login(v.id, "New");
     fresh.attachments.push(fake());

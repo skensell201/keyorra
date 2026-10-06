@@ -130,6 +130,7 @@ mod tests {
             label: "username".into(),
             value: crate::model::FieldValue::Text("quixotrel".into()),
             purpose: Some(crate::model::Purpose::Username),
+            extra: Default::default(),
         });
         by_user.urls.push("zembulak.example".into());
         by_user.set_password(password, 0);

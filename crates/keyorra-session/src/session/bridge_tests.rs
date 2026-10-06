@@ -291,6 +291,7 @@ fn fill_includes_the_current_one_time_code() {
         label: "one-time password".into(),
         value: FieldValue::Totp("GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ".into()),
         purpose: None,
+        extra: Default::default(),
     });
     let item = s.save_item(item, 1_000).unwrap();
     let ext = paired(&mut s);
@@ -739,6 +740,7 @@ fn has_totp_needs_a_secret_that_parses() {
         label: "one-time password".into(),
         value: FieldValue::Totp("not a secret!!".into()),
         purpose: None,
+        extra: Default::default(),
     });
     // Imported items can carry secrets that save_item would reject.
     s.store_mut().unwrap().save_item(&item).unwrap();
@@ -1057,26 +1059,31 @@ fn imported_cards_with_month_year_and_labels_work() {
                 label: "number".into(),
                 value: FieldValue::Concealed("5500000000000004".into()),
                 purpose: None,
+                extra: Default::default(),
             },
             Field {
                 id: "expiry".into(),
                 label: "expiry date".into(),
                 value: FieldValue::MonthYear(202803),
                 purpose: None,
+                extra: Default::default(),
             },
             Field {
                 id: "cvv".into(),
                 label: "verification number".into(),
                 value: FieldValue::Concealed("999".into()),
                 purpose: None,
+                extra: Default::default(),
             },
             Field {
                 id: "cardholder".into(),
                 label: "cardholder name".into(),
                 value: FieldValue::Text("A B".into()),
                 purpose: None,
+                extra: Default::default(),
             },
         ],
+        extra: Default::default(),
     });
     let item = s.save_item(item, 1_000).unwrap();
     let ext = paired(&mut s);
@@ -1112,6 +1119,7 @@ fn identities_are_listed_and_filled() {
         label: id.into(),
         value: FieldValue::Text(value.into()),
         purpose: None,
+        extra: Default::default(),
     };
     id.sections.push(Section {
         id: "addr".into(),
@@ -1122,6 +1130,7 @@ fn identities_are_listed_and_filled() {
             text("zip", "100000"),
             text("country", "VN"),
         ],
+        extra: Default::default(),
     });
     let id = s.save_item(id, 1_000).unwrap();
     let ext = paired(&mut s);
@@ -1258,6 +1267,7 @@ fn bad_month_year_is_skipped_and_short_numbers_are_not_masked_out() {
         label: id.into(),
         value,
         purpose: None,
+        extra: Default::default(),
     };
     item.fields = vec![
         f("number", FieldValue::Concealed("1234567".into())),

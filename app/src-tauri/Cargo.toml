@@ -1,6 +1,6 @@
 [package]
 name = "keyorra-app"
-version = "0.1.0"
+version = "0.2.0"
 description = "Keyorra password manager for macOS"
 edition = "2021"
 license = "GPL-3.0-or-later"
@@ -20,6 +20,8 @@ tauri-plugin-clipboard-manager = "2"
 tauri-plugin-global-shortcut = "2"
 keyorra-core = { path = "../../crates/keyorra-core" }
 keyorra-session = { path = "../../crates/keyorra-session" }
+keyorra-sync = { path = "../../crates/keyorra-sync" }
+keyorra-sync-fs = { path = "../../crates/keyorra-sync-fs" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 uuid = { version = "1", features = ["serde"] }
@@ -27,3 +29,7 @@ zeroize = "1"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"
+
+[dev-dependencies]
+ed25519-dalek = "2"
+tempfile = "3"

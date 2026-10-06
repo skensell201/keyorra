@@ -11,7 +11,7 @@ function withCurrent(options: number[], value: number) {
   return options.includes(value) ? options : [...options, value].sort((a, b) => a - b);
 }
 
-export function SettingsDialog({ onClose }: { onClose: () => void }) {
+export function SettingsDialog({ onClose, onOpenSync }: { onClose: () => void; onOpenSync?: () => void }) {
   const [theme, setTheme] = useState<Theme>(loadTheme);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [saved, setSaved] = useState(false);
@@ -182,6 +182,18 @@ export function SettingsDialog({ onClose }: { onClose: () => void }) {
             </p>
           )}
         </section>
+
+        {onOpenSync && (
+          <section className="modal-section">
+            <h3>Sync</h3>
+            <p className="muted">Keep this vault in step across your Macs through iCloud Drive or a folder you choose.</p>
+            <div className="modal-actions">
+              <button className="secondary" onClick={onOpenSync}>
+                Sync settings…
+              </button>
+            </div>
+          </section>
+        )}
 
         <section className="modal-section">
           <h3>Touch ID</h3>

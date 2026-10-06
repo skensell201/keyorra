@@ -28,6 +28,12 @@ pub fn create_header(password: &str, kdf: KdfParams) -> Result<(Header, Key)> {
     Ok((header, account))
 }
 
+/// A header for an existing account key (a device joining a synced account keeps the
+/// account's key, plan A1d).
+pub fn header_for_account(account: &Key, password: &str, kdf: KdfParams) -> Result<Header> {
+    wrap_account_key(account, password, kdf)
+}
+
 /// Recovers the account key. A wrong password fails AEAD authentication.
 pub fn unlock(header: &Header, password: &str) -> Result<Key> {
     if header.format != FORMAT_VERSION {

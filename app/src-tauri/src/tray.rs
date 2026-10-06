@@ -45,9 +45,14 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
         .on_menu_event(|app, event| match event.id().as_ref() {
             "open" => show_main(app),
             "quick" => quick::toggle(app),
+            // Not on the main thread: a sync round may hold the session for a while
+            // (review A2 I5).
             "lock" => {
-                lock_session(&app.state::<AppState>()).lock();
-                let _ = app.emit("locked", ());
+                let app = app.clone();
+                std::thread::spawn(move || {
+                    lock_session(&app.state::<AppState>()).lock();
+                    let _ = app.emit("locked", ());
+                });
             }
             "quit" => app.exit(0),
             _ => {}

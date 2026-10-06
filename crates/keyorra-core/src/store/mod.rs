@@ -13,8 +13,15 @@ use crate::import::{ImportPlan, ImportReport};
 use crate::model::{AttachmentRef, Item, VaultInfo, SCHEMA_VERSION};
 use crate::{Error, Result};
 
+mod rotate;
+mod sync;
+#[cfg(test)]
+mod sync_tests;
 #[cfg(test)]
 mod tests;
+
+use sync::record_change;
+pub use sync::{AttachmentState, Change, ChangeKind, MetaWriter};
 
 const DB_VERSION: i64 = MIGRATIONS.len() as i64;
 // Format label from the Lockbox days; kept so existing vaults and pairings stay readable.
@@ -65,8 +72,16 @@ CREATE TABLE attachments (
 );
 ";
 
+/// Version 2 (plan A1d): sync bookkeeping. Records changed locally wait in `sync_changes`
+/// until the sync engine has written them; the device's own confirmed segments are kept in
+/// `sync_segments` (already encrypted) for repairs. Everything else of sync is sealed meta.
+const SCHEMA_V2: &str = "
+CREATE TABLE sync_changes (kind TEXT NOT NULL, id TEXT NOT NULL, PRIMARY KEY (kind, id));
+CREATE TABLE sync_segments (first_seq INTEGER PRIMARY KEY, data BLOB NOT NULL);
+";
+
 /// `MIGRATIONS[i]` upgrades database version `i` to `i + 1`.
-const MIGRATIONS: &[&str] = &[SCHEMA_V1];
+const MIGRATIONS: &[&str] = &[SCHEMA_V1, SCHEMA_V2];
 
 /// The encrypted vault database. Locked until `unlock`/`unlock_with_key`.
 pub struct Store {
@@ -89,6 +104,22 @@ impl Store {
     pub fn create(path: &Path, password: &str, kdf: KdfParams) -> Result<Store> {
         // Argon2 can fail on bad params; do it before touching the filesystem.
         let (header, account) = crypto::create_header(password, kdf)?;
+        Self::create_with(path, header, account)
+    }
+
+    /// Creates a new database for an existing account key (a device joining a synced
+    /// account, plan A1d), unlocked.
+    pub fn create_with_account_key(
+        path: &Path,
+        password: &str,
+        kdf: KdfParams,
+        account: Key,
+    ) -> Result<Store> {
+        let header = crypto::header_for_account(&account, password, kdf)?;
+        Self::create_with(path, header, account)
+    }
+
+    fn create_with(path: &Path, header: Header, account: Key) -> Result<Store> {
         claim_path(path)?;
         match Self::init_file(path, &header, &account) {
             Ok(conn) => Ok(Store {
@@ -221,7 +252,10 @@ impl Store {
             name: name.to_owned(),
         };
         let key = Key::random();
-        insert_vault(&self.conn, account, &info, &key)?;
+        let tx = self.conn.unchecked_transaction()?;
+        insert_vault(&tx, account, &info, &key)?;
+        record_change(&tx, ChangeKind::Vault, info.id)?;
+        tx.commit()?;
         self.vault_keys.insert(info.id, key);
         Ok(info)
     }
@@ -233,13 +267,16 @@ impl Store {
             name: name.to_owned(),
         };
         let meta = crypto::seal(account, &serde_json::to_vec(&info)?, &vault_meta_aad(id));
-        let n = self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        let n = tx.execute(
             "UPDATE vaults SET meta = ?2, revision = revision + 1 WHERE id = ?1 AND deleted = 0",
             params![id.to_string(), meta],
         )?;
         if n == 0 {
             return Err(Error::NotFound(format!("vault {id}")));
         }
+        record_change(&tx, ChangeKind::Vault, id)?;
+        tx.commit()?;
         Ok(info)
     }
 
@@ -273,6 +310,9 @@ impl Store {
         if n == 0 {
             return Err(Error::NotFound(format!("vault {id}")));
         }
+        // The purged items of the vault travel as part of deleting it (the engine purges
+        // what is in Recently Deleted before deleting the vault).
+        record_change(&tx, ChangeKind::Vault, id)?;
         tx.commit()?;
         Ok(())
     }
@@ -290,6 +330,7 @@ impl Store {
             };
             let key = Key::random();
             insert_vault(&tx, account, &info, &key)?;
+            record_change(&tx, ChangeKind::Vault, info.id)?;
             report.vaults += 1;
             for imported in &vault.items {
                 let mut item = imported.item.clone();
@@ -301,12 +342,15 @@ impl Store {
                         id: Uuid::new_v4(),
                         name: name.clone(),
                         size: bytes.len() as u64,
+                        extra: Default::default(),
                     };
                     insert_attachment(&tx, &key, &item, &att, bytes)?;
+                    record_change(&tx, ChangeKind::Attachment, att.id)?;
                     item.attachments.push(att);
                     report.attachments += 1;
                 }
                 upsert_item(&tx, &key, &item)?;
+                record_change(&tx, ChangeKind::Item, item.id)?;
                 report.items += 1;
             }
             new_keys.push((info.id, key));
@@ -384,6 +428,7 @@ impl Store {
             None => item.attachments.clear(),
         }
         upsert_item(&tx, new_key, &item)?;
+        record_change(&tx, ChangeKind::Item, item.id)?;
         tx.commit()?;
         Ok(())
     }
@@ -401,12 +446,15 @@ impl Store {
             id: Uuid::new_v4(),
             name: name.to_owned(),
             size: bytes.len() as u64,
+            extra: Default::default(),
         };
         let tx = self.conn.unchecked_transaction()?;
         insert_attachment(&tx, key, &item, &att, bytes)?;
         item.attachments.push(att.clone());
         item.updated_at = now;
         upsert_item(&tx, key, &item)?;
+        record_change(&tx, ChangeKind::Attachment, att.id)?;
+        record_change(&tx, ChangeKind::Item, item.id)?;
         tx.commit()?;
         Ok(att)
     }
@@ -436,6 +484,8 @@ impl Store {
             params![attachment_id.to_string(), item_id.to_string()],
         )?;
         upsert_item(&tx, key, &item)?;
+        record_change(&tx, ChangeKind::Attachment, attachment_id)?;
+        record_change(&tx, ChangeKind::Item, item_id)?;
         tx.commit()?;
         Ok(())
     }
@@ -487,7 +537,8 @@ impl Store {
 
     pub fn delete_item(&mut self, id: Uuid, now: i64) -> Result<()> {
         self.account_key()?;
-        let n = self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        let n = tx.execute(
             "UPDATE items SET deleted_at = ?2, revision = revision + 1
              WHERE id = ?1 AND deleted_at IS NULL",
             params![id.to_string(), now],
@@ -495,12 +546,15 @@ impl Store {
         if n == 0 {
             return Err(Error::NotFound(format!("item {id}")));
         }
+        record_change(&tx, ChangeKind::Item, id)?;
+        tx.commit()?;
         Ok(())
     }
 
     pub fn restore_item(&mut self, id: Uuid) -> Result<()> {
         self.account_key()?;
-        let n = self.conn.execute(
+        let tx = self.conn.unchecked_transaction()?;
+        let n = tx.execute(
             "UPDATE items SET deleted_at = NULL, revision = revision + 1
              WHERE id = ?1 AND deleted_at IS NOT NULL AND length(data) > 0",
             [id.to_string()],
@@ -508,6 +562,8 @@ impl Store {
         if n == 0 {
             return Err(Error::NotFound(format!("deleted item {id}")));
         }
+        record_change(&tx, ChangeKind::Item, id)?;
+        tx.commit()?;
         Ok(())
     }
 
@@ -515,6 +571,17 @@ impl Store {
     pub fn purge_expired(&mut self, now: i64) -> Result<usize> {
         let cutoff = now - DELETED_RETENTION_SECS;
         let tx = self.conn.unchecked_transaction()?;
+        let purged: Vec<String> = {
+            let mut stmt = tx.prepare(
+                "SELECT id FROM items
+                 WHERE deleted_at IS NOT NULL AND deleted_at <= ?1 AND length(data) > 0",
+            )?;
+            let rows = stmt.query_map([cutoff], |r| r.get(0))?;
+            rows.collect::<rusqlite::Result<_>>()?
+        };
+        for id in &purged {
+            record_change(&tx, ChangeKind::Item, parse_id(id)?)?;
+        }
         tx.execute(
             "UPDATE attachments SET data = X'', deleted = 1, revision = revision + 1
              WHERE item_id IN (SELECT id FROM items
@@ -667,6 +734,27 @@ fn insert_attachment(
     Ok(())
 }
 
+/// Replaces an attachment's encrypted bytes (rotating keys).
+fn insert_attachment_data(
+    conn: &Connection,
+    key: &Key,
+    vault_id: Uuid,
+    item_id: Uuid,
+    att_id: Uuid,
+    bytes: &[u8],
+) -> Result<()> {
+    let data = crypto::seal(
+        key,
+        bytes,
+        &crypto::attachment_aad(vault_id, item_id, att_id),
+    );
+    conn.execute(
+        "UPDATE attachments SET data = ?2, revision = revision + 1 WHERE id = ?1",
+        params![att_id.to_string(), data],
+    )?;
+    Ok(())
+}
+
 fn reencrypt_attachments(
     conn: &Connection,
     item_id: Uuid,
@@ -759,6 +847,9 @@ fn not_a_database(e: Error) -> Error {
 }
 
 /// Copies the database next to itself before a schema migration.
+/// The copy is kept: nothing deletes it yet. Plan A3 tells the user it exists (Settings,
+/// with its size) and offers to delete it; the app does not remove it on its own, since it
+/// is the only way back if a migration went wrong.
 pub fn backup(path: &Path, from_version: i64) -> Result<PathBuf> {
     let copy = sibling(path, &format!(".bak-v{from_version}"));
     std::fs::copy(path, &copy)?;

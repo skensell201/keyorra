@@ -302,20 +302,24 @@ fn with_totp_and_dates(s: &mut Session) -> Item {
                 label: "one-time password".into(),
                 value: FieldValue::Totp(RFC_SECRET.into()),
                 purpose: None,
+                extra: Default::default(),
             },
             Field {
                 id: "born".into(),
                 label: "birth date".into(),
                 value: FieldValue::Date(631_152_000),
                 purpose: None,
+                extra: Default::default(),
             },
             Field {
                 id: "exp".into(),
                 label: "expiry".into(),
                 value: FieldValue::MonthYear(202_712),
                 purpose: None,
+                extra: Default::default(),
             },
         ],
+        extra: Default::default(),
     });
     s.save_item(item, 1_000).unwrap()
 }
@@ -533,6 +537,7 @@ fn saving_a_valid_totp_secret_enables_codes() {
         label: "one-time password".into(),
         value: FieldValue::Totp(RFC_SECRET.into()),
         purpose: None,
+        extra: Default::default(),
     });
     let saved = s.save_item(item, 1_000).unwrap();
     assert_eq!(s.totp(saved.id, 59).unwrap().unwrap().code, "287082");
@@ -548,6 +553,7 @@ fn saving_an_invalid_totp_secret_is_refused() {
         label: "one-time password".into(),
         value: FieldValue::Totp("not a secret!!".into()),
         purpose: None,
+        extra: Default::default(),
     });
     assert_eq!(
         s.save_item(item, 1_000).unwrap_err().kind,
@@ -565,6 +571,7 @@ fn empty_totp_fields_are_dropped_on_save() {
         label: "one-time password".into(),
         value: FieldValue::Totp("   ".into()),
         purpose: None,
+        extra: Default::default(),
     });
     let saved = s.save_item(item, 1_000).unwrap();
     assert_eq!(saved.totp(), None);
@@ -753,7 +760,9 @@ fn hotp_section() -> Section {
             label: "counter token".into(),
             value: FieldValue::Totp("otpauth://hotp/x?secret=JBSWY3DPEHPK3PXP".into()),
             purpose: None,
+            extra: Default::default(),
         }],
+        extra: Default::default(),
     }
 }
 
@@ -778,6 +787,7 @@ fn changing_a_valid_totp_to_an_invalid_one_is_refused() {
         label: "one-time password".into(),
         value: FieldValue::Totp(RFC_SECRET.into()),
         purpose: None,
+        extra: Default::default(),
     });
     let mut item = s.save_item(item, 1_000).unwrap();
     item.fields[2].value = FieldValue::Totp("not a secret!!".into());

@@ -25,6 +25,10 @@ mod bridge;
 mod bridge_tests;
 #[cfg(test)]
 mod polish_tests;
+mod sync;
+mod sync_screen;
+#[cfg(test)]
+mod sync_tests;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -84,11 +88,27 @@ pub struct Session {
     keyring: Box<dyn Keyring>,
     /// When the master password was last entered (or the Touch ID record says so).
     password_verified_at: Option<u64>,
+    /// Transport and device keys for sync (from the app).
+    sync_link: Option<Box<dyn sync::SyncLink>>,
+    /// Running while unlocked and sync is on.
+    synced: Option<crate::sync::Synced<sync::BoxedTransport>>,
+    /// Why sync is not running (shown with a retry).
+    sync_error: Option<String>,
+    /// What the last round undid or could not show.
+    sync_notices: Vec<String>,
+    /// The Sync log of this unlock (newest last, at most `SYNC_LOG_LINES`).
+    sync_log: std::collections::VecDeque<sync::LogLine>,
+    /// When the last round ran and whether it went through.
+    last_round: Option<(u64, bool)>,
 }
+
+pub use sync::{BoxedTransport, EmergencyKitDto, JoinOutcome, LogLine, SyncLink, SyncStatusDto};
+pub use sync_screen::{BackupFile, FolderFile, SyncScreenDto};
 
 impl Session {
     /// `kdf` is `KdfParams::DEFAULT` in the app; tests pass cheap parameters.
     pub fn new(path: PathBuf, kdf: KdfParams, now: u64) -> Self {
+        sync::recover_interrupted_join(&path);
         let settings_path = path.with_file_name("settings.json");
         let settings = Settings::load(&settings_path);
         let guard_path = path.with_file_name(bridge::GUARD_FILE);
@@ -114,6 +134,12 @@ impl Session {
             watchtower_count: None,
             keyring: Box::new(NoKeyring),
             password_verified_at: None,
+            sync_link: None,
+            synced: None,
+            sync_error: None,
+            sync_notices: Vec::new(),
+            sync_log: std::collections::VecDeque::new(),
+            last_round: None,
         }
     }
 
@@ -177,6 +203,7 @@ impl Session {
                 self.store = Some(store);
                 self.password_verified_at = Some(now);
                 self.rearm_touch_id(now);
+                self.resume_sync();
                 Ok(())
             }
             Err(keyorra_core::Error::WrongPassword) => {
@@ -193,8 +220,11 @@ impl Session {
     }
 
     fn touch_id_record(&self) -> Option<touchid::Record> {
+        // Touch ID only: an item that cannot be read now just means "use the password".
         self.keyring
             .load()
+            .ok()
+            .flatten()
             .and_then(|bytes| touchid::Record::from_bytes(&bytes))
     }
 
@@ -301,6 +331,7 @@ impl Session {
         let _ = store.purge_expired(now as i64);
         self.store = Some(store);
         self.password_verified_at = Some(record.verified_at);
+        self.resume_sync();
         Ok(())
     }
 
@@ -326,6 +357,11 @@ impl Session {
 
     /// Drops the store; its keys are wiped on drop.
     pub fn lock(&mut self) {
+        // Sync runs only while unlocked; its state is in the store.
+        self.synced = None;
+        self.sync_notices.clear();
+        self.sync_log.clear();
+        self.last_round = None;
         self.store = None;
         self.breaches.clear();
         self.watchtower_count = None;
@@ -382,10 +418,14 @@ impl Session {
                 "The new password must be different",
             ));
         }
+        let publish = self.prepare_sync_password_change(now)?;
         let result = self.store_mut()?.change_password(current, new);
         match result {
             Ok(()) => {
                 self.throttle.record_success();
+                if publish {
+                    self.publish_sync_password(new, now);
+                }
                 self.password_verified_at = Some(now);
                 // Replace the Touch ID record, like 1Password does after a password change.
                 self.rearm_touch_id(now);
@@ -409,6 +449,14 @@ impl Session {
         } else {
             false
         }
+    }
+
+    /// A secret the app just put on the clipboard (the setup code): cleared after 90 s at
+    /// most, like other secrets (spec §7.6).
+    pub fn copied_secret(&mut self, text: &str, now: u64) {
+        self.touch(now);
+        self.clipboard
+            .copied(text, now, self.settings.clipboard_seconds.min(90));
     }
 
     pub fn clipboard_pending(&self) -> bool {
@@ -439,6 +487,13 @@ impl Session {
         let name = name.trim();
         if name.is_empty() {
             return Err(CmdError::new(ErrorKind::Invalid, "Vault name is required"));
+        }
+        if let Some(created) = self.create_vault_synced(name, now) {
+            return Ok(VaultDto {
+                id: created?,
+                name: name.to_owned(),
+                item_count: 0,
+            });
         }
         let info = self.store_mut()?.create_vault(name)?;
         Ok(VaultDto {
@@ -912,6 +967,7 @@ fn field(id: &str, label: &str, value: FieldValue) -> Field {
         label: label.into(),
         value,
         purpose: None,
+        extra: Default::default(),
     }
 }
 
@@ -956,6 +1012,7 @@ fn purpose_field(purpose: Purpose) -> Field {
         label: id.into(),
         value,
         purpose: Some(purpose),
+        extra: Default::default(),
     }
 }
 

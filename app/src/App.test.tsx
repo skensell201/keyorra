@@ -19,6 +19,9 @@ vi.mock("./api", async (importOriginal) => {
       onUnlocked: vi.fn(),
       onPairRequest: vi.fn().mockResolvedValue(() => {}),
       onItemsChanged: vi.fn().mockResolvedValue(() => {}),
+      syncScreen: vi.fn().mockRejectedValue({ kind: "locked", message: "locked" }),
+      onSynced: vi.fn().mockResolvedValue(() => {}),
+      onSyncApproval: vi.fn().mockResolvedValue(() => {}),
     },
   };
 });

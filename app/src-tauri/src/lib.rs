@@ -3,10 +3,12 @@ mod commands;
 pub mod native_host;
 mod quick;
 mod screen;
+mod syncfolder;
 mod touchid;
 mod tray;
 
-use std::sync::{Mutex, MutexGuard};
+use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use keyorra_core::crypto::KdfParams;
@@ -39,7 +41,16 @@ pub fn run() {
             let path = app.path().app_data_dir()?.join("keyorra.db");
             let mut session = Session::new(path, KdfParams::DEFAULT, now());
             session.set_keyring(Box::new(touchid::MacKeyring));
+            // Sync over iCloud Drive, or the folder the user chose (plan A3). Nothing is
+            // created there before sync is turned on; the watcher starts once the folder
+            // exists (housekeeping).
+            let changed = Arc::new(AtomicBool::new(false));
+            let places = Arc::new(syncfolder::SyncPlace::load(&app.path().app_data_dir()?));
+            if let Some(link) = places.link() {
+                session.set_sync_link(Box::new(link));
+            }
             app.manage(AppState(Mutex::new(session)));
+            app.manage(places.clone());
             // After `manage`: both call commands that need the session. Neither is essential;
             // without them Keyorra still works from its main window.
             if let Err(e) = tray::install(app.handle()) {
@@ -49,7 +60,11 @@ pub fn run() {
                 eprintln!("keyorra: quick search unavailable: {e}");
             }
             let handle = app.handle().clone();
-            std::thread::spawn(move || housekeeping(handle));
+            {
+                let (changed, places) = (changed.clone(), places.clone());
+                std::thread::spawn(move || watch_place(&places, &changed));
+            }
+            std::thread::spawn(move || housekeeping(handle, changed));
             if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
                 let socket = keyorra_session::bridge::wire::socket_path(&home);
                 let bridge_app = app.handle().clone();
@@ -96,6 +111,23 @@ pub fn run() {
             commands::deny_pairing,
             commands::paired_browsers,
             commands::remove_paired_browser,
+            commands::sync_screen,
+            commands::sync_now,
+            commands::enable_sync,
+            commands::join_sync,
+            commands::disable_sync,
+            commands::approve_device,
+            commands::sync_alarm_action,
+            commands::remove_sync_device,
+            commands::verify_sync,
+            commands::sync_folder_files,
+            commands::emergency_kit,
+            commands::start_new_sync_account,
+            commands::backups,
+            commands::delete_backup,
+            commands::sync_place,
+            commands::set_sync_place,
+            commands::copy_setup_code,
         ])
         .on_window_event(|window, event| {
             // Closing the main window keeps Keyorra in the menu bar; Quit is in the tray menu.
@@ -119,11 +151,30 @@ pub fn run() {
         });
 }
 
+/// Every two seconds: changes are watched as soon as the sync place exists (sync turned on
+/// here or on another Mac), and the watch follows the place when the user picks another
+/// one. On its own thread: looking at a network folder can hang, and must not hold up
+/// locking (review A3 I8).
+fn watch_place(places: &syncfolder::SyncPlace, changed: &Arc<AtomicBool>) {
+    let mut watcher: Option<(std::path::PathBuf, syncfolder::Watcher)> = None;
+    loop {
+        let want = places.current().filter(|p| p.is_dir());
+        if watcher.as_ref().map(|(p, _)| p) != want.as_ref() {
+            watcher =
+                want.and_then(|p| syncfolder::Watcher::start(&p, changed.clone()).map(|w| (p, w)));
+        }
+        std::thread::sleep(Duration::from_secs(2));
+    }
+}
+
 /// Every two seconds: lock when idle (and tell the window), clear the clipboard once our copy
-/// has expired — but only if it still holds our copy.
-fn housekeeping(app: AppHandle) {
+/// has expired — but only if it still holds our copy; then a sync round when one is due.
+/// Nothing here touches the sync folder before locking and the clipboard.
+fn housekeeping(app: AppHandle, changed: Arc<AtomicBool>) {
     // `Instant` does not advance while the Mac sleeps (CLOCK_UPTIME_RAW), unlike wall time.
     let start = Instant::now();
+    let mut schedule = syncfolder::Schedule::new(changed);
+    let mut approvals_shown = 0;
     loop {
         std::thread::sleep(Duration::from_secs(2));
         let state = app.state::<AppState>();
@@ -142,9 +193,57 @@ fn housekeeping(app: AppHandle) {
                 let _ = app.clipboard().clear();
             }
         }
-        drop(session);
         if locked {
+            drop(session);
             let _ = app.emit("locked", ());
+            continue;
         }
+        // Sync while unlocked: on a change in the folder, and every minute.
+        let mut synced = false;
+        let mut approvals = None;
+        if session.status() == keyorra_session::session::Status::Unlocked
+            && session.sync_status().is_ok_and(|s| s.enabled)
+            && schedule.due(t)
+        {
+            if let Ok(status) = session.sync_now(t) {
+                synced = true;
+                // Devices that ask the main Mac to approve them: told once per change.
+                let waiting = status
+                    .status
+                    .filter(|s| s.main_device)
+                    .map_or(0, |s| s.devices.iter().filter(|d| !d.approved).count());
+                if waiting != approvals_shown {
+                    approvals_shown = waiting;
+                    approvals = Some(waiting);
+                }
+            }
+        }
+        drop(session);
+        if synced {
+            let _ = app.emit("synced", ());
+        }
+        if let Some(waiting) = approvals {
+            let _ = app.emit("sync-approval", waiting);
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// Review A3 I8: the housekeeping loop locks and clears the clipboard before anything
+    /// touches the sync folder; the folder is watched from another thread.
+    #[test]
+    fn review_a3_housekeeping_does_not_look_at_the_folder() {
+        let source = include_str!("lib.rs").split("#[cfg(test)]").next().unwrap();
+        let start = source.find("fn housekeeping(").unwrap();
+        let end = start + source[start..].find("\n}\n").unwrap();
+        let body = &source[start..end];
+        assert!(!body.contains("is_dir"), "no folder stat in housekeeping");
+        assert!(!body.contains("Watcher"), "the watcher is kept elsewhere");
+        let tick = body.find("tick_with").unwrap();
+        let clipboard = body.find("clipboard_should_clear").unwrap();
+        let sync = body.find("sync_now").unwrap();
+        assert!(tick < sync && clipboard < sync);
+        assert!(source.contains("std::thread::spawn(move || watch_place("));
     }
 }

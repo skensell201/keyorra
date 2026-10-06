@@ -8,10 +8,13 @@ fn main() {
     tauri_build::build()
 }
 
-/// Compiles swift/TouchId.swift into a static library and links the Swift runtime from the OS.
+/// Compiles the Swift helpers (Touch ID, the sync folder) into a static library and links
+/// the Swift runtime from the OS.
 fn build_touch_id() {
-    let source = "swift/TouchId.swift";
-    println!("cargo:rerun-if-changed={source}");
+    let sources = ["swift/TouchId.swift", "swift/SyncFolder.swift"];
+    for source in sources {
+        println!("cargo:rerun-if-changed={source}");
+    }
     let out = PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let arch = match std::env::var("CARGO_CFG_TARGET_ARCH").unwrap().as_str() {
         "aarch64" => "arm64",
@@ -29,14 +32,16 @@ fn build_touch_id() {
         ])
         .args(["-module-name", "KeyorraTouchId", "-target"])
         .arg(format!("{arch}-apple-macosx13.0"))
-        .arg(source)
+        .args(sources)
         .arg("-o")
         .arg(&lib)
         .status()
         .expect("xcrun swiftc (install Xcode or the Command Line Tools)");
-    assert!(status.success(), "compiling {source} failed");
+    assert!(status.success(), "compiling {sources:?} failed");
     println!("cargo:rustc-link-search=native={}", out.display());
     println!("cargo:rustc-link-lib=static=keyorra_touchid");
+    println!("cargo:rustc-link-lib=framework=CoreServices");
+    println!("cargo:rustc-link-lib=framework=SystemConfiguration");
     let swiftc = xcrun(&["--find", "swiftc"]);
     let toolchain = Path::new(&swiftc).parent().unwrap().parent().unwrap();
     println!(

@@ -29,6 +29,9 @@ vi.mock("../api", async (importOriginal) => {
       settings: vi.fn(),
       onPairRequest: vi.fn(),
       onItemsChanged: vi.fn(),
+      syncScreen: vi.fn(),
+      onSynced: vi.fn(),
+      onSyncApproval: vi.fn(),
     },
   };
 });
@@ -42,6 +45,12 @@ const github: ItemSummary = {
 };
 
 beforeEach(() => {
+  vi.mocked(api.syncScreen).mockReset().mockResolvedValue({
+    enabled: false, running: false, error: null, location: null, lastRoundAt: null,
+    lastRoundOk: null, status: null, alarms: [], notices: [], log: [],
+  });
+  vi.mocked(api.onSynced).mockReset().mockResolvedValue(() => {});
+  vi.mocked(api.onSyncApproval).mockReset().mockResolvedValue(() => {});
   pairCallback = null;
   changedCallback = null;
   vi.mocked(api.onItemsChanged)

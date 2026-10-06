@@ -82,10 +82,10 @@ fn touch_id_unlocks_do_not_restart_the_14_days() {
 #[test]
 fn changing_the_password_replaces_the_record() {
     let (_dir, mut s, keyring, enclave) = with_touch_id();
-    let before = keyring.load().unwrap();
+    let before = keyring.load().unwrap().unwrap();
     s.change_password(PW, "a brand new password", 5_000)
         .unwrap();
-    let after = keyring.load().unwrap();
+    let after = keyring.load().unwrap().unwrap();
     assert_ne!(before, after);
     assert_eq!(
         touchid::Record::from_bytes(&after).unwrap().verified_at,
@@ -103,7 +103,7 @@ fn a_wrong_enclave_answer_forgets_touch_id() {
     let wrong = FakeEnclave::new().agree(&request.ephemeral_public);
     let err = s.unlock_with_touch_id(&request, &wrong, 2_000).unwrap_err();
     assert_eq!(err.kind, ErrorKind::PasswordRequired);
-    assert!(keyring.load().is_none(), "the record is removed");
+    assert!(keyring.load().unwrap().is_none(), "the record is removed");
     assert_eq!(s.status(), Status::Locked);
 }
 
@@ -139,7 +139,7 @@ fn creating_a_vault_forgets_an_old_record() {
     );
     s.set_keyring(Box::new(keyring.clone()));
     s.create(PW, 1_000).unwrap();
-    assert!(keyring.load().is_none());
+    assert!(keyring.load().unwrap().is_none());
 }
 
 /// Another app can create the keychain item while Touch ID is off. A record it planted must
@@ -158,6 +158,7 @@ fn plant(keyring: &MemKeyring, attacker: &FakeEnclave, at: u64) {
 fn attacker_can_unwrap(keyring: &MemKeyring, attacker: &FakeEnclave) -> bool {
     keyring
         .load()
+        .unwrap()
         .and_then(|b| touchid::Record::from_bytes(&b))
         .is_some_and(|r| touchid::unwrap(&r, &attacker.agree(&r.ephemeral_public)).is_ok())
 }
@@ -173,7 +174,10 @@ fn a_password_unlock_never_rewraps_a_planted_record() {
 
     s.unlock(PW, 2_000).unwrap();
     assert!(!attacker_can_unwrap(&keyring, &attacker));
-    assert!(keyring.load().is_none(), "the planted record is removed");
+    assert!(
+        keyring.load().unwrap().is_none(),
+        "the planted record is removed"
+    );
 }
 
 #[test]
@@ -184,14 +188,14 @@ fn a_password_change_never_rewraps_a_planted_record() {
     s.change_password(PW, "a brand new password", 2_000)
         .unwrap();
     assert!(!attacker_can_unwrap(&keyring, &attacker));
-    assert!(keyring.load().is_none());
+    assert!(keyring.load().unwrap().is_none());
 }
 
 #[test]
 fn a_record_with_a_swapped_enclave_key_is_not_rewrapped() {
     let (_dir, mut s, keyring, _enclave) = with_touch_id();
     // Keep the genuine proof, swap in the attacker's enclave key.
-    let mut record = touchid::Record::from_bytes(&keyring.load().unwrap()).unwrap();
+    let mut record = touchid::Record::from_bytes(&keyring.load().unwrap().unwrap()).unwrap();
     let attacker = FakeEnclave::new();
     record.enclave_public = attacker.public();
     keyring.save(&record.to_bytes()).unwrap();
@@ -205,7 +209,7 @@ fn a_genuine_record_is_still_rewrapped_after_a_password_unlock() {
     let (_dir, mut s, keyring, enclave) = with_touch_id();
     s.lock();
     s.unlock(PW, 9_000).unwrap();
-    let record = touchid::Record::from_bytes(&keyring.load().unwrap()).unwrap();
+    let record = touchid::Record::from_bytes(&keyring.load().unwrap().unwrap()).unwrap();
     assert_eq!(record.verified_at, 9_000);
     s.lock();
     touch(&mut s, &enclave, 9_001).unwrap();
@@ -222,7 +226,10 @@ fn a_stale_touch_id_answer_keeps_the_newer_record() {
     let shared = enclave.agree(&stale.ephemeral_public);
     let err = s.unlock_with_touch_id(&stale, &shared, 2_002).unwrap_err();
     assert_ne!(err.kind, ErrorKind::PasswordRequired, "{}", err.message);
-    assert!(keyring.load().is_some(), "the newer record is kept");
+    assert!(
+        keyring.load().unwrap().is_some(),
+        "the newer record is kept"
+    );
     assert_eq!(s.status(), Status::Locked);
     touch(&mut s, &enclave, 2_003).unwrap();
 }

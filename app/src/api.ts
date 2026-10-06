@@ -163,6 +163,99 @@ export interface TouchIdState {
   passwordDue: boolean;
 }
 
+export interface SyncDevice {
+  id: string;
+  name: string;
+  approved: boolean;
+  main: boolean;
+  thisDevice: boolean;
+  removed: boolean;
+}
+
+export interface SyncStatus {
+  mainDevice: boolean;
+  waitingForApproval: boolean;
+  /** This Mac's key code, compared on the main Mac before it approves this one. */
+  keyCode: string;
+  devices: SyncDevice[];
+  alarms: number;
+  /** Other devices' changes are confirmed by the main Mac's newest decisions. */
+  rootConfirmed: boolean;
+}
+
+export type AlarmAction = "accept" | "restore" | "remove" | "leave";
+
+export interface SyncAlarm {
+  id: string;
+  kind: string;
+  title: string;
+  explanation: string;
+  actions: AlarmAction[];
+}
+
+export interface LogLine {
+  at: number;
+  text: string;
+}
+
+export interface SyncScreen {
+  enabled: boolean;
+  running: boolean;
+  error: string | null;
+  location: string | null;
+  lastRoundAt: number | null;
+  lastRoundOk: boolean | null;
+  status: SyncStatus | null;
+  alarms: SyncAlarm[];
+  notices: string[];
+  log: LogLine[];
+}
+
+/** The setup code stays in Rust: `copySetupCode` puts it on the clipboard. */
+export interface EmergencyKit {
+  accountId: string;
+  secretKey: string;
+  /** The account's folder, when known. */
+  location: string | null;
+}
+
+export interface JoinOutcome {
+  mode: "new" | "rejoined" | "carriedOver";
+  keyCode: string;
+  copied: number;
+  trashedLeft: number;
+  damaged: number;
+}
+
+export interface VerifyReport {
+  items: number;
+  damaged: number;
+  attachments: number;
+  damagedAttachments: number;
+  differing: string[];
+  missing: number;
+}
+
+export interface FolderFile {
+  path: string;
+  size: number;
+  /** A name Keyorra reads; false: an unknown file, ignored. */
+  counted: boolean;
+}
+
+export interface BackupFile {
+  name: string;
+  size: number;
+  modified: number;
+  kind: "migration" | "preSync";
+}
+
+export interface SyncPlace {
+  path: string;
+  kind: "icloud" | "cloudStorage" | "network" | "local";
+  warning: string | null;
+}
+
 export const api = {
   status: () => invoke<Status>("status"),
   create: (password: string) => invoke<void>("create_vault_file", { password }),
@@ -213,4 +306,31 @@ export const api = {
   /** Shows the system Touch ID prompt; rejects with kind "cancelled" when dismissed. */
   unlockWithTouchId: () => invoke<void>("unlock_with_touch_id"),
   onItemsChanged: (callback: () => void): Promise<UnlistenFn> => listen("items-changed", () => callback()),
+  syncScreen: () => invoke<SyncScreen>("sync_screen"),
+  syncNow: () => invoke<SyncScreen>("sync_now"),
+  enableSync: (password: string) => invoke<EmergencyKit>("enable_sync", { password }),
+  joinSync: (password: string, code: string) => invoke<JoinOutcome>("join_sync", { password, code }),
+  disableSync: () => invoke<void>("disable_sync"),
+  approveDevice: (id: string, code: string) => invoke<void>("approve_device", { id, code }),
+  syncAlarmAction: (id: string, action: AlarmAction) => invoke<void>("sync_alarm_action", { id, action }),
+  removeSyncDevice: (id: string) => invoke<void>("remove_sync_device", { id }),
+  verifySync: () => invoke<VerifyReport>("verify_sync"),
+  syncFolderFiles: () => invoke<FolderFile[]>("sync_folder_files"),
+  /** Without a password: only within a few minutes of entering it (else "passwordRequired"). */
+  emergencyKit: (password: string | null) => invoke<EmergencyKit>("emergency_kit", { password }),
+  startNewSyncAccount: (password: string) => invoke<EmergencyKit>("start_new_sync_account", { password }),
+  backups: () => invoke<BackupFile[]>("backups"),
+  deleteBackup: (name: string) => invoke<void>("delete_backup", { name }),
+  syncPlace: () => invoke<SyncPlace | null>("sync_place"),
+  /** `null`: iCloud Drive. Only while sync is off. */
+  setSyncPlace: (path: string | null) => invoke<SyncPlace>("set_sync_place", { path }),
+  /**
+   * The setup code on the clipboard, concealed from clipboard managers and cleared after 90 s
+   * at most. Same rule as `emergencyKit` (else "passwordRequired").
+   */
+  copySetupCode: (password: string | null = null) => invoke<void>("copy_setup_code", { password }),
+  onSynced: (callback: () => void): Promise<UnlistenFn> => listen("synced", () => callback()),
+  /** The main Mac: how many devices wait for approval (sent when it changes). */
+  onSyncApproval: (callback: (waiting: number) => void): Promise<UnlistenFn> =>
+    listen<number>("sync-approval", (e) => callback(e.payload)),
 };

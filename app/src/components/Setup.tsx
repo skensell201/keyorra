@@ -1,6 +1,7 @@
 import { Keyhole } from "./Keyhole";
 import { useState, type FormEvent } from "react";
-import { api, errorMessage } from "../api";
+import { api, errorMessage, type JoinOutcome } from "../api";
+import { JoinResult, JoinSync } from "./JoinSync";
 
 const MIN_LENGTH = 10;
 
@@ -9,6 +10,8 @@ export function Setup({ onDone }: { onDone: () => void }) {
   const [confirm, setConfirm] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [joining, setJoining] = useState(false);
+  const [joined, setJoined] = useState<JoinOutcome | null>(null);
   const tooShort = password.length > 0 && password.length < MIN_LENGTH;
   const mismatch = confirm.length > 0 && confirm !== password;
   const valid = password.length >= MIN_LENGTH && confirm === password;
@@ -26,6 +29,24 @@ export function Setup({ onDone }: { onDone: () => void }) {
     } finally {
       setBusy(false);
     }
+  }
+
+  if (joining) {
+    return (
+      <div className="center">
+        <div className="card auth">
+          <div className="logo">
+            <Keyhole width={24} height={24} />
+          </div>
+          <h1>Join a synced account</h1>
+          {joined ? (
+            <JoinResult outcome={joined} onDone={onDone} />
+          ) : (
+            <JoinSync onJoined={setJoined} onCancel={() => setJoining(false)} />
+          )}
+        </div>
+      </div>
+    );
   }
 
   return (
@@ -55,6 +76,9 @@ export function Setup({ onDone }: { onDone: () => void }) {
         )}
         <button className="primary" type="submit" disabled={!valid || busy}>
           {busy ? "Creating…" : "Create vault"}
+        </button>
+        <button type="button" className="link" onClick={() => setJoining(true)}>
+          Already use Keyorra on another Mac? Join your synced account
         </button>
       </form>
     </div>

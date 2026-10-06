@@ -85,7 +85,9 @@ impl Record {
 
 /// Where the record lives: the login keychain in the app, memory in tests.
 pub trait Keyring: Send {
-    fn load(&self) -> Option<Vec<u8>>;
+    /// `Ok(None)`: there is no item. `Err`: it could not be read now (locked keychain, an
+    /// error); callers must not take that for "no item" (review A1d-2 I3).
+    fn load(&self) -> Result<Option<Vec<u8>>, String>;
     fn save(&self, data: &[u8]) -> Result<(), String>;
     fn delete(&self);
 }
@@ -94,8 +96,8 @@ pub trait Keyring: Send {
 pub struct NoKeyring;
 
 impl Keyring for NoKeyring {
-    fn load(&self) -> Option<Vec<u8>> {
-        None
+    fn load(&self) -> Result<Option<Vec<u8>>, String> {
+        Ok(None)
     }
     fn save(&self, _: &[u8]) -> Result<(), String> {
         Err("Touch ID isn't available".into())
@@ -110,8 +112,8 @@ pub(crate) struct MemKeyring(pub std::sync::Arc<std::sync::Mutex<Option<Vec<u8>>
 
 #[cfg(test)]
 impl Keyring for MemKeyring {
-    fn load(&self) -> Option<Vec<u8>> {
-        self.0.lock().unwrap().clone()
+    fn load(&self) -> Result<Option<Vec<u8>>, String> {
+        Ok(self.0.lock().unwrap().clone())
     }
     fn save(&self, data: &[u8]) -> Result<(), String> {
         *self.0.lock().unwrap() = Some(data.to_vec());
