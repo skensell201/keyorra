@@ -287,6 +287,21 @@ fn review_a1d2_c1_the_main_mac_changes_the_password_right_after_unlock() {
     main.unlock(NEW_PW, 1_110).unwrap();
 }
 
+/// After a restart the main Mac reads its own stream again: the log says "Re-read", not
+/// "Received … from This Mac".
+#[test]
+fn the_log_does_not_say_this_mac_received_its_own_changes() {
+    let (_t, (_d1, mut main), (_d2, _laptop)) = two_macs();
+    main.lock();
+    main.unlock(PW, 1_200).unwrap();
+    main.sync_now(1_201).unwrap();
+    let log = main.sync_screen().unwrap().log;
+    assert!(
+        !log.iter().any(|l| l.text.contains("from This Mac")),
+        "{log:?}"
+    );
+}
+
 /// Review A1d-2 I5 and I9: with sync on but not running, the password stays as it is; once
 /// the folder is back, the next round starts sync again.
 #[test]

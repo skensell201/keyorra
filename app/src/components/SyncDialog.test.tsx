@@ -434,3 +434,17 @@ test("with sync off, the folder and the actions sit side by side", async () => {
   await user.click(screen.getByRole("button", { name: "Cancel" }));
   expect(screen.getByRole("button", { name: "Turn on sync" })).toBeInTheDocument();
 });
+
+test("an approved Mac is marked Approved, the main Mac is not", async () => {
+  const user = userEvent.setup();
+  const s = syncScreen();
+  s.status!.devices.push({ id: "d3", name: "Studio", approved: true, main: false, thisDevice: false, removed: false });
+  vi.mocked(api.syncScreen).mockResolvedValue(s);
+  render(<SyncDialog onClose={vi.fn()} />);
+  await openPane(user, "Devices");
+  const rows = screen.getByRole("region", { name: "Devices" }).querySelectorAll("li");
+  const studio = [...rows].find((r) => r.textContent?.startsWith("Studio"))!;
+  expect(within(studio as HTMLElement).getByText("Approved")).toBeInTheDocument();
+  const main = [...rows].find((r) => within(r as HTMLElement).queryByText("This Mac"))!;
+  expect(within(main as HTMLElement).queryByText("Approved")).toBeNull();
+});

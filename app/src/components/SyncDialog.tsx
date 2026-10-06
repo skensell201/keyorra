@@ -498,6 +498,7 @@ function SyncOn({
                   {d.name}
                   {d.main && <span className="chip">Main Mac</span>}
                   {d.thisDevice && <span className="chip">This Mac</span>}
+                  {!d.main && d.approved && !d.removed && <span className="chip">Approved</span>}
                   {!d.approved && <span className="chip">Waiting</span>}
                   {d.removed && <span className="chip">Removed</span>}
                 </span>

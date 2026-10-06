@@ -269,6 +269,10 @@ impl<T: Transport> Synced<T> {
     /// A line for the Sync log, for the events worth a line.
     pub fn describe(&self, event: &Event) -> Option<String> {
         Some(match event {
+            // After a restart the Mac reads its own stream again: say so instead of "received".
+            Event::Pulled { from, versions } if *from == self.engine.device() => {
+                format!("Re-read {versions} change(s) this Mac made earlier")
+            }
             Event::Pulled { from, versions } => format!(
                 "Received {versions} change(s) from {}",
                 self.device_label(from)
