@@ -1,6 +1,7 @@
 import { open } from "@tauri-apps/plugin-dialog";
 import { useEffect, useState } from "react";
 import { api, errorMessage, type SyncPlace } from "../api";
+import { PathText } from "./PathText";
 
 /**
  * Where synced accounts live: iCloud Drive unless another folder is chosen. Used before
@@ -43,7 +44,7 @@ export function SyncPlaceChooser({ onPlace }: { onPlace?: (place: SyncPlace | nu
       <h3>Where</h3>
       {place ? (
         <>
-          <p className="mono">{place.path}</p>
+          <PathText path={place.path} label="folder path" />
           {place.warning && <p className="muted">{place.warning}</p>}
         </>
       ) : (

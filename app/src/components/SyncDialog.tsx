@@ -1,4 +1,13 @@
-import { useCallback, useEffect, useRef, useState, type FormEvent, type ReactNode } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useRef,
+  useState,
+  type FormEvent,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type ReactNode,
+} from "react";
 import {
   api,
   errorMessage,
@@ -19,6 +28,7 @@ import { ConfirmDialog } from "./ConfirmDialog";
 import { EmergencyKit } from "./EmergencyKit";
 import { IconClose } from "./icons";
 import { JoinResult, JoinSync } from "./JoinSync";
+import { PathText } from "./PathText";
 import { SyncPlaceChooser } from "./SyncPlaceChooser";
 
 export const ACTION_LABEL: Record<AlarmAction, string> = {
@@ -133,21 +143,29 @@ export function SyncDialog({ onClose, onChanged }: { onClose: () => void; onChan
           </p>
         )}
         {kit ? (
-          <EmergencyKit
-            kit={kit}
-            onDone={() => {
-              setKit(null);
-              changed();
-            }}
-          />
+          <div className="sync-body scroll">
+            <div className="sync-single">
+              <EmergencyKit
+                kit={kit}
+                onDone={() => {
+                  setKit(null);
+                  changed();
+                }}
+              />
+            </div>
+          </div>
         ) : joined ? (
-          <JoinResult
-            outcome={joined}
-            onDone={() => {
-              setJoined(null);
-              changed();
-            }}
-          />
+          <div className="sync-body scroll">
+            <div className="sync-single">
+              <JoinResult
+                outcome={joined}
+                onDone={() => {
+                  setJoined(null);
+                  changed();
+                }}
+              />
+            </div>
+          </div>
         ) : screen === null ? (
           <p className="muted">Loading…</p>
         ) : screen.enabled ? (
@@ -160,6 +178,7 @@ export function SyncDialog({ onClose, onChanged }: { onClose: () => void; onChan
   );
 }
 
+/** Turning sync on or joining: where the account lives on the left, what to do on the right. */
 function SyncOff({
   onKit,
   onJoined,
@@ -192,46 +211,68 @@ function SyncOff({
   }
 
   if (joining) {
+    // JoinSync draws the folder and the form: one per column.
     return (
-      <section className="modal-section">
-        <h3>Join a synced account</h3>
-        <JoinSync onJoined={onJoined} onCancel={() => setJoining(false)} onBusy={onBusy} />
-      </section>
+      <div className="sync-body">
+        <h3 className="sync-title">Join a synced account</h3>
+        <div className="sync-columns">
+          <JoinSync onJoined={onJoined} onCancel={() => setJoining(false)} onBusy={onBusy} />
+        </div>
+      </div>
     );
   }
   return (
-    <>
-      <SyncPlaceChooser onPlace={setPlace} />
-      <form className="modal-section" onSubmit={enable}>
-        <h3>Turn on sync</h3>
-        <p className="muted">
-          This Mac becomes your main Mac: it approves the devices that join. You get an Emergency Kit to print.
-        </p>
-        <label>
-          Master password
-          <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
-        </label>
-        {error && (
-          <p className="error" role="alert">
-            {error}
-          </p>
-        )}
-        <div className="modal-actions">
-          <button type="submit" className="primary" disabled={!password || busy || !place}>
-            {busy ? "Turning on…" : "Turn on sync"}
-          </button>
+    <div className="sync-body">
+      <div className="sync-columns">
+        <div className="sync-col">
+          <SyncPlaceChooser onPlace={setPlace} />
         </div>
-      </form>
-      <section className="modal-section">
-        <h3>Already syncing on another Mac?</h3>
-        <div className="modal-actions">
-          <button className="secondary" onClick={() => setJoining(true)}>
-            Join a synced account…
-          </button>
+        <div className="sync-col">
+          <form className="modal-section" onSubmit={enable}>
+            <h3>Turn on sync</h3>
+            <p className="muted">
+              This Mac becomes your main Mac: it approves the devices that join. You get an Emergency Kit to print.
+            </p>
+            <label>
+              Master password
+              <input type="password" value={password} onChange={(e) => setPassword(e.target.value)} />
+            </label>
+            {error && (
+              <p className="error" role="alert">
+                {error}
+              </p>
+            )}
+            <div className="modal-actions">
+              <button type="submit" className="primary" disabled={!password || busy || !place}>
+                {busy ? "Turning on…" : "Turn on sync"}
+              </button>
+            </div>
+          </form>
+          <section className="modal-section">
+            <h3>Already syncing on another Mac?</h3>
+            <div className="modal-actions">
+              <button className="secondary" onClick={() => setJoining(true)}>
+                Join a synced account…
+              </button>
+            </div>
+          </section>
         </div>
-      </section>
-    </>
+      </div>
+    </div>
   );
+}
+
+type Pane = "overview" | "devices" | "safety" | "advanced";
+const PANES: { id: Pane; label: string }[] = [
+  { id: "overview", label: "Overview" },
+  { id: "devices", label: "Devices" },
+  { id: "safety", label: "Safety" },
+  { id: "advanced", label: "Advanced" },
+];
+
+/** The name a nav item is read with: its label, and how many things in it wait for you. */
+export function paneName(label: string, count: number) {
+  return count > 0 ? `${label}, ${count} ${count === 1 ? "needs" : "need"} attention` : label;
 }
 
 function SyncOn({
@@ -246,6 +287,7 @@ function SyncOn({
   onBusy: (busy: boolean) => void;
 }) {
   const status = screen.status;
+  const [pane, setPane] = useState<Pane>("overview");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [approving, setApproving] = useState<SyncDevice | null>(null);
@@ -260,6 +302,8 @@ function SyncOn({
   const [confirming, setConfirming] = useState<{ alarm: SyncAlarm; action: Exclude<AlarmAction, "accept"> } | null>(
     null,
   );
+  const ids = useId();
+  const tabs = useRef<Partial<Record<Pane, HTMLButtonElement | null>>>({});
   useEffect(() => onBusy(busy), [busy, onBusy]);
   useEffect(() => () => onBusy(false), [onBusy]);
 
@@ -306,101 +350,148 @@ function SyncOn({
   }
 
   const waiting = status?.devices.filter((d) => !d.approved) ?? [];
-  return (
-    <>
-      <section className="modal-section" aria-label="Sync status">
-        <h3>Status</h3>
-        {screen.error ? (
-          <p className="error" role="alert">
-            {screen.error}
-          </p>
-        ) : (
-          <p>
-            {screen.lastRoundAt
-              ? `${screen.lastRoundOk ? "Synced" : "Sync failed"} ${formatTime(screen.lastRoundAt)}`
-              : "Not synced yet in this session"}
-          </p>
-        )}
-        {screen.location && <p className="mono muted">{screen.location}</p>}
-        {status?.waitingForApproval && (
-          <p>
-            This Mac waits for your main Mac to approve it. The main Mac must see this code:{" "}
-            <span className="mono">{status.keyCode}</span>
-          </p>
-        )}
-        {status && !status.mainDevice && !status.rootConfirmed && (
-          <p className="muted">Changes from other devices aren't confirmed by your main Mac yet.</p>
-        )}
-        <div className="modal-actions">
-          <button className="secondary" disabled={busy} onClick={() => run(api.syncNow)}>
-            Sync now
-          </button>
-        </div>
-      </section>
+  const approvals = status?.mainDevice ? waiting : [];
+  const counts: Record<Pane, number> = {
+    overview: approvals.length + screen.alarms.length,
+    devices: approvals.length,
+    safety: 0,
+    advanced: 0,
+  };
 
-      {status?.mainDevice && waiting.length > 0 && (
-        <section className="modal-section" aria-label="Approvals">
-          <h3>Waiting for approval</h3>
-          <ul className="sync-list">
-            {waiting.map((d) => (
-              <li key={d.id}>
-                <span>{d.name}</span>
-                <button className="primary" disabled={busy} onClick={() => setApproving(d)}>
-                  Review
-                </button>
-              </li>
-            ))}
-          </ul>
+  // Vertical tabs: arrows move between them, Home and End jump to the ends.
+  function onNavKey(e: ReactKeyboardEvent<HTMLDivElement>) {
+    const at = PANES.findIndex((p) => p.id === pane);
+    const next =
+      e.key === "ArrowDown"
+        ? (at + 1) % PANES.length
+        : e.key === "ArrowUp"
+          ? (at - 1 + PANES.length) % PANES.length
+          : e.key === "Home"
+            ? 0
+            : e.key === "End"
+              ? PANES.length - 1
+              : -1;
+    if (next < 0) return;
+    e.preventDefault();
+    const id = PANES[next].id;
+    setPane(id);
+    tabs.current[id]?.focus();
+  }
+
+  const approvalsSection = approvals.length > 0 && (
+    <section className="modal-section" aria-label="Approvals">
+      <h3>Waiting for approval</h3>
+      <ul className="sync-list">
+        {approvals.map((d) => (
+          <li key={d.id}>
+            <span>{d.name}</span>
+            <button className="primary" disabled={busy} onClick={() => setApproving(d)}>
+              Review
+            </button>
+          </li>
+        ))}
+      </ul>
+    </section>
+  );
+
+  const overview = (
+    <div className="sync-columns">
+      <div className="sync-col">
+        <section className="modal-section" aria-label="Sync status">
+          <h3>Status</h3>
+          {screen.error ? (
+            <p className="error" role="alert">
+              {screen.error}
+            </p>
+          ) : (
+            <p className="sync-state">
+              {screen.lastRoundAt
+                ? `${screen.lastRoundOk ? "Synced" : "Sync failed"} ${formatTime(screen.lastRoundAt)}`
+                : "Not synced yet in this session"}
+            </p>
+          )}
+          {screen.location && <PathText path={screen.location} label="sync folder path" />}
+          {status?.waitingForApproval && (
+            <p>
+              This Mac waits for your main Mac to approve it. The main Mac must see this code:{" "}
+              <span className="mono">{status.keyCode}</span>
+            </p>
+          )}
+          {status && !status.mainDevice && !status.rootConfirmed && (
+            <p className="muted">Changes from other devices aren't confirmed by your main Mac yet.</p>
+          )}
+          <div className="modal-actions start">
+            <button className="secondary" disabled={busy} onClick={() => run(api.syncNow)}>
+              Sync now
+            </button>
+          </div>
         </section>
-      )}
+        {screen.notices.length > 0 && (
+          <section className="modal-section" aria-label="Notices">
+            <h3>Notices</h3>
+            <ul>
+              {screen.notices.map((n, i) => (
+                <li key={i} className="muted">
+                  {n}
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+      </div>
+      <div className="sync-col">
+        {approvalsSection}
+        {screen.alarms.length > 0 && (
+          <section className="modal-section" aria-label="Alarms">
+            <h3>Needs your attention</h3>
+            <ul className="sync-alarms">
+              {screen.alarms.map((a) => (
+                <li key={a.id}>
+                  <strong>{a.title}</strong>
+                  <p className="muted">{a.explanation}</p>
+                  <div className="modal-actions">
+                    {a.actions.map((action) => (
+                      <button
+                        key={action}
+                        className={action === "accept" ? "secondary" : "primary"}
+                        disabled={busy}
+                        onClick={() =>
+                          action === "accept"
+                            ? run(() => api.syncAlarmAction(a.id, action))
+                            : setConfirming({ alarm: a, action })
+                        }
+                      >
+                        {ACTION_LABEL[action]}
+                      </button>
+                    ))}
+                  </div>
+                </li>
+              ))}
+            </ul>
+          </section>
+        )}
+        {counts.overview === 0 && (
+          <section className="modal-section" aria-label="Attention">
+            <h3>Needs your attention</h3>
+            <p className="muted">Nothing. Devices waiting for approval and anything that looks wrong show up here.</p>
+          </section>
+        )}
+      </div>
+    </div>
+  );
 
-      {screen.alarms.length > 0 && (
-        <section className="modal-section" aria-label="Alarms">
-          <h3>Needs your attention</h3>
-          <ul className="sync-alarms">
-            {screen.alarms.map((a) => (
-              <li key={a.id}>
-                <strong>{a.title}</strong>
-                <p className="muted">{a.explanation}</p>
-                <div className="modal-actions">
-                  {a.actions.map((action) => (
-                    <button
-                      key={action}
-                      className={action === "accept" ? "secondary" : "primary"}
-                      disabled={busy}
-                      onClick={() =>
-                        action === "accept"
-                          ? run(() => api.syncAlarmAction(a.id, action))
-                          : setConfirming({ alarm: a, action })
-                      }
-                    >
-                      {ACTION_LABEL[action]}
-                    </button>
-                  ))}
-                </div>
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-
-      {screen.notices.length > 0 && (
-        <section className="modal-section" aria-label="Notices">
-          <h3>Notices</h3>
-          <ul>
-            {screen.notices.map((n, i) => (
-              <li key={i} className="muted">
-                {n}
-              </li>
-            ))}
-          </ul>
-        </section>
-      )}
-
+  const devices = (
+    <div className="sync-stack">
+      {approvalsSection}
       {status && (
-        <section className="modal-section" aria-label="Devices">
+        <section className="modal-section grow" aria-label="Devices">
           <h3>Devices</h3>
-          <ul className="sync-list">
+          <p className="muted">
+            {status.mainDevice
+              ? "This is your main Mac: it approves the Macs that join and can remove them."
+              : "Your main Mac approves the Macs that join and can remove them."}
+          </p>
+          <ul className="sync-list sync-scroll">
             {status.devices.map((d) => (
               <li key={d.id}>
                 <span>
@@ -420,125 +511,146 @@ function SyncOn({
           </ul>
         </section>
       )}
+    </div>
+  );
 
-      <section className="modal-section" aria-label="Tools">
-        <h3>Tools</h3>
-        {kitPassword !== null && (
-          <form
-            className="row"
-            onSubmit={(e) => {
-              e.preventDefault();
-              void openKit(kitPassword);
-            }}
-          >
-            <label>
-              Master password for the Emergency Kit
-              <input type="password" autoFocus value={kitPassword} onChange={(e) => setKitPassword(e.target.value)} />
-            </label>
-            <button type="button" onClick={() => setKitPassword(null)}>
-              Cancel
+  const safety = (
+    <div className="sync-columns wide-left">
+      <div className="sync-col">
+        <section className="modal-section grow" aria-label="Tools">
+          <h3>Tools</h3>
+          {kitPassword !== null && (
+            <form
+              className="row"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void openKit(kitPassword);
+              }}
+            >
+              <label>
+                Master password for the Emergency Kit
+                <input
+                  type="password"
+                  autoFocus
+                  value={kitPassword}
+                  onChange={(e) => setKitPassword(e.target.value)}
+                />
+              </label>
+              <button type="button" onClick={() => setKitPassword(null)}>
+                Cancel
+              </button>
+              <button type="submit" className="primary" disabled={!kitPassword || busy}>
+                Show
+              </button>
+            </form>
+          )}
+          <div className="modal-actions start">
+            <button className="secondary" disabled={busy} onClick={() => openKit(null)}>
+              Emergency Kit…
             </button>
-            <button type="submit" className="primary" disabled={!kitPassword || busy}>
-              Show
+            <button
+              className="secondary"
+              disabled={busy}
+              onClick={() => run(async () => setReport(await api.verifySync()))}
+            >
+              Verify everything
             </button>
-          </form>
-        )}
-        <div className="modal-actions">
-          <button className="secondary" disabled={busy} onClick={() => openKit(null)}>
-            Emergency Kit…
-          </button>
-          <button
-            className="secondary"
-            disabled={busy}
-            onClick={() => run(async () => setReport(await api.verifySync()))}
-          >
-            Verify everything
-          </button>
-          <button
-            className="secondary"
-            disabled={busy}
-            onClick={() => run(async () => setFiles(await api.syncFolderFiles()))}
-          >
-            What the folder sees
-          </button>
-        </div>
-        {report && (
-          <p role="status" aria-label="Verify">
-            {report.items} item(s) and {report.attachments} attachment(s) checked.{" "}
-            {report.damaged + report.damagedAttachments + report.differing.length + report.missing === 0
-              ? "Everything matches."
-              : [
-                  report.damaged && `${report.damaged} unreadable`,
-                  report.damagedAttachments && `${report.damagedAttachments} unreadable attachment(s)`,
-                  report.differing.length && `differs from sync: ${report.differing.join(", ")}`,
-                  report.missing && `${report.missing} not here yet`,
-                ]
-                  .filter(Boolean)
-                  .join("; ")}
-          </p>
-        )}
-        {files && (
-          <table className="folder-files" aria-label="Folder files">
-            <thead>
-              <tr>
-                <th scope="col">Name</th>
-                <th scope="col">Size</th>
-                <th scope="col">Status</th>
-              </tr>
-            </thead>
-            <tbody>
-              {files.map((f) => (
-                <tr key={f.path} className={f.counted ? undefined : "unknown"}>
-                  <td className="mono">{f.path}</td>
-                  <td>{formatSize(f.size)}</td>
-                  <td>{f.counted ? "" : "unknown, ignored"}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        )}
-      </section>
-
-      {backups.length > 0 && (
-        <section className="modal-section" aria-label="Backups">
+            <button
+              className="secondary"
+              disabled={busy}
+              onClick={() => run(async () => setFiles(await api.syncFolderFiles()))}
+            >
+              What the folder sees
+            </button>
+          </div>
+          {report && (
+            <p role="status" aria-label="Verify">
+              {report.items} item(s) and {report.attachments} attachment(s) checked.{" "}
+              {report.damaged + report.damagedAttachments + report.differing.length + report.missing === 0
+                ? "Everything matches."
+                : [
+                    report.damaged && `${report.damaged} unreadable`,
+                    report.damagedAttachments && `${report.damagedAttachments} unreadable attachment(s)`,
+                    report.differing.length && `differs from sync: ${report.differing.join(", ")}`,
+                    report.missing && `${report.missing} not here yet`,
+                  ]
+                    .filter(Boolean)
+                    .join("; ")}
+            </p>
+          )}
+          {files && (
+            <div className="sync-scroll">
+              <table className="folder-files" aria-label="Folder files">
+                <thead>
+                  <tr>
+                    <th scope="col">Name</th>
+                    <th scope="col">Size</th>
+                    <th scope="col">Status</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {files.map((f) => (
+                    <tr key={f.path} className={f.counted ? undefined : "unknown"}>
+                      <td className="mono">{f.path}</td>
+                      <td>{formatSize(f.size)}</td>
+                      <td>{f.counted ? "" : "unknown, ignored"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
+      </div>
+      <div className="sync-col">
+        <section className="modal-section grow" aria-label="Backups">
           <h3>Copies of your vault on this Mac</h3>
-          <p className="muted">Kept when the vault was upgraded or replaced by joining an account. You can delete them.</p>
-          <ul className="sync-list">
-            {backups.map((b) => (
-              <li key={b.name}>
-                <span>
-                  {b.kind === "migration" ? "Before an upgrade" : "Before joining an account"} ·{" "}
-                  {formatTime(b.modified)} · {formatSize(b.size)}
-                </span>
-                <button className="secondary" disabled={busy} onClick={() => setDeleting(b)}>
-                  Delete
-                </button>
+          {backups.length > 0 ? (
+            <>
+              <p className="muted">
+                Kept when the vault was upgraded or replaced by joining an account. You can delete them.
+              </p>
+              <ul className="sync-list sync-scroll">
+                {backups.map((b) => (
+                  <li key={b.name}>
+                    <span>
+                      {b.kind === "migration" ? "Before an upgrade" : "Before joining an account"} ·{" "}
+                      {formatTime(b.modified)} · {formatSize(b.size)}
+                    </span>
+                    <button className="secondary" disabled={busy} onClick={() => setDeleting(b)}>
+                      Delete
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </>
+          ) : (
+            <p className="muted">None. A copy is kept when the vault is upgraded or replaced by joining an account.</p>
+          )}
+        </section>
+      </div>
+    </div>
+  );
+
+  const advanced = (
+    <div className="sync-stack">
+      <section className="modal-section grow" aria-label="Log">
+        <h3>Sync log</h3>
+        {screen.log.length === 0 ? (
+          <p className="muted">Nothing yet in this session.</p>
+        ) : (
+          <ul className="sync-log sync-scroll">
+            {screen.log.map((l, i) => (
+              <li key={i}>
+                <span className="muted">{formatTime(l.at)}</span> {l.text}
               </li>
             ))}
           </ul>
-        </section>
-      )}
-
-      <section className="modal-section" aria-label="Log">
-        <details>
-          <summary>Sync log</summary>
-          {screen.log.length === 0 ? (
-            <p className="muted">Nothing yet in this session.</p>
-          ) : (
-            <ul className="sync-log">
-              {screen.log.map((l, i) => (
-                <li key={i}>
-                  <span className="muted">{formatTime(l.at)}</span> {l.text}
-                </li>
-              ))}
-            </ul>
-          )}
-        </details>
+        )}
       </section>
-
       <section className="modal-section" aria-label="Leave">
         <h3>Turn off or start over</h3>
-        <div className="modal-actions">
+        <div className="modal-actions start">
           <button className="secondary" onClick={() => setTurningOff(true)}>
             Turn off sync
           </button>
@@ -549,12 +661,44 @@ function SyncOn({
           )}
         </div>
       </section>
+    </div>
+  );
 
-      {error && (
-        <p className="error" role="alert">
-          {error}
-        </p>
-      )}
+  const panes: Record<Pane, ReactNode> = { overview, devices, safety, advanced };
+  return (
+    <div className="sync-layout">
+      <div className="sync-nav" role="tablist" aria-label="Sync sections" aria-orientation="vertical" onKeyDown={onNavKey}>
+        {PANES.map((p) => (
+          <button
+            key={p.id}
+            ref={(el) => {
+              tabs.current[p.id] = el;
+            }}
+            id={`${ids}-tab-${p.id}`}
+            role="tab"
+            aria-selected={pane === p.id}
+            aria-controls={`${ids}-pane`}
+            aria-label={paneName(p.label, counts[p.id])}
+            tabIndex={pane === p.id ? 0 : -1}
+            onClick={() => setPane(p.id)}
+          >
+            {p.label}
+            {counts[p.id] > 0 && (
+              <span className="badge" aria-hidden="true">
+                {counts[p.id]}
+              </span>
+            )}
+          </button>
+        ))}
+      </div>
+      <div className="sync-pane" role="tabpanel" id={`${ids}-pane`} aria-labelledby={`${ids}-tab-${pane}`} key={pane}>
+        {error && (
+          <p className="error" role="alert">
+            {error}
+          </p>
+        )}
+        {panes[pane]}
+      </div>
 
       {approving && (
         <ApproveDialog
@@ -643,7 +787,7 @@ function SyncOn({
           }}
         />
       )}
-    </>
+    </div>
   );
 }
 
