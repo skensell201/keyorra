@@ -1134,12 +1134,45 @@ As built (A3-1): The Sync screen is one call (`sync_screen`): on/off, running, l
 
 As built (A3-2): Approving a device: the main Mac shows the joining device's name and asks for the code the new Mac shows; the Approve button works only once 12 letters and digits are typed (case and dashes ignored) and the session compares them. The first-run screen offers joining; joining an existing vault from Settings → Sync merges by record id (same account) or carries the items over (another account), and reports what stayed in the old file.
 
+As built after the A3 review — what the Sync screen has today, item by item:
+
+- **Status**: the last round's time and result ("Synced …" / "Sync failed …"), the error
+  that stopped sync, and alarms (plain title, explanation, actions). Syncing, Offline and
+  "Waiting for files" states come later.
+- **Location**: the account's folder path, with a hint by kind of folder (cloud storage kept
+  downloaded, network drive connected, local folder). No "Show in Finder" yet; the server
+  URL comes with B2. The folder is chosen only while sync is off and the vault unlocked (or
+  on first run, before joining): an absolute path without `..`, kept as its real path,
+  outside Keyorra's own data, the current place and any account folder; a folder already
+  named `Keyorra` is used as is.
+- **This device**: the computer name (not editable here), its role (main Mac or not), and
+  the key code while it waits for approval. No device id is shown.
+- **Devices**: name, with Main Mac / This Mac / Waiting / Removed. Remove is on the main Mac
+  only, after confirming. Approve by typing the code the new Mac shows (case and dashes
+  ignored: the session keeps only hex digits, needs exactly 12, and compares them as
+  `xxxx-xxxx-xxxx`).
+- **Alarm actions** that change the account (restore from this Mac, remove device,
+  continue as a new device) are confirmed first; accept is done at once.
+- **Conflicts** are not built in A3.
+- **Sync log**: the last 200 lines of this unlock, in memory only, cleared on lock.
+- **Verify everything**: decrypts the local copy (items and attachments) and checks that
+  every live item matches what sync shows; it reports counts and the ids that differ. It
+  does not re-read the folder.
+- **Emergency Kit**: the master password unless it was entered in the last 5 minutes; the
+  kit shows the account, the Secret Key and the folder. The setup code is never shown or
+  sent to the web view: "Copy setup code" reads it in Rust under the same rule and puts it
+  on the clipboard concealed from clipboard managers, cleared within 90 seconds.
+
 ### 9.2 "What the folder/server sees"
 
 An in-app table of every file or blob for this account exactly as stored: name, kind as
 visible from outside (header, segment, snapshot, chunk, unknown), size, created time, and
 for segments the plaintext header fields. Next to it, one paragraph on what each column
 reveals (§5.5). Export to CSV/zip is left out of v1.
+
+As built (A3): a table of the account folder's files with Name (path inside the folder),
+Size and Status — whether Keyorra reads the file or ignores it as unknown. Kind, created
+time, segment header fields and the paragraph on what each column reveals come later.
 
 ### 9.3 Public protocol and test vectors
 
@@ -1247,7 +1280,7 @@ Each line becomes one implementation plan in `docs/superpowers/plans/`.
 | **A2-1** Folder transport | `keyorra-sync-fs` (layout, strict names, temp outside the synced tree, exclusive renames, download state, round budget), chunks in the transport trait | two engines converge through a temp folder with conflict copies and late files |
 | **A2-2** Attachments and macOS | attachment contents as chunks, file coordination, per-account folders in the session, iCloud Drive link, FSEvents and polling | two vault stores sync an item with an attachment through a folder |
 | **A3-1** Sync screen backend | Folder inventory, alarm views and actions, device removal, Verify everything, backup copies, log, joining outcome, sync folder choice, concealed setup code | Session and app tests green |
-| **A3-2** Sync screen and flows in the app (Vitest) | Enable/join/leave, Emergency Kit, setup code, folder-based approval, Sync screen, banner, alarms; conflicts in list/detail/Watchtower | Suite 10 (folder) green; manual two-Mac iCloud test |
+| **A3-2** Sync screen and flows in the app (Vitest) | Enable/join/leave, Emergency Kit, setup code, folder-based approval, Sync screen, banner, alarms (conflicts in list/detail/Watchtower: not built in A3, later) | Suite 10 (folder) green; manual two-Mac iCloud test |
 | **B1** Server | Schema, API, auth, approval exchange, SSE, limits, quotas, TLS modes, logs, admin CLI, backup/restore/check | Suite 8 green |
 | **B2** Server transport | HTTP transport, login/approval UI, pinning, transport switch with `Moved` | Suite 9 + E2E against server green |
 | **B3** Packaging | Multi-arch Docker image, static musl binaries, systemd unit, signed releases, `docs/self-hosting.md` | Image runs on amd64 and arm64 (Raspberry Pi) from the docs alone |
