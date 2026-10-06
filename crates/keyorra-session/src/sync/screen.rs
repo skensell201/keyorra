@@ -208,8 +208,8 @@ impl<T: Transport> Synced<T> {
         }
     }
 
-    /// The main Mac removes a device (it can no longer read what is written from now on;
-    /// what it had stays with it).
+    /// The main Mac removes a device: its changes stop counting. Until key rotation (C1) it can
+    /// still read new changes while it can reach the folder.
     pub fn remove_device(&mut self, device: DeviceId, wall_ms: u64) -> Result<()> {
         self.engine.revoke(device, wall_ms)
     }

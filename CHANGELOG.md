@@ -4,6 +4,29 @@ All notable changes to Keyorra are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [Semantic Versioning](https://semver.org/).
 
+## [0.2.0] - 2026-10-06
+
+### Added
+- **Sync through iCloud Drive or any folder you choose**, end-to-end encrypted. Turn it on in
+  Settings → Sync; this Mac becomes the main Mac and you get an Emergency Kit to print
+  (Secret Key, account, folder). Another Mac joins with the setup code or the Emergency Kit
+  and your main Mac approves it by typing the code the new Mac shows.
+- **Sync screen**: status, devices (approve, remove), alarms with explanations and actions,
+  Emergency Kit, Verify everything, What the folder sees, copies of your vault on this Mac,
+  sync log, turn off sync, start a new account.
+- Attachments sync too.
+- Item conflicts are kept as copies; an edit always beats a concurrent delete.
+
+### Security
+- Per-device signed, hash-chained logs; only the main Mac's word changes who counts; rollback,
+  fork and withheld-change detection; padded segments; device keys sealed to the Secure Enclave.
+- Removing a device stops its changes from counting. Until key rotation (planned) it can still
+  read new changes while it can reach the folder: also sign it out of iCloud.
+
+### Changed
+- The vault database is upgraded to format 2 the first time sync is turned on; a copy of the
+  old file is kept next to it and listed in Sync → Safety.
+
 ## [0.1.0] - 2026-10-05
 
 First public release.

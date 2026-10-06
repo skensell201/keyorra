@@ -53,8 +53,9 @@ const ACTION_CONFIRM: Record<Exclude<AlarmAction, "accept">, { title: string; bo
     title: "Remove this device?",
     body: (
       <>
-        It can no longer read what is written from now on, and its paused changes are not taken. What it already has
-        stays on it. If you do not recognise it, change your master password too.
+        Its changes stop counting on your other devices, and its paused changes are not taken. It still holds the
+        account key, so it can read new changes for as long as it can reach the sync folder. If you do not recognise
+        it, also remove its access to the folder (iCloud: sign it out of your Apple ID) and start a new account.
       </>
     ),
   },
@@ -723,8 +724,9 @@ function SyncOn({
             void run(() => api.removeSyncDevice(d.id));
           }}
         >
-          It can no longer read what is written from now on. What it already has stays on it: if it was stolen,
-          change your master password and consider starting a new account.
+          Its changes stop counting on your other devices. It still holds the account key, so it can read new
+          changes for as long as it can reach the sync folder. If it was lost or stolen, also remove its access to the
+          folder (iCloud: sign it out of your Apple ID) and start a new account (Advanced).
         </ConfirmDialog>
       )}
       {turningOff && (

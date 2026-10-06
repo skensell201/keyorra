@@ -37,6 +37,12 @@ Website: [keyorra.com](https://keyorra.com)
 - **Touch ID** unlock (the master password is still required every 14 days and after your
   fingerprints change).
 - **Menu bar** item and **⌘⇧Space** quick search from anywhere.
+- **Sync** between your Macs through **iCloud Drive** or any folder you choose (Dropbox, Google
+  Drive, a network drive), end-to-end encrypted: the folder only ever holds ciphertext, padded
+  and signed per device. A 128-bit **Secret Key** (in your printed Emergency Kit) is mixed into
+  the keys, so a copy of the folder is useless without it. Your **main Mac** approves every new
+  device by a code you type, and can remove devices. The Sync screen shows exactly what the
+  folder holds and can verify everything.
 - **Browser extensions** for Chrome and other Chromium browsers (Brave, Edge, Opera, Yandex),
   Firefox and Safari: autofill logins and one-time codes, save new logins and update changed
   passwords, offer a strong password on sign-up forms, and fill cards and addresses.
@@ -94,6 +100,15 @@ fields inside separate iframes (e.g. Stripe Elements) are filled one field at a 
 - Touch ID keeps a wrapped account key in the macOS keychain, accessible only to the signed app.
 - Only audited crates are used for cryptography (`argon2`, `chacha20poly1305`, `p256`); there
   are no hand-written primitives.
+
+- **Sync**: each record is sealed twice (account layer hides even its kind; vault layer binds it
+  to its header), packed into padded, hash-chained segments signed with a per-device Ed25519
+  key kept sealed to this Mac's Secure Enclave. Only the main Mac can approve or remove devices;
+  rollbacks, forks and withheld changes raise alarms. Removing a device stops its changes from
+  counting; until key rotation lands it can still read new changes while it reaches the folder,
+  so also cut its access to the folder (sign it out of iCloud). The protocol is public:
+  [docs/sync-protocol.md](docs/sync-protocol.md), with test vectors and the
+  [sync design](docs/superpowers/specs/2026-10-05-keyorra-sync-design.md).
 
 Details: [design spec](docs/superpowers/specs/2026-10-02-lockbox-mvp-design.md) (written under
 the project's earlier working name). To report a vulnerability, see [SECURITY.md](SECURITY.md).
@@ -156,9 +171,8 @@ socket and nothing else; `safari/check/sandbox-check.sh` checks it against the r
 
 ## Roadmap
 
-- Sync between your devices, end-to-end encrypted, your choice of transport:
-  iCloud Drive or any synced folder (Dropbox, Google Drive, Syncthing) first, then a
-  self-hosted Keyorra server for Linux (single binary or Docker), then WebDAV and S3
+- A self-hosted Keyorra sync server for Linux (single binary or Docker), then WebDAV and S3
+- Key rotation, so a removed device can no longer read new changes
 - iPhone app
 - Sharing vaults with family
 - Passkeys

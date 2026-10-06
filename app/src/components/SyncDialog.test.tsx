@@ -241,7 +241,7 @@ test("review A3 I6: removing and leaving from an alarm are confirmed; Cancel doe
   render(<SyncDialog onClose={vi.fn()} />);
   const alarms = await screen.findByRole("region", { name: "Alarms" });
   await user.click(within(alarms).getByRole("button", { name: "Remove device" }));
-  expect(within(screen.getByRole("alertdialog")).getByText(/can no longer read/)).toBeInTheDocument();
+  expect(within(screen.getByRole("alertdialog")).getByText(/stop counting/)).toBeInTheDocument();
   await user.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Cancel" }));
   expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
   await user.click(within(alarms).getByRole("button", { name: "Continue as a new device" }));
