@@ -30,6 +30,7 @@ import { IconClose } from "./icons";
 import { JoinResult, JoinSync } from "./JoinSync";
 import { PathText } from "./PathText";
 import { SyncPlaceChooser } from "./SyncPlaceChooser";
+import { plural } from "../format";
 
 export const ACTION_LABEL: Record<AlarmAction, string> = {
   accept: "Accept",
@@ -244,8 +245,8 @@ function SyncOff({
               </p>
             )}
             <div className="modal-actions">
-              <button type="submit" className="primary" disabled={!password || busy || !place}>
-                {busy ? "Turning on…" : "Turn on sync"}
+              <button type="submit" className="primary" disabled={!password || busy || !place} aria-busy={busy}>
+                Turn on sync
               </button>
             </div>
           </form>
@@ -253,7 +254,7 @@ function SyncOff({
             <h3>Already syncing on another Mac?</h3>
             <div className="modal-actions">
               <button className="secondary" onClick={() => setJoining(true)}>
-                Join a synced account…
+                Join a synced account
               </button>
             </div>
           </section>
@@ -548,7 +549,7 @@ function SyncOn({
           )}
           <div className="modal-actions start">
             <button className="secondary" disabled={busy} onClick={() => openKit(null)}>
-              Emergency Kit…
+              Emergency Kit
             </button>
             <button
               className="secondary"
@@ -567,12 +568,12 @@ function SyncOn({
           </div>
           {report && (
             <p role="status" aria-label="Verify">
-              {report.items} item(s) and {report.attachments} attachment(s) checked.{" "}
+              {plural(report.items, "item")} and {plural(report.attachments, "attachment")} checked.{" "}
               {report.damaged + report.damagedAttachments + report.differing.length + report.missing === 0
                 ? "Everything matches."
                 : [
                     report.damaged && `${report.damaged} unreadable`,
-                    report.damagedAttachments && `${report.damagedAttachments} unreadable attachment(s)`,
+                    report.damagedAttachments && plural(report.damagedAttachments, "unreadable attachment"),
                     report.differing.length && `differs from sync: ${report.differing.join(", ")}`,
                     report.missing && `${report.missing} not here yet`,
                   ]
@@ -658,7 +659,7 @@ function SyncOn({
           </button>
           {status?.mainDevice && (
             <button className="danger" onClick={() => setStartingOver(true)}>
-              Start a new account…
+              Start a new account
             </button>
           )}
         </div>

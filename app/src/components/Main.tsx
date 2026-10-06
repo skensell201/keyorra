@@ -219,6 +219,7 @@ export function Main({ onLock }: { onLock: () => void }) {
         onImport={() => setImporting(true)}
         onLock={() => leaveEditor(onLock)}
         onSettings={() => setShowSettings(true)}
+        open={importing ? "import" : showSettings ? "settings" : null}
       />
       {selection.kind === "watchtower" ? (
         <Watchtower

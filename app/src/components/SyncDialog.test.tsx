@@ -89,7 +89,7 @@ test("another folder can be chosen, with its warning", async () => {
     warning: "Set this folder to stay downloaded",
   });
   render(<SyncDialog onClose={vi.fn()} />);
-  await user.click(await screen.findByRole("button", { name: "Choose another folder…" }));
+  await user.click(await screen.findByRole("button", { name: "Choose another folder" }));
   expect(api.setSyncPlace).toHaveBeenCalledWith("/Users/a/Library/CloudStorage/Dropbox");
   expect(await screen.findByText("Set this folder to stay downloaded")).toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "Use iCloud Drive" }));
@@ -160,7 +160,7 @@ test("the Emergency Kit asks for the password when it was not entered lately", a
     .mockResolvedValueOnce(kit);
   render(<SyncDialog onClose={vi.fn()} />);
   await openPane(user, "Safety");
-  await user.click(await screen.findByRole("button", { name: "Emergency Kit…" }));
+  await user.click(await screen.findByRole("button", { name: "Emergency Kit" }));
   await user.type(await screen.findByLabelText("Master password for the Emergency Kit"), "correct horse battery");
   await user.click(screen.getByRole("button", { name: "Show" }));
   expect(api.emergencyKit).toHaveBeenLastCalledWith("correct horse battery");
@@ -184,13 +184,13 @@ test("verify, folder files and the log", async () => {
   render(<SyncDialog onClose={vi.fn()} />);
   await openPane(user, "Safety");
   await user.click(await screen.findByRole("button", { name: "Verify everything" }));
-  expect(await screen.findByRole("status", { name: "Verify" })).toHaveTextContent("12 item(s) and 2 attachment(s) checked. Everything matches.");
+  expect(await screen.findByRole("status", { name: "Verify" })).toHaveTextContent("12 items and 2 attachments checked. Everything matches.");
   await user.click(screen.getByRole("button", { name: "What the folder sees" }));
   const table = await screen.findByRole("table", { name: "Folder files" });
   expect(within(table).getByText("2.0 KB")).toBeInTheDocument();
   expect(within(table).getByText("unknown, ignored")).toBeInTheDocument();
   await openPane(user, "Advanced");
-  expect(screen.getByText(/Received 2 change\(s\) from Laptop/)).toBeInTheDocument();
+  expect(screen.getByText(/Received 2 changes from Laptop/)).toBeInTheDocument();
 });
 
 test("turning sync off and starting a new account", async () => {
@@ -202,7 +202,7 @@ test("turning sync off and starting a new account", async () => {
   await user.click(await screen.findByRole("button", { name: "Turn off sync" }));
   await user.click(within(screen.getByRole("alertdialog")).getByRole("button", { name: "Turn off sync" }));
   expect(api.disableSync).toHaveBeenCalled();
-  await user.click(screen.getByRole("button", { name: "Start a new account…" }));
+  await user.click(screen.getByRole("button", { name: "Start a new account" }));
   const dialog = screen.getByRole("alertdialog");
   expect(within(dialog).getByText(/a device was stolen/)).toBeInTheDocument();
   await user.type(within(dialog).getByLabelText("Master password"), "correct horse battery");
@@ -260,7 +260,7 @@ test("review A3 I7: Escape while starting a new account does not close Sync", as
   const onClose = vi.fn();
   render(<SyncDialog onClose={onClose} />);
   await openPane(user, "Advanced");
-  await user.click(await screen.findByRole("button", { name: "Start a new account…" }));
+  await user.click(await screen.findByRole("button", { name: "Start a new account" }));
   await user.type(within(screen.getByRole("alertdialog")).getByLabelText("Master password"), "correct horse");
   fireEvent.keyDown(window, { key: "Escape" });
   expect(onClose).not.toHaveBeenCalled();
@@ -294,7 +294,7 @@ test("review A3 I7: Escape does not close Sync while the kit is shown or a comma
   fireEvent.keyDown(window, { key: "Escape" });
   expect(onClose).not.toHaveBeenCalled();
   // Minor: the other tools wait meanwhile, in every category.
-  for (const name of ["Emergency Kit…", "Verify everything", "What the folder sees"]) {
+  for (const name of ["Emergency Kit", "Verify everything", "What the folder sees"]) {
     expect(screen.getByRole("button", { name })).toBeDisabled();
   }
   await openPane(user, "Devices");
@@ -303,8 +303,8 @@ test("review A3 I7: Escape does not close Sync while the kit is shown or a comma
   expect(screen.getByRole("button", { name: "Sync now" })).toBeDisabled();
   await openPane(user, "Safety");
   finish({ items: 1, damaged: 0, attachments: 0, damagedAttachments: 0, differing: [], missing: 0 });
-  await waitFor(() => expect(screen.getByRole("button", { name: "Emergency Kit…" })).toBeEnabled());
-  await user.click(screen.getByRole("button", { name: "Emergency Kit…" }));
+  await waitFor(() => expect(screen.getByRole("button", { name: "Emergency Kit" })).toBeEnabled());
+  await user.click(screen.getByRole("button", { name: "Emergency Kit" }));
   await screen.findByRole("region", { name: "Emergency Kit" });
   fireEvent.keyDown(window, { key: "Escape" });
   expect(onClose).not.toHaveBeenCalled();
@@ -321,7 +321,7 @@ test("review A3: the folder table has headers; a wrong kit password is cleared",
   await user.click(await screen.findByRole("button", { name: "What the folder sees" }));
   const table = await screen.findByRole("table", { name: "Folder files" });
   expect(within(table).getAllByRole("columnheader").map((h) => h.textContent)).toEqual(["Name", "Size", "Status"]);
-  await user.click(screen.getByRole("button", { name: "Emergency Kit…" }));
+  await user.click(screen.getByRole("button", { name: "Emergency Kit" }));
   const input = await screen.findByLabelText("Master password for the Emergency Kit");
   await user.type(input, "wrong password");
   await user.click(screen.getByRole("button", { name: "Show" }));
@@ -428,7 +428,7 @@ test("with sync off, the folder and the actions sit side by side", async () => {
   render(<SyncDialog onClose={vi.fn()} />);
   expect(await screen.findByRole("region", { name: "Where" })).toBeInTheDocument();
   expect(screen.queryByRole("tablist")).not.toBeInTheDocument();
-  await user.click(screen.getByRole("button", { name: "Join a synced account…" }));
+  await user.click(screen.getByRole("button", { name: "Join a synced account" }));
   expect(screen.getByRole("form", { name: "Join a synced account" })).toBeInTheDocument();
   expect(screen.getAllByRole("region", { name: "Where" })).toHaveLength(1);
   await user.click(screen.getByRole("button", { name: "Cancel" }));

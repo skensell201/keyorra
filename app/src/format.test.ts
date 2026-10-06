@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { fieldText, formatCode } from "./format";
+import { fieldText, formatCode, plural } from "./format";
 
 test("field values as text", () => {
   expect(fieldText({ type: "text", value: "ivan" })).toBe("ivan");
@@ -15,4 +15,10 @@ test("one-time codes are grouped", () => {
 
 test("an out-of-range date falls back to the raw number", () => {
   expect(fieldText({ type: "date", value: 1e20 })).toBe("100000000000000000000");
+});
+
+test("counts take the right number", () => {
+  expect(plural(1, "change")).toBe("1 change");
+  expect(plural(0, "change")).toBe("0 changes");
+  expect(plural(3, "copy", "copies")).toBe("3 copies");
 });

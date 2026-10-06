@@ -12,6 +12,7 @@ use serde::Serialize;
 use sha2::{Digest, Sha256};
 
 use super::Synced;
+use crate::text::plural;
 
 /// One alarm as the Sync screen shows it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
@@ -158,7 +159,11 @@ impl<T: Transport> Synced<T> {
                         ),
                         Alarm::Unapproved { count } => (
                             "unapproved",
-                            format!("{count} device(s) wait for the main Mac's approval"),
+                            if *count == 1 {
+                                "1 device waits for the main Mac's approval".into()
+                            } else {
+                                format!("{count} devices wait for the main Mac's approval")
+                            },
                             "They joined with the Emergency Kit. Their changes count for nobody \
                              until the main Mac approves them."
                                 .into(),
@@ -271,13 +276,19 @@ impl<T: Transport> Synced<T> {
         Some(match event {
             // After a restart the Mac reads its own stream again: say so instead of "received".
             Event::Pulled { from, versions } if *from == self.engine.device() => {
-                format!("Re-read {versions} change(s) this Mac made earlier")
+                format!(
+                    "Re-read {} this Mac made earlier",
+                    plural(*versions, "change", "changes")
+                )
             }
             Event::Pulled { from, versions } => format!(
-                "Received {versions} change(s) from {}",
+                "Received {} from {}",
+                plural(*versions, "change", "changes"),
                 self.device_label(from)
             ),
-            Event::Pushed { versions } => format!("Sent {versions} change(s)"),
+            Event::Pushed { versions } => {
+                format!("Sent {}", plural(*versions, "change", "changes"))
+            }
             Event::PushFailed(e) => format!("Sending failed: {e}"),
             Event::Unreadable { from, .. } => format!(
                 "A file of {} could not be read yet; trying again",
@@ -288,7 +299,12 @@ impl<T: Transport> Synced<T> {
                 self.device_label(from)
             ),
             Event::Alarm(a) => format!("Alarm: {a}"),
-            Event::Resolved { copies, .. } => format!("Made {copies} conflict copy(ies)"),
+            Event::Resolved { copies, .. } => {
+                format!(
+                    "Made {}",
+                    plural(*copies, "conflict copy", "conflict copies")
+                )
+            }
             Event::Retired { reason, .. } => format!(
                 "This Mac continues under a new identity ({}); the main Mac approves it again",
                 match reason {

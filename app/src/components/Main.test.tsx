@@ -142,7 +142,7 @@ test("new vault and lock", async () => {
 test("import opens the dialog", async () => {
   const user = userEvent.setup();
   render(<Main onLock={vi.fn()} />);
-  await user.click(await screen.findByRole("button", { name: "Import…" }));
+  await user.click(await screen.findByRole("button", { name: "Import" }));
   expect(screen.getByRole("dialog", { name: "Import from 1Password" })).toBeInTheDocument();
 });
 
@@ -176,7 +176,7 @@ test("recently deleted lists deleted items and restores one", async () => {
 test("settings open from the sidebar", async () => {
   const user = userEvent.setup();
   render(<Main onLock={vi.fn()} />);
-  await user.click(await screen.findByRole("button", { name: "Settings…" }));
+  await user.click(await screen.findByRole("button", { name: "Settings" }));
   expect(await screen.findByRole("dialog", { name: "Settings" })).toBeInTheDocument();
 });
 

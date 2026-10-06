@@ -189,7 +189,7 @@ export function SettingsDialog({ onClose, onOpenSync }: { onClose: () => void; o
             <p className="muted">Keep this vault in step across your Macs through iCloud Drive or a folder you choose.</p>
             <div className="modal-actions">
               <button className="secondary" onClick={onOpenSync}>
-                Sync settings…
+                Sync settings
               </button>
             </div>
           </section>

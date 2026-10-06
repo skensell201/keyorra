@@ -690,8 +690,9 @@ impl Session {
         self.password_verified_at = Some(now);
         if report.trashed_left + report.damaged > 0 {
             self.sync_notices = vec![format!(
-                "{} item(s) in Recently Deleted and {} unreadable item(s) stayed in the old file",
-                report.trashed_left, report.damaged
+                "{} in Recently Deleted and {} stayed in the old file",
+                crate::text::plural(report.trashed_left, "item", "items"),
+                crate::text::plural(report.damaged, "unreadable item", "unreadable items")
             )];
         }
         // The new vault is in place: sync that cannot start now starts on the next round.

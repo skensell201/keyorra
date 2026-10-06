@@ -84,15 +84,15 @@ test("an unreadable database offers to start over", async () => {
   expect(await screen.findByRole("heading", { name: "This file is not a Keyorra database" })).toBeInTheDocument();
   expect(screen.getByText(/never deleted/)).toBeInTheDocument();
 
-  // A double click on "Start over…" must not also confirm: the second step is a dialog.
-  await user.dblClick(screen.getByRole("button", { name: "Start over…" }));
+  // A double click on "Start over" must not also confirm: the second step is a dialog.
+  await user.dblClick(screen.getByRole("button", { name: "Start over" }));
   expect(api.startOver).not.toHaveBeenCalled();
   const dialog = screen.getByRole("alertdialog", { name: "Move the file aside and start over?" });
   await user.click(within(dialog).getByRole("button", { name: "Back" }));
   expect(screen.queryByRole("alertdialog")).not.toBeInTheDocument();
   expect(api.startOver).not.toHaveBeenCalled();
 
-  await user.click(screen.getByRole("button", { name: "Start over…" }));
+  await user.click(screen.getByRole("button", { name: "Start over" }));
   // Enter on the freshly opened dialog goes back, never forward.
   expect(screen.getByRole("button", { name: "Back" })).toHaveFocus();
   await user.click(screen.getByRole("button", { name: "Move aside and start over" }));

@@ -68,7 +68,7 @@ test("a new Mac can join a synced account instead", async () => {
   render(<Setup onDone={onDone} />);
   await user.click(screen.getByRole("button", { name: /Join your synced account/ }));
   // Review A3: where to look for the account is shown (and can be changed) on first run too.
-  expect(await screen.findByRole("button", { name: "Choose another folder…" })).toBeInTheDocument();
+  expect(await screen.findByRole("button", { name: "Choose another folder" })).toBeInTheDocument();
   expect(await screen.findByText(/CloudDocs\/Keyorra/)).toBeInTheDocument();
   await user.type(screen.getByLabelText("Master password"), "correct horse battery");
   await user.type(screen.getByLabelText("Setup code or Secret Key"), "KEYORRA-SETUP-1-XYZ");

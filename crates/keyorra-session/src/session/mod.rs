@@ -530,8 +530,9 @@ impl Session {
             return Err(CmdError::new(
                 ErrorKind::Invalid,
                 format!(
-                    "\"{}\" still has {} item(s). Delete them first.",
-                    vault.name, vault.item_count
+                    "\"{}\" still has {}. Delete them first.",
+                    vault.name,
+                    crate::text::plural(vault.item_count, "item", "items")
                 ),
             ));
         }

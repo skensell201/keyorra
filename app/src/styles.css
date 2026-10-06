@@ -122,6 +122,9 @@ button.secondary { background: var(--surface-2); border-color: transparent; }
 button.primary { background: var(--cta-bg); border-color: transparent; color: var(--cta-text); padding: 8px 20px; font-weight: 700; }
 button.primary:hover:not(:disabled) { background: var(--cta-bg); filter: brightness(1.12); }
 button.danger { border-color: transparent; background: color-mix(in srgb, var(--danger) 14%, transparent); color: var(--danger); }
+/* A command under way: the label stays, a small ring turns beside it. */
+button[aria-busy="true"]::after { content: ""; width: 11px; height: 11px; flex-shrink: 0; border-radius: 50%; border: 2px solid currentColor; border-right-color: transparent; animation: spin 700ms linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
 button.icon { width: 30px; height: 30px; padding: 0; border-color: transparent; border-radius: 999px; color: var(--muted); }
 button.icon:hover:not(:disabled) { color: var(--text); }
 button.icon.done { color: var(--success); }
@@ -160,8 +163,11 @@ h3 { font-size: 14px; letter-spacing: -0.01em; }
 .sidebar .nav svg { color: var(--muted); flex-shrink: 0; transition: color var(--fast) var(--ease); }
 .sidebar .nav .count { margin-left: auto; font-family: var(--mono); font-size: 12px; color: var(--muted); }
 .sidebar .nav:hover:not(:disabled) { background: var(--hover); color: var(--text); }
-.sidebar .nav[aria-current="true"] { background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
-.sidebar .nav[aria-current="true"] svg { color: var(--text); }
+.sidebar .nav[aria-current="true"], .sidebar .nav[aria-expanded="true"] { background: var(--surface); color: var(--text); box-shadow: var(--shadow); }
+.sidebar .nav[aria-current="true"] svg, .sidebar .nav[aria-expanded="true"] svg { color: var(--text); }
+.sidebar .nav:hover:not(:disabled) svg { color: var(--text); }
+/* Import, Settings, Lock: the same items as above, set apart by a hairline. */
+.sidebar-footer { display: flex; flex-direction: column; gap: 2px; margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--line); }
 .sidebar .heading { color: var(--muted); font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; padding: 18px 10px 6px; }
 .sidebar .spacer { flex: 1; }
 .sidebar form input { margin: 2px 0; }

@@ -196,9 +196,12 @@ impl fmt::Display for Alarm {
                 "the main device approved this device with another key: its joining request \
                  was replaced; join again and compare the code",
             ),
+            Alarm::Unapproved { count: 1 } => f.write_str(
+                "1 device joined with the Emergency Kit and was not approved by the main device",
+            ),
             Alarm::Unapproved { count } => write!(
                 f,
-                "{count} device(s) joined with the Emergency Kit and were not approved by the \
+                "{count} devices joined with the Emergency Kit and were not approved by the \
                  main device"
             ),
         }

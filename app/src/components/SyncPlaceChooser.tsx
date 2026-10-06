@@ -64,7 +64,7 @@ export function SyncPlaceChooser({ onPlace }: { onPlace?: (place: SyncPlace | nu
           </button>
         )}
         <button type="button" className="secondary" onClick={chooseFolder}>
-          Choose another folder…
+          Choose another folder
         </button>
       </div>
     </section>

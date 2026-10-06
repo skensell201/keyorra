@@ -71,8 +71,8 @@ export function Watchtower({ report, selectedId, onOpen, onReport }: Props) {
                 Check your passwords against the Have I Been Pwned list of breached passwords. Only the first 5 characters
                 of each password's SHA-1 hash are sent (k-anonymity): your passwords never leave this Mac.
               </p>
-              <button className="primary" onClick={check} disabled={busy}>
-                {busy ? "Checking…" : "Check for breaches"}
+              <button className="primary" onClick={check} disabled={busy} aria-busy={busy}>
+                Check for breaches
               </button>
               {error && (
                 <p className="error" role="alert">

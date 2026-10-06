@@ -27,7 +27,7 @@ test("pick, preview, import", async () => {
   const onClose = vi.fn();
   render(<ImportDialog onClose={onClose} onImported={onImported} />);
 
-  await user.click(screen.getByRole("button", { name: "Choose export file…" }));
+  await user.click(screen.getByRole("button", { name: "Choose export file" }));
   expect(api.importPreview).toHaveBeenCalledWith("/Users/me/Downloads/export.1pux");
   expect(await screen.findByText("Personal — 120 items")).toBeInTheDocument();
   expect(screen.getByText("Datagile — 34 items")).toBeInTheDocument();
@@ -44,9 +44,9 @@ test("cancelling the file picker stays on the first step", async () => {
   const user = userEvent.setup();
   vi.mocked(open).mockResolvedValue(null);
   render(<ImportDialog onClose={vi.fn()} onImported={vi.fn()} />);
-  await user.click(screen.getByRole("button", { name: "Choose export file…" }));
+  await user.click(screen.getByRole("button", { name: "Choose export file" }));
   expect(api.importPreview).not.toHaveBeenCalled();
-  expect(screen.getByRole("button", { name: "Choose export file…" })).toBeInTheDocument();
+  expect(screen.getByRole("button", { name: "Choose export file" })).toBeInTheDocument();
 });
 
 test("shows parse errors and can be cancelled", async () => {
@@ -54,7 +54,7 @@ test("shows parse errors and can be cancelled", async () => {
   const onClose = vi.fn();
   vi.mocked(api.importPreview).mockRejectedValue({ kind: "invalid", message: "invalid data: not a .1pux file" });
   render(<ImportDialog onClose={onClose} onImported={vi.fn()} />);
-  await user.click(screen.getByRole("button", { name: "Choose export file…" }));
+  await user.click(screen.getByRole("button", { name: "Choose export file" }));
   expect(await screen.findByRole("alert")).toHaveTextContent("not a .1pux file");
   await user.click(screen.getByRole("button", { name: "Cancel" }));
   expect(onClose).toHaveBeenCalled();
@@ -71,7 +71,7 @@ test("singular counts read naturally", async () => {
   const user = userEvent.setup();
   vi.mocked(api.importApply).mockResolvedValue({ vaults: 1, items: 1, attachments: 0 });
   render(<ImportDialog onClose={vi.fn()} onImported={vi.fn()} />);
-  await user.click(screen.getByRole("button", { name: "Choose export file…" }));
+  await user.click(screen.getByRole("button", { name: "Choose export file" }));
   await user.click(await screen.findByRole("button", { name: "Import 154 items" }));
   expect(await screen.findByText("Imported 1 item into 1 vault (0 attachments).")).toBeInTheDocument();
 });
