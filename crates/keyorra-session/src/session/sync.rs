@@ -56,7 +56,12 @@ pub trait SyncLink: Send {
 pub struct EmergencyKitDto {
     pub account_id: String,
     pub secret_key: String,
+    /// Kept in Rust: the app copies it to the clipboard itself (review A3), so it never
+    /// reaches the web view.
+    #[serde(skip_serializing)]
     pub setup_code: String,
+    /// Where the account lives (the folder path), when the link knows it.
+    pub location: Option<String>,
 }
 
 /// One line of the Sync log.
@@ -247,6 +252,23 @@ fn wall_ms(now: u64) -> u64 {
     now.saturating_mul(1000)
 }
 
+/// A key code as the user typed it, in the form it is shown (`xxxx-xxxx-xxxx`, lower-case
+/// hex): case, dashes and anything else that is not a hex digit are ignored.
+fn normalize_key_code(typed: &str) -> CmdResult<String> {
+    let hex: String = typed
+        .chars()
+        .filter(char::is_ascii_hexdigit)
+        .map(|c| c.to_ascii_lowercase())
+        .collect();
+    if hex.len() != 12 {
+        return Err(CmdError::new(
+            ErrorKind::Invalid,
+            "The code has 12 letters and digits",
+        ));
+    }
+    Ok(format!("{}-{}-{}", &hex[0..4], &hex[4..8], &hex[8..12]))
+}
+
 impl Session {
     pub fn set_sync_link(&mut self, link: Box<dyn SyncLink>) {
         self.sync_link = Some(link);
@@ -271,6 +293,26 @@ impl Session {
         let result = f(self, link.as_ref());
         self.sync_link = Some(link);
         result
+    }
+
+    /// Whether the place sync accounts live in may change now: only while sync is off,
+    /// which is known only while unlocked (or before the first vault exists, to join on
+    /// first run).
+    pub fn may_change_sync_place(&self) -> CmdResult<()> {
+        match self.status() {
+            Status::New => Ok(()),
+            Status::Locked => Err(locked()),
+            Status::Unlocked => {
+                if self.sync_status()?.enabled {
+                    Err(CmdError::new(
+                        ErrorKind::Invalid,
+                        "Turn sync off before choosing another folder",
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+        }
     }
 
     /// Called right after every unlock: sync continues where it stopped. A failure is kept
@@ -394,6 +436,7 @@ impl Session {
             account_id: kit.account_id,
             secret_key: kit.secret_key.to_string(),
             setup_code: synced.setup_code().to_text().to_string(),
+            location: self.link()?.location(&account),
         };
         self.synced = Some(synced);
         self.note_round(first_round, now);
@@ -446,10 +489,14 @@ impl Session {
             .as_ref()
             .ok_or_else(|| CmdError::new(ErrorKind::Invalid, "Sync is off"))?;
         let kit = synced.emergency_kit();
+        let location = s::account_id(self.store()?)
+            .ok()
+            .and_then(|a| self.link().ok().and_then(|l| l.location(&a)));
         Ok(EmergencyKitDto {
             account_id: kit.account_id,
             secret_key: kit.secret_key.to_string(),
             setup_code: synced.setup_code().to_text().to_string(),
+            location,
         })
     }
 
@@ -686,12 +733,13 @@ impl Session {
             .ok()
             .and_then(|b| b.try_into().ok())
             .ok_or_else(|| CmdError::new(ErrorKind::Invalid, "Unknown device"))?;
+        let code = normalize_key_code(code)?;
         let synced = self
             .synced
             .as_mut()
             .ok_or_else(|| CmdError::new(ErrorKind::Invalid, "Sync is off"))?;
         synced
-            .approve(device, code.trim(), wall_ms(now))
+            .approve(device, &code, wall_ms(now))
             .map_err(sync_error)
     }
 
@@ -747,6 +795,7 @@ impl Session {
             account_id: kit.account_id,
             secret_key: kit.secret_key.to_string(),
             setup_code: synced.setup_code().to_text().to_string(),
+            location: self.link()?.location(&account),
         };
         self.synced = Some(synced);
         self.note_round(first_round, now);

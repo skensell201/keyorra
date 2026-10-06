@@ -642,3 +642,129 @@ fn backup_copies_are_listed_and_deleted() {
     assert!(!base.join("keyorra.db.pre-sync-20261006-journal").exists());
     assert_eq!(s.backups().unwrap().len(), 1);
 }
+
+// ---- review of A3 ----
+
+/// The main Mac and a second Mac waiting for approval; returns the waiting device's id and
+/// the key code it shows.
+fn a_mac_waiting() -> (
+    Place,
+    (tempfile::TempDir, Session),
+    (tempfile::TempDir, Session),
+    String,
+    String,
+) {
+    let place = Place::default();
+    let (d1, mut main) = unlocked_session();
+    link(&mut main, &place, "Main");
+    let kit = main.enable_sync(PW, 1_001).unwrap();
+    let (d2, mut laptop) = new_session();
+    link(&mut laptop, &place, "Laptop");
+    laptop.join_sync(PW, &kit.setup_code, 1_002).unwrap();
+    let code = laptop.sync_status().unwrap().status.unwrap().key_code;
+    main.sync_now(1_003).unwrap();
+    let id = main
+        .sync_status()
+        .unwrap()
+        .status
+        .unwrap()
+        .devices
+        .into_iter()
+        .find(|d| !d.approved)
+        .unwrap()
+        .id;
+    (place, (d1, main), (d2, laptop), id, code)
+}
+
+fn approved(main: &Session, id: &str) -> bool {
+    main.sync_status()
+        .unwrap()
+        .status
+        .unwrap()
+        .devices
+        .iter()
+        .any(|d| d.id == id && d.approved)
+}
+
+/// Review A3 I1: the approval code is compared with case and dashes ignored.
+#[test]
+fn review_a3_approval_code_in_upper_case() {
+    let (_p, (_d1, mut main), _laptop, id, code) = a_mac_waiting();
+    main.approve_device(&id, &code.to_uppercase(), 1_004)
+        .unwrap();
+    assert!(approved(&main, &id));
+}
+
+#[test]
+fn review_a3_approval_code_without_dashes_or_with_spaces() {
+    let (_p, (_d1, mut main), _laptop, id, code) = a_mac_waiting();
+    let typed = format!(" {} ", code.replace('-', " ").to_uppercase());
+    main.approve_device(&id, &typed.replace(' ', ""), 1_004)
+        .unwrap();
+    assert!(approved(&main, &id));
+}
+
+#[test]
+fn review_a3_approval_code_of_the_wrong_length_is_refused() {
+    let (_p, (_d1, mut main), _laptop, id, code) = a_mac_waiting();
+    let short = &code[..code.len() - 1];
+    let err = main.approve_device(&id, short, 1_004).unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Invalid);
+    let err = main
+        .approve_device(&id, &format!("{code}0"), 1_005)
+        .unwrap_err();
+    assert_eq!(err.kind, ErrorKind::Invalid);
+    assert!(!approved(&main, &id));
+}
+
+/// Review A3 I5: the Emergency Kit says where the account lives; the setup code never
+/// leaves Rust in the kit (it is copied by the app from Rust).
+#[test]
+fn review_a3_the_kit_has_the_location_and_no_setup_code_in_json() {
+    let place = Place::default();
+    let (_d, mut main) = unlocked_session();
+    link(&mut main, &place, "Main");
+    let kit = main.enable_sync(PW, 1_001).unwrap();
+    assert_eq!(
+        kit.location,
+        Some(format!("place/{}", kit.account_id)),
+        "the kit shown right after turning on"
+    );
+    assert_eq!(
+        main.emergency_kit(None, 1_002).unwrap().location,
+        kit.location
+    );
+    let json = serde_json::to_value(&kit).unwrap();
+    assert!(json.get("setupCode").is_none(), "{json}");
+    assert!(json.get("location").is_some());
+    let renewed = main.start_new_sync_account(PW, 1_003).unwrap();
+    assert_eq!(
+        renewed.location,
+        Some(format!("place/{}", renewed.account_id))
+    );
+}
+
+/// Review A3 I2: the sync place changes only while sync is off, which is known only while
+/// unlocked (or before the first vault exists, for joining on first run).
+#[test]
+fn review_a3_the_sync_place_changes_only_while_unlocked_and_off() {
+    let place = Place::default();
+    let (_d0, fresh) = new_session();
+    assert_eq!(fresh.status(), Status::New);
+    fresh.may_change_sync_place().unwrap();
+
+    let (_d, mut main) = unlocked_session();
+    link(&mut main, &place, "Main");
+    main.may_change_sync_place().unwrap();
+    main.enable_sync(PW, 1_001).unwrap();
+    assert_eq!(
+        main.may_change_sync_place().unwrap_err().kind,
+        ErrorKind::Invalid
+    );
+    main.lock();
+    assert_eq!(
+        main.may_change_sync_place().unwrap_err().kind,
+        ErrorKind::Locked,
+        "locked: whether sync is on is not known"
+    );
+}
