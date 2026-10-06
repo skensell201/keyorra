@@ -39,7 +39,7 @@ test("creates a vault, imports and locks", async () => {
   await user.click(screen.getByRole("button", { name: "+ New vault" }));
   await user.type(screen.getByLabelText("Vault name"), "Work{Enter}");
   expect(props.onNewVault).toHaveBeenCalledWith("Work");
-  await user.click(screen.getByRole("button", { name: "Import…" }));
+  await user.click(screen.getByRole("button", { name: "Import" }));
   expect(props.onImport).toHaveBeenCalled();
   await user.click(screen.getByRole("button", { name: "Lock" }));
   expect(props.onLock).toHaveBeenCalled();
@@ -50,7 +50,7 @@ test("recently deleted and settings", async () => {
   const props = setup();
   await user.click(screen.getByRole("button", { name: "Recently Deleted" }));
   expect(props.onSelect).toHaveBeenCalledWith({ kind: "trash" });
-  await user.click(screen.getByRole("button", { name: "Settings…" }));
+  await user.click(screen.getByRole("button", { name: "Settings" }));
   expect(props.onSettings).toHaveBeenCalled();
 });
 
@@ -98,4 +98,25 @@ test("watchtower entry with its count", async () => {
   expect(button).toHaveTextContent("4");
   await user.click(button);
   expect(onSelect).toHaveBeenCalledWith({ kind: "watchtower" });
+});
+
+test("the item whose dialog is open is drawn as selected, like the other items", () => {
+  render(
+    <Sidebar
+      vaults={vaults}
+      selection={{ kind: "all" }}
+      open="settings"
+      onSelect={vi.fn()}
+      onNewVault={vi.fn()}
+      onRenameVault={vi.fn()}
+      onDeleteVault={vi.fn()}
+      onImport={vi.fn()}
+      onLock={vi.fn()}
+      onSettings={vi.fn()}
+    />,
+  );
+  const settings = screen.getByRole("button", { name: "Settings" });
+  expect(settings).toHaveAttribute("aria-haspopup", "dialog");
+  expect(settings).toHaveAttribute("aria-expanded", "true");
+  expect(screen.getByRole("button", { name: "Import" })).toHaveAttribute("aria-expanded", "false");
 });

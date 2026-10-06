@@ -92,6 +92,57 @@ export const IconEyeOff = icon(
 export const IconPencil = icon(<path d="M5 19l1-4.5L15.5 5a2.1 2.1 0 013 3L9 17.5zM13.5 7l3 3" />);
 export const IconShield = icon(<path d="M12 3.5l7 2.8v5.2c0 4.3-2.9 7.6-7 9-4.1-1.4-7-4.7-7-9V6.3z" />);
 export const IconClose = icon(<path d="M6 6l12 12M18 6L6 18" />);
+export const IconSliders = icon(
+  <>
+    <path d="M4 7h9M17 7h3M4 17h3M11 17h9" />
+    <circle cx="15" cy="7" r="2" />
+    <circle cx="9" cy="17" r="2" />
+  </>,
+);
+export const IconSync = icon(
+  <>
+    <path d="M19.5 9.5A7.5 7.5 0 006.2 6.8L4.5 8.5M4.5 4.5v4h4" />
+    <path d="M4.5 14.5a7.5 7.5 0 0013.3 2.7l1.7-1.7M19.5 19.5v-4h-4" />
+  </>,
+);
+export const IconGlobe = icon(
+  <>
+    <circle cx="12" cy="12" r="8.5" />
+    <path d="M3.5 12h17M12 3.5c2.3 2.4 3.4 5.2 3.4 8.5s-1.1 6.1-3.4 8.5c-2.3-2.4-3.4-5.2-3.4-8.5S9.7 5.9 12 3.5z" />
+  </>,
+);
+export const IconLaptop = icon(
+  <>
+    <rect x="5" y="5" width="14" height="10" rx="1.8" />
+    <path d="M2.5 18.5h19" />
+  </>,
+);
+export const IconAlert = icon(
+  <>
+    <path d="M12 4l9 15.5H3z" />
+    <path d="M12 10v4.5M12 17h.01" />
+  </>,
+);
+export const IconShieldCheck = icon(
+  <>
+    <path d="M12 3.5l7 2.8v5.2c0 4.3-2.9 7.6-7 9-4.1-1.4-7-4.7-7-9V6.3z" />
+    <path d="M9 12l2.2 2.2L15.5 10" />
+  </>,
+);
+export const IconLifebuoy = icon(
+  <>
+    <circle cx="12" cy="12" r="8.5" />
+    <circle cx="12" cy="12" r="3.5" />
+    <path d="M6 6l3.5 3.5M14.5 14.5L18 18M18 6l-3.5 3.5M9.5 14.5L6 18" />
+  </>,
+);
+export const IconFolder = icon(<path d="M3.5 7.5a2 2 0 012-2h4l2 2h7a2 2 0 012 2v8a2 2 0 01-2 2h-13a2 2 0 01-2-2z" />);
+export const IconArchive = icon(
+  <>
+    <rect x="3.5" y="4.5" width="17" height="4" rx="1.2" />
+    <path d="M5 8.5v9.5a1.5 1.5 0 001.5 1.5h11a1.5 1.5 0 001.5-1.5V8.5M10 12.5h4" />
+  </>,
+);
 
 const KIND_ICON: Record<ItemKind, ReturnType<typeof icon>> = {
   login: icon(

@@ -146,8 +146,8 @@ export function Unlock({ onUnlocked, onStartOver, justLocked = false }: Props) {
               {error}
             </p>
           )}
-          <button className="primary" onClick={() => setConfirmStartOver(true)} disabled={busy}>
-            {busy ? "Moving…" : "Start over…"}
+          <button className="primary" onClick={() => setConfirmStartOver(true)} disabled={busy} aria-busy={busy}>
+            Start over
           </button>
           {confirmStartOver && (
             <ConfirmDialog
@@ -183,8 +183,8 @@ export function Unlock({ onUnlocked, onStartOver, justLocked = false }: Props) {
             {wait > 0 ? `Too many attempts. Try again in ${wait} s.` : error}
           </p>
         )}
-        <button className="primary" type="submit" disabled={busy || !password || wait > 0}>
-          {busy ? "Unlocking…" : "Unlock"}
+        <button className="primary" type="submit" disabled={busy || !password || wait > 0} aria-busy={busy}>
+          Unlock
         </button>
         {canTouch && (
           <button type="button" onClick={touchUnlock} disabled={busy}>

@@ -17,10 +17,13 @@ interface Props {
   onImport: () => void;
   onLock: () => void;
   onSettings: () => void;
+  /** The dialog opened from the bottom of the sidebar, drawn as selected while it is open. */
+  open?: "import" | "settings" | null;
 }
 
 export function Sidebar(props: Props) {
-  const { vaults, selection, watchtowerCount, onSelect, onNewVault, onRenameVault, onDeleteVault, onImport, onLock, onSettings } = props;
+  const { vaults, selection, watchtowerCount, onSelect, onNewVault, onRenameVault, onDeleteVault, onImport, onLock, onSettings, open } =
+    props;
   const [renaming, setRenaming] = useState<string | null>(null);
   const [newName, setNewName] = useState("");
   const [naming, setNaming] = useState(false);
@@ -131,18 +134,20 @@ export function Sidebar(props: Props) {
         </button>
       )}
       <div className="spacer" />
-      <button className="nav" onClick={onImport}>
-        <IconImport />
-        Import…
-      </button>
-      <button className="nav" onClick={onSettings}>
-        <IconSettings />
-        Settings…
-      </button>
-      <button className="nav" onClick={onLock}>
-        <IconLock />
-        Lock
-      </button>
+      <div className="sidebar-footer">
+        <button className="nav" aria-haspopup="dialog" aria-expanded={open === "import"} onClick={onImport}>
+          <IconImport />
+          Import
+        </button>
+        <button className="nav" aria-haspopup="dialog" aria-expanded={open === "settings"} onClick={onSettings}>
+          <IconSettings />
+          Settings
+        </button>
+        <button className="nav" onClick={onLock}>
+          <IconLock />
+          Lock
+        </button>
+      </div>
     </nav>
   );
 }

@@ -1,6 +1,6 @@
 import { useEffect, useState } from "react";
 import { api, errorMessage, type Field, type Item, type TotpCode } from "../api";
-import { fieldText, formatCode, KIND_LABEL } from "../format";
+import { fieldText, formatCode, KIND_LABEL, plural } from "../format";
 import { IconCheck, IconCopy, IconEye, IconEyeOff, KindIcon } from "./icons";
 
 interface Props {
@@ -154,7 +154,7 @@ export function ItemDetail({ itemId, onEdit, onDeleted }: Props) {
         <p className="muted">Attachments: {item.attachments.map((a) => a.name).join(", ")}</p>
       )}
       {item.password_history.length > 0 && (
-        <p className="muted">Password changed {item.password_history.length} time(s)</p>
+        <p className="muted">Password changed {plural(item.password_history.length, "time")}</p>
       )}
       {copied && (
         <div className="toast" role="status">

@@ -30,3 +30,8 @@ export function formatCode(code: string): string {
   if (code.length === 8) return `${code.slice(0, 4)} ${code.slice(4)}`;
   return code;
 }
+
+/** "1 item", "3 items": a count with its noun in the right number. */
+export function plural(count: number, one: string, many = `${one}s`): string {
+  return `${count} ${count === 1 ? one : many}`;
+}

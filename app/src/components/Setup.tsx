@@ -74,8 +74,8 @@ export function Setup({ onDone }: { onDone: () => void }) {
             {error}
           </p>
         )}
-        <button className="primary" type="submit" disabled={!valid || busy}>
-          {busy ? "Creating…" : "Create vault"}
+        <button className="primary" type="submit" disabled={!valid || busy} aria-busy={busy}>
+          Create vault
         </button>
         <button type="button" className="link" onClick={() => setJoining(true)}>
           Already use Keyorra on another Mac? Join your synced account

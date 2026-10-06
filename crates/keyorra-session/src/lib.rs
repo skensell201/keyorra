@@ -9,6 +9,7 @@ pub mod session;
 pub mod settings;
 pub mod sleep;
 pub mod sync;
+mod text;
 pub mod throttle;
 pub mod touchid;
 pub mod watchtower;

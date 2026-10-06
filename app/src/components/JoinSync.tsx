@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { api, errorMessage, isCmdError, type JoinOutcome, type SyncPlace } from "../api";
+import { plural } from "../format";
 import { SyncPlaceChooser } from "./SyncPlaceChooser";
 
 /**
@@ -48,7 +49,7 @@ export function JoinSync({
       <SyncPlaceChooser onPlace={setPlace} />
       <form className="join-sync" onSubmit={submit} aria-label="Join a synced account">
         <p className="muted">
-          On a Mac where Keyorra already syncs, open Settings → Sync → Emergency Kit and copy the setup code. Paste it
+          On a Mac where Keyorra already syncs, open Settings → Sync → Safety → Emergency Kit and copy the setup code. Paste it
           here with your master password.
         </p>
         <label>
@@ -76,8 +77,8 @@ export function JoinSync({
               Cancel
             </button>
           )}
-          <button type="submit" className="primary" disabled={!valid}>
-            {busy ? "Joining…" : "Join"}
+          <button type="submit" className="primary" disabled={!valid} aria-busy={busy}>
+            Join
           </button>
         </div>
       </form>
@@ -101,9 +102,9 @@ export function JoinResult({ outcome, onDone }: { outcome: JoinOutcome; onDone: 
       )}
       {outcome.mode === "carriedOver" && (
         <p className="muted">
-          {outcome.copied} item(s) from this Mac were copied into the account.
+          {plural(outcome.copied, "item")} from this Mac {outcome.copied === 1 ? "was" : "were"} copied into the account.
           {outcome.trashedLeft + outcome.damaged > 0 &&
-            ` ${outcome.trashedLeft} in Recently Deleted and ${outcome.damaged} unreadable item(s) stayed in the old file, kept next to the vault.`} Touch ID is off for the new vault; turn it on again in Settings.
+            ` ${outcome.trashedLeft} in Recently Deleted and ${plural(outcome.damaged, "unreadable item")} stayed in the old file, kept next to the vault.`} Touch ID is off for the new vault; turn it on again in Settings.
         </p>
       )}
       <div className="modal-actions">

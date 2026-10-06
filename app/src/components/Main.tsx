@@ -16,9 +16,8 @@ import { ItemEditor } from "./ItemEditor";
 import { PairingDialog } from "./PairingDialog";
 import { ItemList } from "./ItemList";
 import { TrashItem } from "./TrashItem";
-import { SettingsDialog } from "./SettingsDialog";
+import { SettingsDialog, type SettingsPlace } from "./SettingsDialog";
 import { SyncBanner } from "./SyncBanner";
-import { SyncDialog } from "./SyncDialog";
 import { Sidebar, type Selection } from "./Sidebar";
 import { Watchtower } from "./Watchtower";
 
@@ -31,8 +30,8 @@ export function Main({ onLock }: { onLock: () => void }) {
   const [items, setItems] = useState<ItemSummary[]>([]);
   const [pane, setPane] = useState<Pane>({ mode: "empty" });
   const [importing, setImporting] = useState(false);
-  const [showSettings, setShowSettings] = useState(false);
-  const [showSync, setShowSync] = useState(false);
+  /** Where Settings is open, if it is: a category, and for Sync one of its sections. */
+  const [settingsAt, setSettingsAt] = useState<SettingsPlace | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [pairing, setPairing] = useState<PairingRequest | null>(null);
   const [report, setReport] = useState<WatchtowerReport | null>(null);
@@ -218,7 +217,8 @@ export function Main({ onLock }: { onLock: () => void }) {
         onDeleteVault={(v) => leaveEditor(() => askDeleteVault(v))}
         onImport={() => setImporting(true)}
         onLock={() => leaveEditor(onLock)}
-        onSettings={() => setShowSettings(true)}
+        onSettings={() => setSettingsAt({ category: "general" })}
+        open={importing ? "import" : settingsAt ? "settings" : null}
       />
       {selection.kind === "watchtower" ? (
         <Watchtower
@@ -242,7 +242,7 @@ export function Main({ onLock }: { onLock: () => void }) {
         />
       )}
       <section className="detail">
-        <SyncBanner onOpen={() => setShowSync(true)} onSynced={refresh} />
+        <SyncBanner onOpen={(section) => setSettingsAt({ category: "sync", sync: section })} onSynced={refresh} />
         {error && (
           <div className="banner error" role="alert">
             {error}
@@ -286,16 +286,13 @@ export function Main({ onLock }: { onLock: () => void }) {
         )}
       </section>
       {importing && <ImportDialog onClose={() => setImporting(false)} onImported={refresh} />}
-      {showSettings && (
+      {settingsAt && (
         <SettingsDialog
-          onClose={() => setShowSettings(false)}
-          onOpenSync={() => {
-            setShowSettings(false);
-            setShowSync(true);
-          }}
+          initial={settingsAt}
+          onClose={() => setSettingsAt(null)}
+          onSyncChanged={() => void refresh()}
         />
       )}
-      {showSync && <SyncDialog onClose={() => setShowSync(false)} onChanged={() => void refresh()} />}
       {deletingVault && (
         <ConfirmDialog
           title={`Delete vault "${deletingVault.name}"?`}

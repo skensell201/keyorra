@@ -42,7 +42,7 @@ test("devices waiting for approval, after a round", async () => {
   expect(onSynced).toHaveBeenCalled();
   expect(await screen.findByRole("status")).toHaveTextContent("1 device asked to join your account");
   await user.click(screen.getByRole("button", { name: "Review" }));
-  expect(onOpen).toHaveBeenCalled();
+  expect(onOpen).toHaveBeenCalledWith("devices");
 });
 
 test("changes not yet confirmed by the main Mac", async () => {

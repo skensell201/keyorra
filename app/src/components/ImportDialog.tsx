@@ -111,7 +111,7 @@ export function ImportDialog({ onClose, onImported }: { onClose: () => void; onI
           )}
           {step.kind === "pick" && (
             <button className="primary" onClick={choose} disabled={busy}>
-              Choose export file…
+              Choose export file
             </button>
           )}
           {step.kind === "preview" && (

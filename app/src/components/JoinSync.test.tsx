@@ -32,7 +32,7 @@ test("review A3: without iCloud Drive, a folder is chosen before joining", async
   await user.type(screen.getByLabelText("Master password"), "correct horse battery");
   await user.type(screen.getByLabelText("Setup code or Secret Key"), "KEYORRA-SETUP-1-XYZ");
   expect(screen.getByRole("button", { name: "Join" })).toBeDisabled();
-  await user.click(screen.getByRole("button", { name: "Choose another folder…" }));
+  await user.click(screen.getByRole("button", { name: "Choose another folder" }));
   expect(api.setSyncPlace).toHaveBeenCalledWith("/Volumes/nas");
   expect(await screen.findByText("/Volumes/nas/Keyorra")).toBeInTheDocument();
   await user.click(screen.getByRole("button", { name: "Join" }));
@@ -72,7 +72,7 @@ test("after joining: the code to compare, and what was carried over", () => {
     />,
   );
   expect(screen.getByTestId("key-code")).toHaveTextContent("0a1b-2c3d-4e5f");
-  expect(screen.getByText(/7 item\(s\) from this Mac were copied/)).toHaveTextContent(
-    "2 in Recently Deleted and 1 unreadable item(s) stayed in the old file",
+  expect(screen.getByText(/7 items from this Mac were copied/)).toHaveTextContent(
+    "2 in Recently Deleted and 1 unreadable item stayed in the old file",
   );
 });

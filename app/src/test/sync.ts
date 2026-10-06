@@ -22,7 +22,7 @@ export function syncScreen(overrides: Partial<SyncScreen> = {}): SyncScreen {
     },
     alarms: [],
     notices: [],
-    log: [{ at: 1_790_000_000, text: "Received 2 change(s) from Laptop" }],
+    log: [{ at: 1_790_000_000, text: "Received 2 changes from Laptop" }],
     ...overrides,
   };
 }
